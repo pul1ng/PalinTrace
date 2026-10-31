@@ -1,0 +1,38 @@
+# Dependencies
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+# Only the LLM template is versioned under config/.
+/config/*
+!/config/llm/
+/config/llm/*
+!/config/llm/llm.example.toml
+llm.local.toml
+
+# Local data: dataset exports, image archives, recorded trajectories
+data/
+
+# Generated deliverables
+/outputs/
+
+# Snapshot optimization experiment outputs
+/docs/record_dev/step的快照优化/tasks/*/evidence/
+/docs/record_dev/step的快照优化/control/integration-*/
+/docs/record_dev/step的快照优化/control/check-slots/
+/docs/record_dev/step的快照优化/.resource.lock
+/docs/record_dev/step的快照优化/.任务索引.lock
+
+# macOS metadata in any directory
+.DS_Store

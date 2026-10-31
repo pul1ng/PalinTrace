@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'">
+<link rel="icon" href="data:,">
+<title>PalinReplay · Record 轨迹</title>
+<style>
+:root{--ink:#26303d;--muted:#7c8593;--line:#e9ecf1;--soft:#f7f8fa;--blue:#537ee5;--purple:#9878b6;--orange:#d88b3c;--green:#59a884;--teal:#3d9d98;--red:#dc5b59;--mono:ui-monospace,SFMono-Regular,Consolas,monospace}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}button,input,select{font:inherit}button{cursor:pointer;color:inherit}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px}button{background:none;border:0}button:disabled{cursor:default;opacity:.4}[hidden]{display:none!important}code,pre,.mono{font-family:var(--mono)}.muted{color:var(--muted)}.number{font-variant-numeric:tabular-nums}.tag{display:inline-flex;align-items:center;border-radius:4px;padding:3px 8px;font-size:12px;white-space:nowrap;background:#f0f2f5;color:#717a88}.tag.ok{color:#388262;background:#eaf6ef}.tag.paused{color:#a97b30;background:#fbf2df}.tag.input{color:var(--blue);background:#ecf1ff}.tag.model{color:#8563a3;background:#f1ebf7}.tag.tool{color:#b87729;background:#fcf1e3}.tag.accepted{color:#458f69;background:#e9f5ed}.tag.snapshot{color:#348982;background:#e8f5f3}.tag.commit{color:#5076ca;background:#edf2ff}.tag.error{color:var(--red);background:#fff0ed}
+.topbar{padding:22px 28px 14px;display:flex;align-items:center;gap:14px}.brandmark{width:34px;height:34px;display:grid;place-items:center;background:#eff3ff;color:#527be1;font-weight:700;font-size:19px;border-radius:9px}.heading{min-width:0;flex:1}h1{font-size:18px;margin:0 0 4px;font-weight:650;letter-spacing:-.2px}.run-label{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.top-actions{display:flex;align-items:center;gap:9px}.quiet{padding:7px 10px;border-radius:6px;color:#727d8c}.quiet:hover{background:var(--soft);color:var(--ink)}.outline{border:1px solid #e0e5ed;border-radius:7px;padding:7px 12px;background:white}.outline:hover{border-color:#b8c9e9;color:var(--blue)}
+.navigation{display:flex;align-items:center;gap:30px;padding:0 28px;border-bottom:1px solid var(--line)}.main-tab{padding:15px 0 12px;border-bottom:2px solid transparent;font-weight:550;color:#89919c}.main-tab[aria-selected=true]{color:var(--blue);border-bottom-color:var(--blue)}.top-stats{margin-left:auto;display:flex;gap:25px;color:var(--muted);font-size:12px}.top-stats strong{color:#455164;font-size:15px;font-weight:550;margin-right:5px}.toolbar{min-height:51px;padding:8px 24px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--line)}.control{padding:7px 9px;color:#86909d;font-size:13px;border-radius:5px;white-space:nowrap}.control:hover{background:#f3f5f9}.control[aria-pressed=true]{color:var(--blue);background:#f0f4ff}.control-separator{height:17px;width:1px;background:var(--line);margin:0 5px}.search{margin-left:auto;display:flex;align-items:center;gap:7px;border:1px solid #e1e5eb;border-radius:7px;padding:6px 10px;max-width:290px;width:25%;color:#a5adba}.search input{border:0;outline:none;width:100%;min-width:0;font-size:13px;color:#455165;background:transparent}.search:focus-within{border-color:#93adeb}.search input::placeholder{color:#a0a8b5}.filter{font-size:12px;color:#7f8996;padding:6px;border:1px solid var(--line);border-radius:5px;background:white;max-width:112px}
+.overview{padding:12px 24px 0;border-bottom:1px solid var(--line);background:#fff}.phase-ribbon{display:flex;gap:4px;padding-left:50px;margin:0 0 9px}.phase-ribbon button{flex:1;min-width:0;font-size:11px;text-align:left;padding:4px 8px;background:#f6f8fb;border-radius:3px;color:#6f7c8d;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.phase-ribbon button:hover{background:#ebf0fa;color:#496fb6}.phase-ribbon b{font-weight:500;color:#546478;margin-right:7px}.timeline{display:grid;grid-template-columns:50px minmax(0,1fr);gap:0}.lane-labels{height:144px;display:flex;flex-direction:column;padding-top:20px;color:#98a1ae;font-size:11px}.lane-labels span{height:20px;display:flex;align-items:center}.timeline-plot{position:relative;height:144px;min-width:0}.axis{position:absolute;top:0;left:0;right:0;height:20px;font-family:var(--mono);font-size:10px;color:#9aa3b0}.tick{position:absolute;transform:translateX(-50%)}.tick:first-child{transform:none}.tick:last-child{transform:translateX(-100%)}.gridline{position:absolute;top:20px;bottom:3px;width:1px;background:#f0f2f6;pointer-events:none}.lane{position:absolute;left:0;right:0;height:20px;background:linear-gradient(to bottom,transparent 19px,#fafbfc 19px)}.timeline-block{position:absolute;height:10px;min-width:3px;border-radius:1.5px;top:5px;opacity:.86;padding:0;transition:opacity .15s}.timeline-block:hover{opacity:1;box-shadow:0 0 0 2px #fff,0 0 0 3px #9bb3e7;z-index:3}.timeline-block.selected{box-shadow:0 0 0 2px white,0 0 0 3px var(--blue);opacity:1;z-index:4}.timeline-block.dim{opacity:.13}.timeline-block.error{background:var(--red)!important}.guide{position:absolute;top:17px;bottom:2px;border-left:1px dashed #6489df;pointer-events:none;z-index:2}.timeline-caption{font-size:11px;color:#9ba3ae;display:flex;justify-content:space-between;margin:2px 0 9px;padding-left:50px;gap:12px}.node-strip{display:flex;gap:9px;padding:10px 0 12px;border-top:1px solid #f2f4f7;align-items:center;overflow-x:auto}.node-strip>span{color:#8a94a3;font-size:12px;margin-right:8px}.node-button{position:relative;min-width:54px;flex:1;max-width:110px;white-space:nowrap;border:1px solid #e7ebf0;background:#fff;border-radius:5px;padding:5px 8px;font:12px var(--mono);color:#7b8798}.node-button::before{content:'';width:5px;height:5px;border-radius:50%;background:#96b5aa;display:inline-block;margin-right:6px}.node-button.reused::before{background:white;border:1px solid #88a79c}.node-button.active{border-color:#9cb6eb;color:var(--blue);background:#f2f6ff}.node-button:hover{border-color:#aebfda}
+.workspace{display:grid;grid-template-columns:minmax(0,1fr) 370px;min-height:460px;height:calc(100vh - 388px)}.ledger{overflow:auto;scroll-behavior:smooth;min-width:0;padding-bottom:30px}.group-heading{display:flex;align-items:center;gap:8px;background:#f8f9fb;border-top:1px solid var(--line);border-bottom:1px solid #eef0f4;padding:8px 20px;font-size:12px;color:#8c95a3;position:sticky;top:0;z-index:6;min-height:37px}.group-heading:first-child{border-top:0}.group-toggle{font-size:12px;padding:2px;color:#8d97a5;display:flex;align-items:center;gap:7px;white-space:nowrap}.group-toggle strong{font-weight:550;color:#556171}.group-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.group-total{margin-left:auto;color:#8490a1;font-family:var(--mono);white-space:nowrap;font-size:11px}.record-row{display:grid;grid-template-columns:36px 62px minmax(0,1fr) 70px;gap:9px;align-items:center;width:100%;text-align:left;border-bottom:1px solid #f1f3f6;padding:10px 18px;min-height:46px;background:#fff}.record-row:hover{background:#f8faff}.record-row.selected{background:#f0f5ff;box-shadow:inset 3px 0 var(--blue)}.row-index{font:10px var(--mono);color:#aab2bf;text-align:center}.row-title{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#465163}.record-row.tool .row-title{font:12px var(--mono);color:#586478}.row-preview{color:#9aa2ad;font-size:12px;margin-left:10px}.row-time{font:11px var(--mono);text-align:right;color:#8c96a4}.record-row.error .row-preview{color:var(--red)}.empty-state{text-align:center;color:#8994a4;padding:70px 20px;line-height:2}.detail{border-left:1px solid var(--line);background:#fcfdff;overflow:auto;padding:23px 23px 40px;min-width:0}.detail-topline{font-size:11px;color:#8994a6;letter-spacing:.5px;display:flex;align-items:center;gap:8px}.detail h2{font-size:18px;line-height:1.5;margin:12px 0 8px;font-weight:600;overflow-wrap:anywhere}.detail-description{font-size:12px;line-height:1.85;color:#7a8697;margin:0 0 18px}.detail-metrics{display:grid;grid-template-columns:1fr 1fr;gap:13px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:14px 0}.metric-label{font-size:11px;color:#929cab;margin-bottom:5px}.metric-value{font:16px var(--mono);color:#4b5e75}.detail-tabs{display:flex;gap:20px;border-bottom:1px solid var(--line);margin:15px 0}.detail-tabs button{font-size:12px;color:#909aaa;padding:8px 0;border-bottom:2px solid transparent}.detail-tabs button.active{color:var(--blue);border-bottom-color:var(--blue)}.subhead{font-size:12px;font-weight:550;color:#62738b;margin:22px 0 12px}.phase-item{display:grid;grid-template-columns:18px 1fr auto;gap:7px;font-size:12px;margin:14px 0;color:#637084}.phase-item .dot{width:7px;height:7px;border-radius:50%;background:#81b4aa;margin:5px}.phase-item p{margin:4px 0 0;font-size:11px;color:#94a0af;line-height:1.7}.phase-item .sec{font:11px var(--mono);color:#7c8a9b;padding-top:3px}.bar-line{height:4px;background:#eff2f6;border-radius:2px;margin-top:7px;overflow:hidden}.bar-line i{display:block;height:100%;background:#88b8b0}.small-note{font-size:11px;color:#97a0ae;line-height:1.9;margin:13px 0}.kv{display:grid;grid-template-columns:100px minmax(0,1fr);gap:8px;font-size:11px;line-height:1.8;color:#8692a3}.kv b{font-weight:400;color:#5a6b83;overflow-wrap:anywhere}.detail details{margin:12px 0}.detail summary{font-size:12px;color:#6b7e98;cursor:pointer}.detail pre,.source-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:11px/1.8 var(--mono);background:#f1f4f8;color:#66758b;padding:13px;border-radius:5px;max-height:410px;overflow:auto;margin-top:10px}.event-chain{display:flex;flex-wrap:wrap;gap:6px;margin:15px 0}.event-chain span{font-size:10px;color:#61927b;background:#edf6f0;border-radius:4px;padding:5px}.event-chain span.off{background:#f6f2ee;color:#9d9388}.source-ref{margin-top:22px;padding-top:12px;border-top:1px solid var(--line);font:10px/1.7 var(--mono);color:#9aa5b5;overflow-wrap:anywhere}.detail-action{margin-top:18px;font-size:12px;color:var(--blue);padding:8px 11px;background:#edf3ff;border-radius:5px}.detail-action:hover{background:#e4edff}.current-hidden{font-size:11px;background:#fff7e8;padding:8px;color:#aa844b;border-radius:4px;line-height:1.6;margin-bottom:12px}
+.player{height:44px;border-top:1px solid var(--line);background:white;display:flex;align-items:center;gap:9px;padding:5px 24px;color:#97a1af;font-size:11px}.player button{border:1px solid #e7ebf1;border-radius:5px;min-width:30px;height:28px;color:#7587a2}.player button:hover{background:#f4f7fc}.player #play{min-width:83px;font-size:12px;color:#5b7dc0}.player-track{flex:1;max-width:340px;accent-color:#8eaae4;min-width:45px;height:16px}.player .footnote{margin-left:auto;font-size:11px}.hover-tooltip{position:fixed;background:#344156;color:#fff;border-radius:6px;padding:9px 12px;font-size:11px;line-height:1.7;max-width:260px;z-index:30;pointer-events:none;box-shadow:0 5px 18px #23314c18}
+.flow-view{padding:24px 30px;max-width:1280px;margin:auto}.flow-header{display:flex;gap:6px;align-items:center;margin-bottom:20px}.flow-switch{padding:8px 14px;color:#8490a2;border-radius:6px;font-size:13px}.flow-switch[aria-pressed=true]{background:#edf2fb;color:#567dc9}.flow-subtitle{font-size:12px;color:#8f9aae;margin-left:auto}.flow-grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:48px}.flow-path{display:flex;flex-direction:column;gap:5px;padding-bottom:25px}.flow-node{display:grid;grid-template-columns:34px 1fr;align-items:center;gap:12px;text-align:left;padding:10px 13px;border:1px solid #e9edf4;border-radius:7px;min-height:56px;position:relative;background:white}.flow-node:not(:last-child)::after{content:'';position:absolute;left:30px;bottom:-6px;height:5px;border-left:1px solid #c9d4e4}.flow-node:hover{border-color:#a9bddf}.flow-node.active{border-color:#9cb8e6;background:#f2f6ff}.flow-node .idx{font:11px var(--mono);color:#91a0b6}.flow-node strong{font-size:13px;font-weight:550;color:#617089}.flow-node small{display:block;font-size:10px;color:#9aa6b7;margin-top:4px}.flow-explanation{padding-top:13px;min-width:0}.flow-explanation h2{font-size:24px;font-weight:550;letter-spacing:-.4px;margin:12px 0 17px}.flow-explanation p{font-size:14px;line-height:2;color:#7a8799;max-width:700px}.flow-items{list-style:none;padding:0;margin:24px 0}.flow-items li{padding:14px 0;border-bottom:1px solid #eef1f5;display:flex;gap:15px;line-height:1.8;color:#5e7089;font-size:14px}.flow-items li span{font:12px var(--mono);color:#9aaac1;padding-top:4px}.flow-rule{background:#f3f7fb;border-left:3px solid #acc4e7;padding:15px 18px;margin:25px 0;font-size:13px;line-height:1.9;color:#7589a4}.flow-source{font:11px/1.8 var(--mono);color:#a0aaba;overflow-wrap:anywhere}.flow-links{display:flex;flex-wrap:wrap;gap:10px}.flow-links button{padding:9px 14px;color:#5980c6;background:#eef4fd;border-radius:5px;font-size:12px}.source-dialog{border:1px solid #e7ecf3;border-radius:12px;max-width:720px;width:calc(100% - 32px);max-height:86vh;padding:25px 28px;box-shadow:0 20px 80px #1a274430;color:#5d6b80}.source-dialog::backdrop{background:#25324840;backdrop-filter:blur(2px)}.source-dialog h2{font-size:18px;margin:0}.dialog-title{display:flex;justify-content:space-between;align-items:center}.source-dialog p,.source-dialog li{font-size:13px;line-height:1.9}.source-dialog ul{padding-left:20px}.source-dialog h3{font-size:13px;color:#607da8;margin-top:24px}.source-dialog .paths{font:11px/1.9 var(--mono);overflow-wrap:anywhere;color:#929fb0}.source-dialog .close{font-size:22px;color:#94a1b4}.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.branch-map{display:grid;grid-template-columns:150px 1fr 1fr;gap:22px;align-items:center;margin:0 0 24px;padding:16px;background:#f7f9fc;border:1px solid #e9eef5;border-radius:7px;font-size:12px;color:#8290a4}.branch-map button{border:1px solid #dce5f1;border-radius:5px;padding:11px;text-align:left;background:white;color:#607894}.branch-map button:hover{border-color:#8eb0e1}.branch-options{display:grid;gap:8px}.branch-map small{display:block;margin-top:5px;color:#97a3b4;font-size:10px;line-height:1.7}.branch-merge{display:grid;gap:9px;text-align:center}.branch-entry{text-align:center}.branch-entry button{width:100%}.branch-entry p{font-size:11px;line-height:1.8;margin:8px 0 0}.branch-merge span{color:#a2b3c9}@media(max-width:760px){.branch-map{grid-template-columns:1fr;gap:12px;font-size:11px;padding:12px}.branch-options{grid-template-columns:1fr 1fr}.branch-entry p{margin-bottom:0}.branch-merge{grid-template-columns:1fr 12px 1fr;align-items:center}.branch-map small{font-size:9px}}
+@media(min-width:761px){body{height:100dvh;display:flex;flex-direction:column;overflow:hidden}.topbar,.navigation{flex-shrink:0}main{flex:1;min-height:0}#trace-view{height:100%;display:flex;flex-direction:column}.toolbar,.overview,.player{flex-shrink:0}.workspace{flex:1;min-height:0;height:auto}.flow-view{height:100%;overflow:auto}}
+@media(min-width:1800px){.workspace{grid-template-columns:minmax(0,1fr) 430px}.detail{padding:28px 32px}.row-title{font-size:14px}.record-row{min-height:50px}}
+@media(max-width:1050px){.workspace{grid-template-columns:minmax(0,1fr) 325px}.top-stats{gap:15px}.top-stats .secondary{display:none}.toolbar{padding-left:15px;padding-right:15px;gap:3px}.search{width:24%}.detail{padding:18px}.record-row{padding-left:10px;padding-right:12px;grid-template-columns:25px 54px minmax(0,1fr) 55px;gap:6px}.group-heading{padding-left:13px}.group-note{max-width:190px}.flow-grid{grid-template-columns:250px minmax(0,1fr);gap:28px}.flow-subtitle{display:none}}
+@media(max-width:760px){.topbar{padding:18px 16px 10px;gap:10px}.top-actions .tag{display:none}.top-actions .outline{padding:6px 8px;font-size:11px}.topbar h1{font-size:16px}.brandmark{width:30px;height:30px}.navigation{padding:0 17px;gap:23px}.top-stats{font-size:10px;gap:8px}.top-stats strong{font-size:12px}.top-stats .snapshot-stat{display:none}.toolbar{flex-wrap:wrap;gap:3px;padding:7px 12px}.control{font-size:11px;padding:7px}.filter{margin-left:auto;font-size:11px;max-width:105px}.search{order:2;width:100%;max-width:none;margin-left:0;margin-top:4px}.overview{padding:9px 13px 0}.phase-ribbon{padding-left:0;gap:3px}.phase-ribbon button{font-size:9px;padding:5px}.phase-ribbon button b{display:block;margin-bottom:3px}.timeline{grid-template-columns:37px minmax(0,1fr)}.timeline-caption{padding-left:0;font-size:10px}.timeline-caption .hint{display:none}.node-strip{gap:6px}.node-button{min-width:49px}.workspace{height:auto;grid-template-columns:1fr;min-height:0}.ledger{height:430px;scroll-behavior:auto;border-bottom:1px solid var(--line)}.detail{border-left:0;max-height:none;padding:22px 20px}.detail h2{font-size:18px}.detail-description{max-width:650px}.detail-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.group-note{max-width:175px}.record-row{grid-template-columns:24px 52px minmax(0,1fr) 52px;gap:5px;min-height:44px}.tag{font-size:11px;padding:3px 6px}.row-time{font-size:10px}.row-title,.record-row.tool .row-title{font-size:11px}.row-preview{font-size:10px}.player{position:sticky;bottom:0;padding:6px 12px;z-index:7}.player .footnote{display:none}.flow-view{padding:16px}.flow-header{flex-wrap:wrap;gap:2px}.flow-switch{font-size:12px;padding:8px 10px}.flow-grid{grid-template-columns:1fr;gap:15px}.flow-path{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:0}.flow-node{padding:8px;grid-template-columns:27px 1fr;gap:5px;min-height:60px}.flow-node strong{font-size:11px}.flow-node small{font-size:9px}.flow-node:not(:last-child)::after{display:none}.flow-explanation{padding-top:0}.flow-explanation h2{font-size:20px}.flow-explanation p{font-size:13px}.flow-items li{font-size:13px}.source-dialog{padding:18px}.top-stats .store-stat{display:none}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+.node-strip>span{white-space:nowrap;flex-shrink:0}
+.overview{--timeline-label-width:50px}
+.timeline{grid-template-columns:var(--timeline-label-width) minmax(0,1fr)}
+.phase-ribbon{position:relative;display:block;height:28px;padding:0;margin:0 0 9px var(--timeline-label-width)}
+[data-phase-index="0"]{--phase-color:#416bb4;--phase-bg:#eaf1ff}
+[data-phase-index="1"]{--phase-color:#287b70;--phase-bg:#e3f5ef}
+[data-phase-index="2"]{--phase-color:#8253a6;--phase-bg:#f0e8fa}
+[data-phase-index="3"]{--phase-color:#a06b21;--phase-bg:#fff2d9}
+.phase-ribbon button{position:absolute;top:0;height:28px;min-width:0;padding:0;border:0;border-top:2px solid var(--phase-color);border-radius:3px;background:var(--phase-bg);color:var(--phase-color);box-shadow:inset -1px 0 #fff;transition:opacity .15s;overflow:hidden}
+.phase-ribbon button:hover,.phase-ribbon button:focus-visible{background:var(--phase-bg);color:var(--phase-color)}
+.phase-copy{display:block;padding:4px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.phase-ribbon b{display:inline;color:inherit;font-weight:600;margin-right:6px}
+.phase-ribbon button.phase-compact .phase-copy{padding-left:2px;padding-right:2px;text-align:center}
+.phase-ribbon button.phase-dim{opacity:.35}
+.phase-ribbon button.phase-highlight{filter:saturate(1.2);box-shadow:inset 0 -2px var(--phase-color)}
+.phase-window{position:absolute;top:20px;bottom:3px;pointer-events:none;opacity:0;background:var(--phase-bg)}
+.phase-window.phase-highlight{opacity:.65}
+.timeline-block.phase-highlight{opacity:1;box-shadow:0 0 0 1px white,0 0 0 2px var(--phase-color);z-index:5}
+.timeline-block.phase-dim,.guide.phase-dim{opacity:.1;box-shadow:none}
+.timeline-block.dim.phase-highlight{opacity:.2;box-shadow:none}
+.record-row.phase-dim,.group-heading.phase-dim,.node-button.phase-dim{opacity:.25}
+.record-row.phase-highlight{background:var(--phase-bg);box-shadow:inset 3px 0 var(--phase-color)}
+.group-heading.phase-highlight{background:var(--phase-bg)}
+.node-button.phase-highlight{background:var(--phase-bg);border-color:var(--phase-color);color:var(--phase-color)}
+@media(max-width:760px){.overview{--timeline-label-width:37px}.phase-ribbon button{font-size:10px}.phase-copy{padding:4px}}
+</style>
+</head>
+<body>
+<header class="topbar">
+ <div class="brandmark" aria-hidden="true">P</div>
+ <div class="heading"><h1>PalinReplay <span class="muted" style="font-weight:400">/ Record</span></h1><div class="run-label" id="run-label"></div></div>
+ <div class="top-actions"><span class="tag ok" id="record-status">录制完成</span><span class="tag paused" id="end-status"></span><button class="outline" id="sources">数据与源码</button></div>
+</header>
+<nav class="navigation" role="tablist" aria-label="页面视图">
+ <button class="main-tab" id="tab-trace" role="tab" aria-controls="trace-view" aria-selected="true">轨迹</button>
+ <button class="main-tab" id="tab-flow" role="tab" aria-controls="flow-view" aria-selected="false">流程拆解</button>
+ <div class="top-stats" id="top-stats"></div>
+</nav>
+<main>
+<section id="trace-view" role="tabpanel" aria-labelledby="tab-trace">
+ <div class="toolbar" role="toolbar" aria-label="轨迹操作">
+  <button class="control" id="duration" aria-pressed="true">◷ 真实时长</button><span class="control-separator"></span>
+  <button class="control" id="fold" aria-pressed="false">⊟ 轮次</button><button class="control" id="calls" aria-pressed="false">⊟ 工具调用</button>
+  <select class="filter" id="kind-filter" aria-label="筛选记录类型"><option value="all">全部类型</option><option value="snapshot">文件快照</option><option value="commit">节点提交</option><option value="model">模型请求</option><option value="tool">工具执行</option><option value="accepted">接纳事件</option><option value="system">启动与结束</option></select>
+  <label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" aria-label="搜索轨迹" placeholder="搜索命令、节点、结果…"></label>
+ </div>
+ <section class="overview" aria-label="轨迹时间轴">
+  <div class="phase-ribbon" id="phase-ribbon"></div>
+  <div class="timeline"><div class="lane-labels"><span>输入</span><span>模型</span><span>工具</span><span>接纳</span><span>快照</span><span>提交</span></div><div class="timeline-plot" id="timeline-plot"></div></div>
+  <div class="timeline-caption"><span id="timeline-summary"></span><span class="hint">点击色块定位记录 · 点击节点查看快照</span></div>
+  <div class="node-strip" id="node-strip" aria-label="已提交历史节点"></div>
+ </section>
+ <div class="workspace"><section class="ledger" id="ledger" aria-label="按步骤分组的记录"></section><aside class="detail" id="detail" aria-label="选中记录详情"></aside></div>
+ <div class="player"><button id="previous" aria-label="上一条记录">‹</button><button id="play" aria-pressed="false">▷ 浏览播放</button><button id="next" aria-label="下一条记录">›</button><input class="player-track" id="position" type="range" min="0" value="0" step="1" aria-label="选择记录"><span id="position-label"></span><span class="footnote">仅浏览已记录事实，不执行 Agent 或恢复容器</span></div>
+</section>
+<section class="flow-view" id="flow-view" role="tabpanel" aria-labelledby="tab-flow" hidden>
+ <div class="flow-header"><button class="flow-switch" data-flow="overall" aria-pressed="true">全程 · 12 步</button><button class="flow-switch" data-flow="step" aria-pressed="false">单个 Step · 10 步</button><button class="flow-switch" data-flow="snapshot" aria-pressed="false">快照 · C0 / Ci</button><span class="flow-subtitle">按 Btrfs 实现展开，点击左侧环节查看细节</span></div>
+ <div id="flow-branch" class="branch-map" hidden></div><div class="flow-grid"><div class="flow-path" id="flow-path"></div><article class="flow-explanation" id="flow-explanation"></article></div>
+</section>
+</main>
+<dialog class="source-dialog" id="source-dialog"><div class="dialog-title"><h2>数据与源码</h2><button class="close" aria-label="关闭数据与源码">×</button></div><div id="source-content"></div></dialog>
+<div class="hover-tooltip" id="tooltip" hidden></div><div class="visually-hidden" id="live" aria-live="polite"></div>
+<script type="application/json" id="record-data">__RECORD_DATA__</script>
+<script>
+(() => {
+'use strict';
+const D=JSON.parse(document.getElementById('record-data').textContent);
+const $=id=>document.getElementById(id), esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const seconds=x=>x==null?'未采集':x<.01?(x*1000).toFixed(1)+' ms':x.toFixed(2)+' s';
+const bytes=x=>{if(x==null)return '未采集';const v=Math.abs(x),s=x<0?'−':'';return s+(v>=1073741824?(v/1073741824).toFixed(2)+' GiB':v>=1048576?(v/1048576).toFixed(3)+' MiB':v>=1024?(v/1024).toFixed(1)+' KiB':v+' B');};
+const json=x=>JSON.stringify(x,null,2), shorten=(s,n=130)=>String(s??'').replace(/\s+/g,' ').slice(0,n);
+const K={system:{label:'系统',lane:0,color:'#98a1af'},input:{label:'输入',lane:0,color:'#7799e9'},model:{label:'模型',lane:1,color:'#9c80b8'},tool:{label:'工具',lane:2,color:'#d9974c'},accepted:{label:'接纳',lane:3,color:'#79b28b'},snapshot:{label:'快照',lane:4,color:'#69aaa3'},commit:{label:'节点',lane:5,color:'#6e92d4'}};
+const byId=new Map(D.events.map(e=>[e.id,e]));
+let selected=byId.has(location.hash.slice(1))?location.hash.slice(1):D.nodes[0].snapshot_event;
+let durationMode=D.timeline_complete,hideTools=false,collapsed=new Set(),query='',kind='all',detailTab='overview',timer=null,flowMode='overall',flowIndex=0;
+let activePhase=null;
+const phaseByGroup=new Map(D.phases.flatMap((p,i)=>p.groups.map(group=>[group,i])));
+const timed=D.events.filter(e=>e.start!==null&&e.duration!==null).sort((a,b)=>a.start-b.start||D.events.indexOf(a)-D.events.indexOf(b));
+const searchText=new Map(D.events.map(e=>[e.id,`${e.group} ${e.kind} ${K[e.kind].label} ${e.title} ${e.preview} ${json(e.data)}`.toLowerCase()]));
+function matches(e){return (kind==='all'||e.kind===kind)&&(!hideTools||e.kind!=='tool')&&query.trim().toLowerCase().split(/\s+/).filter(Boolean).every(t=>searchText.get(e.id).includes(t));}
+function listEvents(){return D.events.filter(matches);}
+function phaseRanges(){
+ const domain=Math.max(durationMode?D.total_sec:D.events.length,0.001);
+ let cursor=0;
+ return D.phases.map((p,i)=>{
+  const count=D.events.filter(e=>phaseByGroup.get(e.group)===i).length;
+  const start=durationMode?p.start:cursor,duration=durationMode?p.duration:count;
+  cursor+=count;
+  return {left:start/domain*100,width:duration/domain*100,count};
+ });
+}
+function applyPhaseHighlight(){
+ document.querySelectorAll('[data-phase-index]').forEach(element=>{
+  const match=Number(element.dataset.phaseIndex)===activePhase;
+  element.classList.toggle('phase-highlight',activePhase!==null&&match);
+  element.classList.toggle('phase-dim',activePhase!==null&&!match);
+ });
+}
+function setActivePhase(index){if(activePhase!==index){activePhase=index;applyPhaseHighlight();}}
+function renderPhases(){
+ const ranges=phaseRanges();
+ $('phase-ribbon').innerHTML=D.phases.map((p,i)=>{
+  const r=ranges[i],compact=r.width<7,label=compact?(i===1?'C0':String(i+1).padStart(2,'0')):String(i+1).padStart(2,'0')+' '+p.name;
+  return `<button class="${compact?'phase-compact':''}" data-phase="${p.event}" data-phase-index="${i}" aria-label="${esc(p.name+'，'+seconds(p.duration))}" style="left:${r.left}%;width:${r.width}%"><span class="phase-copy"><b>${esc(label)}</b>${compact?'':`<span>${seconds(p.duration)}</span>`}</span></button>`;
+ }).join('');
+ applyPhaseHighlight();
+}
+function setView(view){const trace=view==='trace';$('trace-view').hidden=!trace;$('flow-view').hidden=trace;$('tab-trace').setAttribute('aria-selected',trace);$('tab-flow').setAttribute('aria-selected',!trace);if(!trace)stop();}
+function select(id,{scroll=true,reveal=false}={}){
+ if(!byId.has(id))return;
+ if(reveal){query='';kind='all';hideTools=false;$('search').value='';$('kind-filter').value='all';$('calls').setAttribute('aria-pressed','false');$('calls').textContent='⊟ 工具调用';}
+ selected=id;detailTab='overview';collapsed.delete(byId.get(id).group);renderLedger();renderTimeline();renderDetail();$('detail').scrollTop=0;renderNodes();updatePlayer();
+ if(scroll){const r=$('ledger').querySelector(`[data-event="${id}"]`);if(r){const delta=r.getBoundingClientRect().top-$('ledger').getBoundingClientRect().top+$('ledger').scrollTop-50;$('ledger').scrollTo({top:Math.max(0,delta),behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});}}
+ history.replaceState(null,'','#'+id);$('live').textContent=`已选择 ${byId.get(id).group} ${byId.get(id).title}`;
+}
+function renderLedger(){
+ const all=D.groups.every(g=>collapsed.has(g.id));$('fold').setAttribute('aria-pressed',all);$('fold').textContent=all?'⊞ 轮次':'⊟ 轮次';
+ let count=0;
+ $('ledger').innerHTML=D.groups.map(g=>{const events=D.events.filter(e=>e.group===g.id&&matches(e));if(!events.length)return '';count+=events.length;
+ return `<div class="group-heading" data-phase-index="${phaseByGroup.get(g.id)}"><button class="group-toggle" data-group="${esc(g.id)}" aria-expanded="${!collapsed.has(g.id)}"><span>${collapsed.has(g.id)?'▸':'▾'}</span><strong>${esc(g.label)}</strong></button><span class="group-note">${esc(g.note)}</span><span class="group-total">${seconds(g.duration)}</span></div>${collapsed.has(g.id)?'':events.map(e=>{
+ const preview=e.kind==='tool'?` → exit ${e.exit_code??'?'} · ${shorten(e.preview,150)}`:e.preview;
+ return `<button type="button" class="record-row ${e.kind} ${e.error?'error':''} ${e.id===selected?'selected':''}" data-event="${e.id}" data-phase-index="${phaseByGroup.get(e.group)}" aria-pressed="${e.id===selected}"><span class="row-index">${String(D.events.indexOf(e)+1).padStart(2,'0')}</span><span><span class="tag ${e.kind} ${e.error?'error':''}">${K[e.kind].label}</span></span><span class="row-title">${esc(shorten(e.title,170))}<span class="row-preview">${esc(shorten(preview,170))}</span></span><span class="row-time">${seconds(e.duration)}</span></button>`;}).join('')}`;
+ }).join('') || '<div class="empty-state">没有匹配的记录<br>试试 C0、命令关键词，或清空筛选。</div>';
+ $('timeline-summary').textContent=`${D.nodes.length} 个节点 · ${D.counts.model_calls} 次模型调用 · ${D.counts.tool_calls} 次工具执行${D.timeline_complete?'':' · 计时明细未采集或已截断'}${query||kind!=='all'||hideTools?' · '+count+' 条匹配记录':''}`;
+ applyPhaseHighlight();
+}
+function renderTimeline(){
+ const events=durationMode?timed:D.events,domain=Math.max(durationMode?D.total_sec:events.length,0.001);
+ const ticks=Array.from({length:7},(_,i)=>domain*i/6);
+ let html='<div class="axis">'+ticks.map(t=>`<span class="tick" style="left:${t/domain*100}%">${durationMode?t.toFixed(t===D.total_sec?1:0)+'s':Math.round(t)}</span>`).join('')+'</div>';
+ html+=ticks.map(t=>`<div class="gridline" style="left:${t/domain*100}%"></div>`).join('');
+ html+=phaseRanges().map((r,i)=>`<div class="phase-window" data-phase-index="${i}" style="left:${r.left}%;width:${r.width}%"></div>`).join('');
+ for(let lane=0;lane<6;lane++)html+=`<div class="lane" style="top:${20+lane*20}px">${events.filter(e=>K[e.kind].lane===lane).map(e=>{
+ const ix=events.indexOf(e),left=(durationMode?e.start:ix)/domain*100,width=(durationMode?e.duration:0.75)/domain*100;
+ return `<button class="timeline-block ${e.id===selected?'selected':''} ${!matches(e)?'dim':''} ${e.error?'error':''}" data-timeline="${e.id}" data-phase-index="${phaseByGroup.get(e.group)}" aria-label="${esc(e.group+' '+e.title+' '+seconds(e.duration))}" style="left:clamp(0px,${left}%,calc(100% - 3px));width:${Math.min(100-left,width)}%;background:${K[e.kind].color}"></button>`;}).join('')}</div>`;
+ const current=byId.get(selected);if(!durationMode||current.start!==null){const x=(durationMode?current.start:events.indexOf(current))/domain*100;html+=`<div class="guide" data-phase-index="${phaseByGroup.get(current.group)}" style="left:${x}%"></div>`;}
+ $('timeline-plot').innerHTML=html;
+ applyPhaseHighlight();
+}
+function renderNodes(){const current=byId.get(selected).group;$('node-strip').innerHTML='<span>节点</span>'+D.nodes.map(n=>`<button class="node-button ${n.reuses_c0?'reused':''} ${current===n.label?'active':''}" data-node="${n.label}" data-phase-index="${phaseByGroup.get(n.label)}" aria-pressed="${current===n.label}" aria-label="查看 ${n.label}，${n.reuses_c0?'复用 C0 基座':'Btrfs 只读快照'}">${n.label}</button>`).join('');applyPhaseHighlight();}
+function pretty(value){return `<pre>${esc(typeof value==='string'?value:json(value))}</pre>`;}
+function disclosure(label,value){return `<details><summary>${esc(label)}</summary>${pretty(value)}</details>`;}
+function detailPhases(items,total){return items.map(([name,note,time])=>`<div class="phase-item"><span class="dot"></span><div>${esc(name)}${note?'<p>'+esc(note)+'</p>':''}${time!=null&&total>0?`<div class="bar-line"><i style="width:${Math.min(100,time/total*100)}%"></i></div>`:''}</div><span class="sec">${seconds(time)}</span></div>`).join('');}
+function renderDetail(){
+ const e=byId.get(selected),n=e.node?D.nodes.find(x=>x.label===e.node):null;
+ const base=`${!matches(e)?'<div class="current-hidden">这条记录不在当前筛选结果中。时间轴和详情仍保留当前选择。</div>':''}<div class="detail-topline"><span class="tag ${e.kind}">${K[e.kind].label}</span><span>${esc(e.group)} · #${D.events.indexOf(e)+1}</span></div><h2>${esc(shorten(e.title,150))}</h2>`;
+ let html=base;
+ const desc=e.kind==='snapshot'?(n.reuses_c0?'首次模型调用之前，引用 preload 已冻结的只读 C0；本轮不重新导出或采集初始文件。':'完整步骤结束后，暂停任务进程、同步写入并创建只读 CoW 快照，然后复核上下文并发布节点。'):e.kind==='tool'?'真实 Docker 工具调用。原始结果与 Agent 实际接纳的观察内容分别保存。':e.kind==='model'?'模型请求、原始 SDK 响应和实际接纳的消息可分别检查。重试仍属于当前 Step。':e.preview;
+ html+=`<p class="detail-description">${esc(shorten(desc,210))}</p>`;
+ if(e.kind==='snapshot'){
+  html+=`<div class="detail-metrics"><div><div class="metric-label">快照与提交</div><div class="metric-value">${seconds(e.duration)}</div></div><div><div class="metric-label">池镜像物理占用</div><div class="metric-value">${bytes(n.image_allocated_bytes)}</div></div><div><div class="metric-label">池镜像相对 C0 增长</div><div class="metric-value">${bytes(n.pool_delta_from_c0_bytes)}</div></div><div><div class="metric-label">本边界轨迹元数据增长</div><div class="metric-value">${bytes(n.store_delta)}</div></div><div><div class="metric-label">池镜像逻辑容量</div><div class="metric-value">${bytes(n.image_capacity_bytes)}</div></div><div><div class="metric-label">保存方式</div><div class="metric-value" style="font-family:inherit;font-size:13px">${n.reuses_c0?'复用 C0 基座':'Btrfs CoW 快照'}</div></div></div>`;
+ }else html+=`<div class="detail-metrics"><div><div class="metric-label">${e.duration==null?'计时口径':'记录耗时'}</div><div class="metric-value" style="${e.duration==null?'font-family:inherit;font-size:12px':''}">${e.duration==null?'未单独计时':seconds(e.duration)}</div></div><div><div class="metric-label">${e.kind==='tool'?'退出码':'相对开始'}</div><div class="metric-value">${e.kind==='tool'?(e.exit_code??'—'):(e.start==null?'—':seconds(e.start))}</div></div></div>`;
+ html+=`<div class="detail-tabs"><button data-detail="overview" class="${detailTab==='overview'?'active':''}">流程说明</button><button data-detail="evidence" class="${detailTab==='evidence'?'active':''}">记录证据</button></div>`;
+ if(detailTab==='evidence'){
+  if(e.kind==='model'||e.kind==='tool'){
+   html+=disclosure('调用输入 / 参数',e.data.request)+disclosure('调用时的上下文',e.data.context)+disclosure('原始返回结果',e.data.result)+disclosure('Agent 实际接纳',e.data.accepted)+disclosure('派发、返回、交付、接纳事件',e.data.events);
+   html+=`<p class="small-note">这里展示 Store 的保存值，模型响应为 SDK 表示；不包含文件快照正文或 HTTP 原始字节。</p>`;
+  }else html+=pretty(e.data);
+ }else if(e.kind==='snapshot'){
+  const c=n.capture;
+  const parts=[['取得 Agent 上下文','保存采集前的消息、计数与输入位置。',null],
+   ['文件状态捕获（后端计时）',n.reuses_c0?'核对并引用已有基座的只读快照。':'创建只读 Btrfs 快照，保存运行配置与状态引用。',c.duration_sec??null],
+   ['复核并原子提交','再次确认上下文与接纳事实，发布完整节点。',null]];
+  html+=detailPhases(parts,e.duration)+`<p class="small-note">子项属于节点保存过程，不重复计入总耗时；未单独采集的阶段不推算。池镜像占用来自该节点保存时的测量，包含共享数据、元数据及池内其他工作区。相对 C0 的增长不是单个快照的独占空间，也不等同于文件修改量。</p><div class="kv"><span>快照路径</span><b>${esc(n.snapshot.name)}</b><span>快照 UUID</span><b>${esc(n.snapshot.uuid)}</b><span>存储池</span><b>${esc(n.snapshot.location.volume)}</b><span>已接纳序号</span><b>${n.accepted_event_sequence}</b></div>`;
+  html+=disclosure('节点 Agent 上下文',n.context)+disclosure('节点输入位置',n.input_position)+`<button class="detail-action" data-open-flow="snapshot">展开 Btrfs 快照子流程 →</button>`;
+ }else if(e.kind==='model'||e.kind==='tool'){
+  const events=e.data.events,labels={dispatched:'派发',result:'返回',delivered:'交付',accepted:'接纳'};
+  html+='<div class="event-chain">'+Object.entries(labels).map(([key,label])=>`<span class="${events.some(x=>x.kind===key)?'':'off'}">${label} ${events.some(x=>x.kind===key)?'✓':'—'}</span>`).join('')+'</div>';
+  if(e.kind==='tool'){
+   html+='<div class="subhead">执行命令</div>'+pretty(e.data.request.action.command)+'<div class="subhead">返回内容</div>'+pretty(String(e.data.result??'').slice(0,2200));
+   if(String(e.data.result??'').length>2200)html+='<p class="small-note">此处为预览；完整返回值见“记录证据”。</p>';
+   if(e.error)html+='<p class="small-note">工具退出码非零，但结果已明确并被完整接纳，因此该 Step 仍可提交。</p>';
+  }else{
+   html+='<div class="subhead">输入与动作</div><div class="kv"><span>输入消息</span><b>'+e.data.request.messages.length+' 条</b><span>Prompt tokens</span><b>'+(e.data.usage.prompt_tokens??'—')+'</b><span>完成 tokens</span><b>'+(e.data.usage.completion_tokens??'—')+'</b></div>';
+   const msg=e.data.result.choices[0].message;for(const call of msg.tool_calls||[])html+=pretty({name:call.function.name,arguments:call.function.arguments});
+  }
+  const accepts=e.data.accepted;html+='<div class="subhead">接纳位置</div><p class="small-note">'+(accepts?`消息区间 [${accepts.start}, ${accepts.stop})；实际接纳内容与原始结果分开记录。`:'无接纳记录。')+'</p>';
+ }else if(e.kind==='commit'){
+  html+=detailPhases([['确认调用完整','模型、完整工具组、结果与接纳必须全部齐全。',null],['关联持久材料','上下文＋输入位置＋完整文件 State。',null],['事务提交 Ci','材料校验通过后才更新当前节点。',null]],1);
+  html+=`<div class="kv"><span>节点 ID</span><b>${esc(n.node_id)}</b><span>文件 State</span><b>${esc(n.state_id)}</b><span>只读快照</span><b>${esc(n.snapshot.name)}</b></div><p class="small-note">该页面仅用于浏览。存储完整性校验不等于在新容器中执行 verify-restore。</p>`;
+ }else if(e.kind==='accepted')html+=pretty(e.data.accepted||e.data);
+ else if(e.kind==='input')html+=pretty(e.data.content);
+ else html+=pretty(e.data);
+ html+=`<div class="source-ref">源码位置<br>${esc(e.source)}</div>`;
+ $('detail').innerHTML=html;
+}
+function updatePlayer(){const events=listEvents(),index=events.findIndex(e=>e.id===selected);$('position').max=Math.max(0,events.length-1);$('position').value=Math.max(0,index);$('position').disabled=events.length===0;$('position-label').textContent=`${index<0?'—':index+1} / ${events.length}`;$('previous').disabled=index<=0;$('next').disabled=index>=events.length-1||events.length===0;$('play').disabled=events.length===0;}
+function move(direction){const events=listEvents();let i=events.findIndex(e=>e.id===selected);i=Math.max(0,Math.min(events.length-1,i+direction));if(events[i])select(events[i].id);return i<events.length-1;}
+function stop(){if(timer!==null)clearInterval(timer);timer=null;$('play').textContent='▷ 浏览播放';$('play').setAttribute('aria-pressed','false');}
+function refreshFilter(){stop();renderLedger();renderTimeline();renderDetail();updatePlayer();}
+function tooltip(event,id){const e=byId.get(id),t=$('tooltip');t.textContent=`${e.group} · ${K[e.kind].label}\n${shorten(e.title,65)}\n${seconds(e.duration)}${e.start==null?'':' · 开始 '+seconds(e.start)}`;t.style.whiteSpace='pre-line';t.hidden=false;const x=Math.min(event.clientX+12,innerWidth-t.offsetWidth-10),y=Math.min(event.clientY+16,innerHeight-t.offsetHeight-10);t.style.left=Math.max(8,x)+'px';t.style.top=Math.max(8,y)+'px';}
+
+// Process explanations reflect current source, and are distinct from measured timings.
+const FLOW={
+ "overall":[
+ ["F01", "读取命令", "启动准备", "从 palin record run 进入。", ["解析任务、C0 基座、输出目录和预算。", "建立进度通知、持续计时与中断处理。"], "参数错误在创建容器之前停止。", "cli/record.py / record/run.py", "prepare"],
+ ["F02", "核对任务与 C0", "启动准备", "选择同一任务输入生成的 preload。", ["读取任务包及固定镜像信息。", "核对基座元数据摘要、初始化条件与启动配置。", "检查 Agent 版本与模型配置。"], "不在每次录制前重新读取全部任务文件。", "preload/base.py:BtrfsPreloadRecord.select", "prepare"],
+ ["F03", "启动独立容器", "启动准备", "从 C0 创建本次运行的独立可写根目录。", ["在同一 Btrfs 池中从只读 C0 创建可写快照。", "使用启动器把任务根目录交给容器。", "应用工作目录、环境变量与网络配置。"], "任务文件留在 Btrfs 中，保留原基座及历史快照。", "sandbox/btrfs.py:BtrfsSandbox.start", "prepare"],
+ ["F04", "建立录制组件", "启动准备", "轨迹事实与文件快照分别保存并关联。", ["创建 SQLite 目录库与轨迹 artifacts。", "配置 BtrfsStateBackend。", "附加已有 C0 的元数据与启动材料引用。"], "轨迹元数据体积不包含外部 Btrfs 池镜像。", "record/run.py / storage/store.py", "prepare"],
+ ["F05", "初始化 Agent", "首次决策之前", "将原生 Agent 连接到 Recorder。", ["创建 Run、Attempt 与预算计数。", "生成 system 和 task 初始消息。", "登记初始上下文与输入位置。"], "此时尚未请求模型。", "agents/mini.py / record/recorder.py", "C0"],
+ ["F06", "引用 C0 并提交", "首次决策之前", "C0 引用 preload 已冻结的文件状态。", ["检查基座快照 UUID 与只读属性。", "保存本轮公开运行配置和状态引用。", "将初始上下文与 C0 关联后提交节点。"], "C0 不计入 Agent 步数，不重新采集初始文件。", "record/state.py:BtrfsStateBackend.capture", "C0"],
+ ["F07", "执行完整 Step", "逐步录制", "每轮保存一次模型交互和完整工具组。", ["保存模型输入、响应及接纳记录。", "执行工具并记录原始结果与实际观察。", "在完整边界创建 Btrfs 快照并提交 Ci。"], "未完成或结果未知的工具组不能发布完整节点。", "agents/_mini_native.py / record/recorder.py", "C1"],
+ ["F08", "判断结束条件", "终止控制", "沿用 Agent 的原生预算与结束语义。", ["检查步数、费用与运行时间预算。", "处理提交结果、暂停、取消与异常。", "停止后保留已提交历史。"], "录制成功不表示任务已修复。", "agents/_mini_native.py:RecordingAgent.run", "finish"],
+ ["F09", "保存 RunEnd", "终止控制", "记录停止位置与结束原因。", ["保存最终上下文与输入位置。", "区分完整步骤和未完成尾部。", "写入结束事实与诊断。"], "不补造未执行的工具结果或历史节点。", "record/recorder.py:pause / finish", "finish"],
+ ["F10", "清理运行资源", "结束处理", "清理本轮独立环境。", ["关闭任务沙箱与本轮可写工作区。", "关闭 Store 和 Docker 客户端。", "分别记录清理错误。"], "只读基座、已提交快照与轨迹材料保留。", "record/run.py:finally / sandbox/btrfs.py", "finish"],
+ ["F11", "读回检查", "结束处理", "独立读取已经保存的轨迹。", ["检查材料摘要、引用与节点关系。", "检查 Btrfs 快照身份。", "汇总完整性和轨迹元数据大小。"], "完整文件恢复比较由 verify-restore 单独执行。", "record/inspect.py / storage/btrfs/verification.py", "finish"],
+ ["F12", "保存报告与计时", "结束处理", "Record 返回运行状态和产物路径。", ["保存报告与分层计时。", "计时始终采集，debug 只控制详细终端显示。", "返回 Record 与 Report 路径。"], "页面是浏览副本；恢复仍需原始轨迹与 Btrfs 池。", "record/run.py:run_record / cli/record.py", "finish"]
+ ],
+ "step":[
+ ["S01", "检查预算", "每轮开始", "决定是否允许下一次模型请求。", ["检查步数、费用和时间预算。", "允许后进入下一步。"], "预算耗尽不会补造完整 Step。", "agents/_mini_native.py", "C1"],
+ ["S02", "登记模型调用", "模型调用之前", "先保存调用意图及输入。", ["创建关联父节点的 Step。", "保存模型输入、上下文和公开配置。", "记录 Operation 与 Execution。"], "输入来自保存的证据。", "record/calls.py / record/recorder.py", "C1"],
+ ["S03", "请求模型", "可包含重试", "记录逻辑调用和请求尝试。", ["保存 SDK 响应或错误证据。", "按配置处理重试等待。", "记录 usage 与请求耗时。"], "缺少计时的历史记录不会推算请求时长。", "agents/_mini_native.py:ObservedModel", "C1"],
+ ["S04", "接纳模型结果", "模型返回之后", "记录真正进入 Agent 上下文的消息。", ["解析模型动作。", "保存助手消息的接纳位置。", "声明完整 tool_call_id 集合。"], "原始响应与实际接纳内容分别保存。", "agents/_mini_native.py:RecordingAgent", "C1"],
+ ["S05", "登记工具调用", "每个工具重复", "在执行前保存命令及配置。", ["记录命令、工作目录和环境。", "关联模型声明的工具身份。"], "工具调用记录必须先于实际执行。", "record/calls.py / agents/_mini_native.py", "C1"],
+ ["S06", "执行并交付工具", "真实任务容器", "工具直接操作 Btrfs 任务环境。", ["保存原始结果、退出码及诊断。", "记录交付和格式化观察。"], "已明确的非零退出码不同于未知执行结果。", "agents/_mini_native.py:BorrowedEnvironment", "C1"],
+ ["S07", "接纳整组结果", "完整工具组之后", "保存实际写入的观察内容。", ["写入所有工具观察。", "保存接纳消息范围与事件序号。"], "不能把半个工具组当成完整步骤。", "agents/_mini_native.py:RecordingAgent", "C1"],
+ ["S08", "确认完整边界", "原生保存钩子", "核对模型、工具、结果和接纳。", ["执行原生保存逻辑。", "检查完整工具组和结果。", "固定上下文与输入位置。"], "不完整尾部保留证据但不提交节点。", "record/recorder.py", "C1"],
+ ["S09", "保存 Btrfs 快照", "节点提交之前", "保存完整步骤对应的环境。", ["暂停任务进程并同步写入。", "创建只读 CoW 快照后恢复任务进程。", "复查上下文并原子提交节点。"], "共享未变化的数据块，不逐轮打包任务文件。", "record/state.py / record/recorder.py", "C1"],
+ ["S10", "推进当前节点", "本步完成", "后续步骤从当前独立任务环境继续。", ["更新当前节点为 Ci。", "清空活动步骤并报告提交进度。", "进入下一轮预算检查。"], "已提交历史快照保持只读。", "record/recorder.py / agents/_mini_native.py", "C1"]
+ ],
+ "snapshot":[
+ ["P01", "固定 Agent 边界", "公共路径", "读取采集前的上下文和输入位置。", ["保存消息、计数与接纳序号。", "确认当前是完整步骤边界。"], "步骤内部未保存的时刻不是恢复点。", "record/recorder.py", "C0"],
+ ["P02", "检查任务根目录", "公共路径", "确保采集来自本轮 Btrfs 环境。", ["检查任务根目录和运行身份。", "使用已选择的 preload 与存储池。"], "不把另一环境的文件状态混入当前节点。", "sandbox/btrfs.py / record/state.py", "C1"],
+ ["P03", "引用 C0 或保存 Ci", "两条路径", "C0 与后续节点采用不同的保存动作。", ["C0：核对并引用 bases/C0 的只读快照。", "Ci：暂停任务进程、同步写入并创建只读快照。", "Ci 创建完成后恢复任务进程。"], "两条路径都不逐轮导出或全量扫描任务文件。", "record/state.py:BtrfsStateBackend.capture", "C0"],
+ ["P04", "保存运行配置", "公共路径", "文件引用与公开运行配置一起定位环境。", ["读取容器配置与允许记录的环境变量。", "保存工作目录、启动方式和源镜像身份。"], "文件快照不等于进程内存或应用事务检查点。", "record/state.py / storage/btrfs/models.py", "C1"],
+ ["P05", "保存 State 与测量", "公共路径", "保存快照身份和本次捕获诊断。", ["记录池位置、快照路径和 UUID。", "关联 State 与 StateCapture。", "保存当时的池镜像占用和逻辑容量。"], "池镜像占用包含共享材料，不代表快照独占空间。", "record/state.py / storage/btrfs/worker.py", "C1"],
+ ["P06", "再次核对边界", "公共路径", "防止上下文与文件状态来自不同位置。", ["再次导出上下文和输入位置。", "与采集前的边界比较。", "不一致时拒绝发布节点。"], "快照已创建不等于完整节点已提交。", "record/recorder.py", "C1"],
+ ["P07", "原子提交节点", "公共路径", "将持久材料与完整调用事实关联。", ["保存上下文、输入位置与父节点关系。", "核对材料引用及完整工具组。", "在事务中发布 Node。"], "本步骤不重新执行历史工具。", "storage/store.py:RecordStore.commit_node", "C1"],
+ ["P08", "推进当前历史", "提交之后", "新节点成为下一步的定位依据。", ["更新当前节点并发送提交进度。", "保留基座与全部已提交只读快照。"], "恢复需要保留原轨迹及对应 Btrfs 存储池。", "record/recorder.py", "C1"]
+ ]
+};
+function relatedRecord(f){
+ let events=D.events.filter(e=>e.group===f[7]);
+ if(!events.length)events=D.events.filter(e=>e.group===D.nodes.at(-1).label);
+ let type='snapshot';
+ if(flowMode==='step')type=['model','model','model','accepted','tool','tool','accepted','snapshot','snapshot','commit'][flowIndex];
+ else if(flowMode==='snapshot'&&flowIndex>=6)type='commit';
+ else if(flowMode==='overall')type=flowIndex===4?'input':flowIndex===6?'model':type;
+ const matching=events.filter(e=>e.kind===type);
+ return (flowMode==='step'&&flowIndex===6?matching.at(-1):matching[0])||events[0];
+}
+function renderFlow(){
+ $('flow-branch').hidden=flowMode!=='snapshot';
+ if(flowMode==='snapshot')$('flow-branch').innerHTML='<div class="branch-entry"><button data-flow-index="2">选择节点类型</button><p>初始节点 → C0<br>完整步骤 → Ci</p></div><div class="branch-options"><button data-flow-index="2">C0 · 引用基座<small>核对 UUID 与只读属性</small></button><button data-flow-index="2">Ci · 保存 CoW 快照<small>暂停进程 → 同步 → 快照 → 恢复进程</small></button></div><div class="branch-merge"><button data-flow-index="4">保存 State、配置与测量<small>所有快照共享未变化的数据块</small></button><span>↓</span><button data-flow-index="6">复查边界 → 原子提交节点</button></div>';
+ document.querySelectorAll('[data-flow]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.flow===flowMode));
+ const steps=FLOW[flowMode],f=steps[flowIndex];
+ $('flow-path').innerHTML=steps.map((v,i)=>`<button class="flow-node ${i===flowIndex?'active':''}" data-flow-index="${i}" aria-pressed="${i===flowIndex}"><span class="idx">${v[0]}</span><span><strong>${v[1]}</strong><small>${v[2]}</small></span></button>`).join('');
+ $('flow-explanation').innerHTML=`<span class="tag input">${f[0]} · ${f[2]}</span><h2>${f[1]}</h2><p>${f[3]}</p><ol class="flow-items">${f[4].map((t,i)=>`<li><span>0${i+1}</span>${t}</li>`).join('')}</ol><div class="flow-rule">${f[5]}</div><div class="flow-links"><button data-related="${relatedRecord(f).id}">在真实轨迹中查看 →</button>${flowMode==='overall'&&flowIndex===6?'<button data-open-flow="step">展开一个 Step →</button>':''}${(flowMode==='overall'&&flowIndex===5)||(flowMode==='step'&&flowIndex===8)?'<button data-open-flow="snapshot">展开快照子流程 →</button>':''}</div><p class="flow-source">源码位置<br>${f[6]}</p>`;
+}
+function openFlow(mode){flowMode=mode;flowIndex=0;setView('flow');renderFlow();}
+
+$('record-status').textContent=D.status==='recorded'?'录制完成':D.status;
+$('end-status').textContent=D.run_end_status==='paused'?(D.agent_exit_status==='LimitsExceeded'?'预算暂停':'已暂停'):D.run_end_status;
+$('run-label').textContent=D.task_id+' · '+D.run_name;
+$('duration').disabled=!D.timeline_complete;
+$('duration').setAttribute('aria-pressed',durationMode);
+$('duration').textContent=durationMode?'◷ 真实时长':'▥ 等宽事件';
+$('top-stats').innerHTML=`<span><strong class="number">${seconds(D.total_sec)}</strong>总耗时</span><span class="snapshot-stat"><strong class="number">${seconds(D.capture_total_sec)}</strong>快照与提交</span><span class="store-stat"><strong class="number">${bytes(D.storage.store_file_bytes)}</strong>轨迹元数据</span>`;
+$('source-content').innerHTML=`<h3>已保存的录制数据</h3><p>${esc(D.run_name)}<br>${D.nodes.length} 个已提交节点。录制状态 ${esc(D.status)}；结束状态 ${esc(D.run_end_status)}（${esc(D.agent_exit_status)}）；任务评测状态 ${esc(D.task_success)}。</p><div class="paths">${esc(D.report_path)}<br>record/catalog.sqlite · StateCapture · Execution · Event · Node</div><h3>Btrfs 基座与存储</h3>${pretty(D.preload)}<p>池镜像占用是各节点保存时记录的物理已分配空间；容量是逻辑上限。相对 C0 的增长是池级测量，包含共享数据和其他工作区，不是快照独占空间。轨迹元数据另计。</p><h3>读取方式与边界</h3><ul><li>页面仅包含轨迹证据与快照引用，可离线打开；生成及查看时不连接 Docker、不挂载存储池、不扫描任务文件。</li><li>录制总耗时来源：${esc(D.timing_source)}。record.total 包含预检，不含最终计时写回；report.duration_sec 从预检之后计时。两者均不包含此前的 preload 构建成本。</li><li>当前计时明细：${D.timeline_complete?'完整':'未采集或已截断；按事件顺序展示，缺失值不推算'}。开启 debug 仅影响详细终端显示。</li><li>快照与提交耗时包含其内部子项，不重复相加。</li><li>微小事件保留可点击宽度；等宽模式仅表达顺序。</li><li>浏览播放只切换已保存记录，不执行 Replay 或环境恢复。</li><li>报告中的完整性检查：${D.verification.checked?(D.verification.ok?'通过':'未通过'):'未执行'}。本页不额外执行文件恢复校验或任务评测。</li><li>恢复仍需原始轨迹、基座与对应的 Btrfs 存储池。</li></ul>`;
+$('tab-trace').onclick=()=>setView('trace');$('tab-flow').onclick=()=>{setView('flow');renderFlow();};
+$('duration').onclick=()=>{durationMode=!durationMode;$('duration').setAttribute('aria-pressed',durationMode);$('duration').textContent=durationMode?'◷ 真实时长':'▥ 等宽事件';renderPhases();renderTimeline();};
+$('fold').onclick=()=>{const all=D.groups.every(g=>collapsed.has(g.id));collapsed=all?new Set():new Set(D.groups.map(g=>g.id));$('fold').setAttribute('aria-pressed',!all);$('fold').textContent=all?'⊟ 轮次':'⊞ 轮次';renderLedger();};
+$('calls').onclick=()=>{hideTools=!hideTools;$('calls').setAttribute('aria-pressed',hideTools);$('calls').textContent=hideTools?'⊞ 工具调用':'⊟ 工具调用';refreshFilter();};
+$('search').addEventListener('input',e=>{query=e.target.value;refreshFilter();});$('kind-filter').onchange=e=>{kind=e.target.value;refreshFilter();};
+$('ledger').onclick=e=>{const row=e.target.closest('[data-event]'),g=e.target.closest('[data-group]');if(row){stop();select(row.dataset.event,{scroll:false});}else if(g){const id=g.dataset.group;collapsed.has(id)?collapsed.delete(id):collapsed.add(id);renderLedger();}};
+$('timeline-plot').onclick=e=>{const t=e.target.closest('[data-timeline]');if(t){stop();select(t.dataset.timeline,{reveal:true});}};
+$('timeline-plot').onpointermove=e=>{const t=e.target.closest('[data-timeline]');if(t)tooltip(e,t.dataset.timeline);else $('tooltip').hidden=true;};$('timeline-plot').onpointerleave=()=>$('tooltip').hidden=true;
+$('node-strip').onclick=e=>{const b=e.target.closest('[data-node]');if(b){stop();select(D.nodes.find(n=>n.label===b.dataset.node).snapshot_event,{reveal:true});}};
+$('phase-ribbon').onclick=e=>{const b=e.target.closest('[data-phase]');if(b){stop();select(b.dataset.phase,{reveal:true});}};
+$('phase-ribbon').onpointerover=e=>{const b=e.target.closest('[data-phase-index]');setActivePhase(b?Number(b.dataset.phaseIndex):null);};
+$('phase-ribbon').onpointermove=e=>{const b=e.target.closest('[data-phase-index]');if(!b)return;const p=D.phases[Number(b.dataset.phaseIndex)],t=$('tooltip');t.textContent=p.name+' · '+seconds(p.duration);t.hidden=false;t.style.left=Math.min(e.clientX+12,innerWidth-t.offsetWidth-10)+'px';t.style.top=Math.min(e.clientY+16,innerHeight-t.offsetHeight-10)+'px';};
+$('phase-ribbon').onpointerleave=()=>{setActivePhase(null);$('tooltip').hidden=true;};
+$('phase-ribbon').onfocusin=e=>{const b=e.target.closest('[data-phase-index]');setActivePhase(b?Number(b.dataset.phaseIndex):null);};
+$('phase-ribbon').onfocusout=()=>setActivePhase(null);
+$('detail').onclick=e=>{const b=e.target.closest('[data-detail]'),f=e.target.closest('[data-open-flow]');if(b){detailTab=b.dataset.detail;renderDetail();}if(f)openFlow(f.dataset.openFlow);};
+$('previous').onclick=()=>{stop();move(-1);};$('next').onclick=()=>{stop();move(1);};$('position').oninput=e=>{stop();const record=listEvents()[Number(e.target.value)];if(record)select(record.id);};
+$('play').onclick=()=>{if(timer!==null){stop();return;}if(selected===listEvents().at(-1)?.id)select(listEvents()[0].id);$('play').textContent='Ⅱ 暂停浏览';$('play').setAttribute('aria-pressed','true');timer=setInterval(()=>{if(!move(1))stop();},1600);};
+$('sources').onclick=()=>$('source-dialog').showModal();$('source-dialog').querySelector('.close').onclick=()=>$('source-dialog').close();$('source-dialog').onclick=e=>{if(e.target===$('source-dialog')){const r=e.target.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.target.close();}};
+document.querySelectorAll('[data-flow]').forEach(b=>b.onclick=()=>openFlow(b.dataset.flow));$('flow-branch').onclick=e=>{const b=e.target.closest('[data-flow-index]');if(b){flowIndex=Number(b.dataset.flowIndex);renderFlow();}};$('flow-path').onclick=e=>{const b=e.target.closest('[data-flow-index]');if(b){flowIndex=Number(b.dataset.flowIndex);renderFlow();}};
+$('flow-explanation').onclick=e=>{const f=e.target.closest('[data-open-flow]'),r=e.target.closest('[data-related]');if(f)openFlow(f.dataset.openFlow);if(r){setView('trace');select(r.dataset.related,{reveal:true});}};
+document.addEventListener('keydown',e=>{if(e.target.closest('input,select,textarea,dialog')||!$('flow-view').hidden)return;if(e.key==='ArrowRight'){e.preventDefault();stop();move(1);}if(e.key==='ArrowLeft'){e.preventDefault();stop();move(-1);}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
+window.addEventListener('hashchange',()=>{const id=location.hash.slice(1);if(byId.has(id)){setView('trace');select(id,{reveal:true});}});
+renderPhases();renderLedger();renderTimeline();renderNodes();renderDetail();updatePlayer();renderFlow();
+})();
+</script>
+</body>
+</html>

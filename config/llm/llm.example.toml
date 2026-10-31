@@ -1,0 +1,13 @@
+# Copy this template to config/llm/llm.toml and edit the local copy.
+# Git ignores all files under config/ except this template.
+# Configuration guide: README.md and docs/命令参考.md
+
+[llm]
+base_url = "https://api.openai.com/v1"
+model = "your-model"
+
+# Set OPENAI_API_KEY in the environment, or uncomment this in the local copy.
+# api_key = "your-api-key"
+
+timeout = 60.0
+max_retries = 0

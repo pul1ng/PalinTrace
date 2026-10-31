@@ -1,0 +1,13 @@
+[
+  {
+    "instance_id": "example__repo-1",
+    "repo": "example/repo",
+    "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "version": "1.0",
+    "problem_statement": "Synthetic example only: fix a bug in the sample repository.",
+    "patch": "Synthetic gold patch, for converter demonstration only.",
+    "test_patch": "Synthetic test patch, for converter demonstration only.",
+    "FAIL_TO_PASS": "[\"test_example\"]",
+    "PASS_TO_PASS": "[]"
+  }
+]

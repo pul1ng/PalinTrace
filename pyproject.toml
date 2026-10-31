@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "palinreplay"
+version = "0.1.0"
+description = "Independent foundations for recording and restoring coding-agent trajectories"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=1.55,<3",
+  "httpx>=0.27,<1",
+  "pydantic>=2.10,<3",
+]
+
+[project.optional-dependencies]
+swebench = ["datasets>=3,<5", "huggingface-hub>=0.25,<2"]
+parquet = ["pyarrow>=15,<22"]
+docker = ["docker>=7.1,<8"]
+mini = [
+  "mini-swe-agent @ git+https://github.com/SWE-agent/mini-swe-agent.git@04d809ceab9df28f9adaed044884180159172930",
+  # This version imports its MCP handler for ordinary function tools too.
+  "litellm[mcp]==1.106.2",
+  "rich>=13,<16",
+]
+dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
+
+[project.scripts]
+palin = "palinreplay.cli:main"
+palinreplay = "palinreplay.cli:main"
+pal = "palinreplay.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/palinreplay"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "RUF"]
