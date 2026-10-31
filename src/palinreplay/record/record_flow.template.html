@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'">
 <link rel="icon" href="data:,">
-<title>PalinReplay · Record 轨迹</title>
+<title>PalinTrace · Record 轨迹</title>
 <style>
 :root{--ink:#26303d;--muted:#7c8593;--line:#e9ecf1;--soft:#f7f8fa;--blue:#537ee5;--purple:#9878b6;--orange:#d88b3c;--green:#59a884;--teal:#3d9d98;--red:#dc5b59;--mono:ui-monospace,SFMono-Regular,Consolas,monospace}
 *{box-sizing:border-box}body{margin:0;color:var(--ink);background:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}button,input,select{font:inherit}button{cursor:pointer;color:inherit}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px}button{background:none;border:0}button:disabled{cursor:default;opacity:.4}[hidden]{display:none!important}code,pre,.mono{font-family:var(--mono)}.muted{color:var(--muted)}.number{font-variant-numeric:tabular-nums}.tag{display:inline-flex;align-items:center;border-radius:4px;padding:3px 8px;font-size:12px;white-space:nowrap;background:#f0f2f5;color:#717a88}.tag.ok{color:#388262;background:#eaf6ef}.tag.paused{color:#a97b30;background:#fbf2df}.tag.input{color:var(--blue);background:#ecf1ff}.tag.model{color:#8563a3;background:#f1ebf7}.tag.tool{color:#b87729;background:#fcf1e3}.tag.accepted{color:#458f69;background:#e9f5ed}.tag.snapshot{color:#348982;background:#e8f5f3}.tag.commit{color:#5076ca;background:#edf2ff}.tag.error{color:var(--red);background:#fff0ed}
@@ -51,7 +51,7 @@
 <body>
 <header class="topbar">
  <div class="brandmark" aria-hidden="true">P</div>
- <div class="heading"><h1>PalinReplay <span class="muted" style="font-weight:400">/ Record</span></h1><div class="run-label" id="run-label"></div></div>
+ <div class="heading"><h1>PalinTrace <span class="muted" style="font-weight:400">/ Record</span></h1><div class="run-label" id="run-label"></div></div>
  <div class="top-actions"><span class="tag ok" id="record-status">录制完成</span><span class="tag paused" id="end-status"></span><button class="outline" id="sources">数据与源码</button></div>
 </header>
 <nav class="navigation" role="tablist" aria-label="页面视图">
