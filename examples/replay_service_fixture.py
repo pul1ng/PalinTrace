@@ -20,6 +20,7 @@ from palinreplay.record.restore import load_restore_materials
 from palinreplay.record.state import BtrfsStateBackend
 from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.plan import pin_replay
+from palinreplay.replay.session import run_replay
 from palinreplay.sandbox.btrfs import BtrfsWorkspace
 from palinreplay.storage.btrfs.models import BtrfsRuntime
 from palinreplay.storage.btrfs.pool import BtrfsPool
@@ -370,3 +371,34 @@ def source_identity(source, client):
     write_json(source / "identity.json", identity)
     write_json(source / "cleanup.json", cleanup)
     return identity
+
+
+def replay_once(source, output, client):
+    source, output = Path(source), Path(output)
+    identity = json.loads((source / "identity.json").read_text())
+    recording = json.loads((source / "report.json").read_text())
+    assert absent(client, recording["container_id"]), "source container must be absent before Replay"
+    assert all(identity["cleanup"].values()), "source cleanup was not confirmed"
+    assert store_hashes(source / "record") == identity["store_hashes"]
+    executed = []
+    execute = RestoredExecutor.execute
+
+    def observe(executor, request):
+        executed.append(request)
+        return execute(executor, request)
+
+    with no_model_calls(), patch.object(RestoredExecutor, "execute", observe):
+        report = run_replay(source / "record", "C2", "C4",
+                            run_id=identity["selection"]["run"]["run_id"],
+                            output=output, client=client)
+    write_json(output / "execution-check.json", {
+        "source_selection_sha256": identity["selection"]["selection_sha256"],
+        "executed_requests": executed, "actual_model_calls": 0,
+    })
+    assert report["source"]["selection_sha256"] == identity["selection"]["selection_sha256"]
+    assert report["mappings"][0]["source_index"] == 2
+    assert len(executed) == 1 and executed[0]["action"]["command"] == REQUEST_COMMAND
+    assert report["statistics"]["actual_tool_executions"] == 1
+    assert report["statistics"]["actual_model_calls"] == 0
+    assert report["cleanup_confirmed"]
+    return report
