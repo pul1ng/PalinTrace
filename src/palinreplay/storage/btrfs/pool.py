@@ -98,7 +98,8 @@ class BtrfsPool:
             with tarfile.open(fileobj=stream, mode="w") as archive:
                 for source, name in (("worker.py", "palin-btrfs-worker.py"),
                                      ("send_stream.py", "send_stream.py"),
-                                     ("paths.py", "paths.py"), ("links.py", "links.py")):
+                                     ("paths.py", "paths.py"), ("links.py", "links.py"),
+                                     ("incremental.py", "incremental.py")):
                     body = Path(__file__).with_name(source).read_bytes()
                     member = tarfile.TarInfo(name)
                     member.size, member.mode = len(body), 0o400
@@ -153,6 +154,17 @@ class BtrfsPool:
         self.verify(before)
         self.verify(after)
         return self.command("changes", before=before.name, after=after.name)
+
+    def compare_incremental(self, source_before, source_after, actual_before, actual_after):
+        """Assumes the previous pair matched under rootfs-files-v1."""
+        from palinreplay.storage.rootfs import SCOPE
+
+        source = self.changes(source_before, source_after)
+        actual = self.changes(actual_before, actual_after)
+        names = sorted(set(source["candidates"]) | set(actual["candidates"]))
+        compared = self.command("compare_candidates", source=source_after.name,
+                                actual=actual_after.name, candidates=names, scope=SCOPE)
+        return {**compared, "source_delta": source, "actual_delta": actual}
 
     def close(self):
         if self.closed:

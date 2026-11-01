@@ -94,9 +94,34 @@ def main(output):
                 assert expected <= set(delta['candidates']), delta
                 link_cases.append(delta)
                 link_before = link_after
+            # Branch from one known-equal baseline. Include one-sided changes and
+            # different writes on both sides; compare union against full inventory.
+            baseline = snapshot()
+            run("from pathlib import Path; " + f"p=Path('/pool/{work}'); "
+                "(p/'source-only').write_text('source'); (p/'edit').write_text('source change')")
+            source_after = snapshot()
+            actual_work = 'workspaces/' + uuid4().hex
+            pool.snapshot(baseline.name, actual_work, readonly=False)
+            run("from pathlib import Path; " + f"p=Path('/pool/{actual_work}'); "
+                "(p/'actual-only').write_text('actual'); (p/'edit').write_text('actual change')")
+            actual_name = 'checkpoints/' + uuid4().hex
+            actual_info = pool.snapshot(actual_work, actual_name)
+            actual_after = Snapshot(location=pool.location, name=actual_name, uuid=actual_info['uuid'])
+            compared = pool.compare_incremental(baseline, source_after, baseline, actual_after)
+            full = json.loads(run(
+                "import sys,json,importlib.util; sys.path.insert(0,'/'); "
+                "s=importlib.util.spec_from_file_location('w','/palin-btrfs-worker.py'); "
+                "w=importlib.util.module_from_spec(s); s.loader.exec_module(w); "
+                "scope={'id':'rootfs-files-v1','exclude_paths':[], 'exclude_subtrees':[]}; "
+                f"print(json.dumps(w.compare(w.inventory(w.target('{source_after.name}'),scope),"
+                f"w.inventory(w.target('{actual_after.name}'),scope))))"
+            ))
+            assert compared['equal'] == full['equal'] is False
+            assert compared['different_paths'] == full['different_paths']
+            pool.command('delete', name=actual_work)
             pool.command("delete", name=work)
         report = {"status": "passed", "basic": changes, "renames": renamed,
-                  "hardlinks": link_cases,
+                  "hardlinks": link_cases, "comparison": compared, "full_comparison": full,
                   "duration_sec": time.monotonic() - started, "cleanup_confirmed": True}
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2) + "\n")

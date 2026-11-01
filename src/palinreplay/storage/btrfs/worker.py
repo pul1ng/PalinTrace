@@ -254,6 +254,15 @@ def operation(request):
         return {"protocol": 1, "no_data": True, "complete": True,
                 "stream_bytes": len(result.stdout), "operations": operations,
                 "candidates": names}
+    if op == "compare_candidates":
+        if __package__:
+            from .incremental import compare_candidates
+        else:
+            from incremental import compare_candidates
+        if not info(request["source"])["readonly"] or not info(request["actual"])["readonly"]:
+            raise ValueError("file comparison requires read-only snapshots")
+        return compare_candidates(target(request["source"]), target(request["actual"]),
+                                  request["candidates"], request["scope"])
     if op == "delete":
         if target(request["name"]).exists():
             command("btrfs", "subvolume", "delete", target(request["name"]))
