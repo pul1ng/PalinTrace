@@ -39,6 +39,8 @@ class ReplayContext:
         )
 
     def accept_results(self, history, calls, results):
+        if not calls and not results and not history.tools:
+            return []
         messages = self.observations(history, results)
         if len(messages) != len(calls) or any(
             msg.get("tool_call_id") != call.operation.tool_call_id

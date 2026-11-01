@@ -23,4 +23,5 @@ def test_uses_real_mini_observation_rendering_and_prefix(tmp_path):
     assert context.messages == materials.context["messages"]
     with pytest.raises(ValueError, match="incomplete"):
         context.observations(history, outputs[:1])
+    assert context.accept_results(SimpleNamespace(tools=()), [], []) == []
     assert context.export(None).input_position.data == b'{"adoptions":[],"next_message":1}\n'
