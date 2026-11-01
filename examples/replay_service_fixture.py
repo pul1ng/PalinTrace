@@ -13,7 +13,7 @@ from replay_validation import fixed_response
 
 from palinreplay.agents import AgentTask
 from palinreplay.agents.mini import MiniSweAgent, load_native
-from palinreplay.core.models import Node
+from palinreplay.core.models import Execution, Node, Operation, Step
 from palinreplay.preload.base import open_preload
 from palinreplay.record.calls import read_call
 from palinreplay.record.restore import load_restore_materials
@@ -471,3 +471,88 @@ def check_r1(source, replay, client):
         raise
     finally:
         write_json(replay / "r1-check.json", result)
+
+
+def classify_result(source_tool, actual_tool, report, r1):
+    """A tool difference passes this fixture only for a restored, refused request."""
+    def response(fact):
+        try:
+            value = json.loads(fact["output"])
+        except (ValueError, TypeError, KeyError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    observed = response(actual_tool)
+    checks = {
+        "source_request_succeeded": source_tool["exit_code"] == 0
+                                    and response(source_tool) == {"status": 200, "body": BODY},
+        "r1_passed": r1.get("status") == "passed"
+                     and r1.get("files", {}).get("equal") is True
+                     and r1.get("root_attributes", {}).get("equal") is True
+                     and bool(r1.get("context_checks"))
+                     and all(r1["context_checks"].values()),
+        "connection_refused": type(actual_tool["exit_code"]) is int
+                              and actual_tool["exit_code"] != 0
+                              and observed.get("error") == "ConnectionRefusedError"
+                              and observed.get("errno") == 111,
+        "expected_replay_difference": report.get("status") == "difference"
+                                      and report.get("stop_reason") == "tool-result"
+                                      and report.get("incomplete_step") is False,
+        "single_C3_step": len(report.get("steps", [])) == 1
+                          and report["steps"][0]["source_index"] == 3
+                          and len(report["steps"][0]["tools"]) == 1
+                          and report["steps"][0]["tools"][0]["definitive"] is True,
+        "C4_not_executed": [(m["source_index"], m["index"]) for m in report.get("mappings", [])]
+                           == [(2, 0), (3, 1)],
+        "one_historical_tool": report.get("statistics", {}).get("actual_tool_executions") == 1
+                               and report["statistics"]["historical_answer_supplies"] == 1,
+        "no_model_calls_or_cost": report.get("statistics", {}).get("actual_model_calls") == 0
+                                  and report["statistics"]["actual_model_cost"] == 0,
+        "cleanup_confirmed": report.get("cleanup_confirmed") is True
+                             and not report.get("cleanup_errors"),
+    }
+    return {"status": "passed" if all(checks.values()) else "failed", "checks": checks}
+
+
+def check_difference(source, replay):
+    source, replay = Path(source), Path(replay)
+    report = json.loads((replay / "report.json").read_text())
+    r1 = json.loads((replay / "r1-check.json").read_text())
+    result = {"status": "failed"}
+    try:
+        with RecordStore.open(source / "record") as origin, \
+                RecordStore.open(replay / "record") as current:
+            c3 = load_restore_materials(origin, "C3")
+            nodes = sorted(current.list(Node), key=lambda node: node.index)
+            assert [node.index for node in nodes] == [0, 1]
+            source_tool, actual_tool = tool_fact(origin, c3.node), tool_fact(current, nodes[1])
+            result.update(classify_result(source_tool, actual_tool, report, r1),
+                          source_tool=source_tool, actual_tool=actual_tool)
+            assert actual_tool["request"] == source_tool["request"]
+            assert actual_tool["request"]["action"]["command"] == REQUEST_COMMAND
+            assert report["steps"][0]["source_node_id"] == c3.node.node_id
+            assert report["steps"][0]["node_id"] == nodes[1].node_id
+            assert report["first_difference"]["execution_id"] == actual_tool["execution_id"]
+            assert report["first_difference"]["source_execution_id"] == source_tool["execution_id"]
+            tools = [operation for operation in current.list(Operation) if operation.kind == "tool"]
+            assert len(tools) == 1
+            assert len(current.list(Execution)) == 2
+            assert len(current.list(Step)) == 1
+            accepted = actual_tool["accepted"]
+            context = current.read_json(nodes[1].context)
+            assert context["messages"][accepted["start"]:accepted["stop"]] == accepted["messages"]
+            assert len(accepted["messages"]) == 1
+            observation = accepted["messages"][0]
+            assert observation["extra"]["raw_output"] == actual_tool["output"]
+            assert observation["extra"]["returncode"] == actual_tool["exit_code"]
+            assert "ConnectionRefusedError" in observation["content"]
+            assert "<returncode>1</returncode>" in observation["content"]
+            assert context["messages"][-1] == observation
+            assert result["status"] == "passed", result["checks"]
+            result["committed_failure_verified"] = True
+            return result
+    except Exception as error:
+        result.update(status="failed", error_type=type(error).__name__, error=str(error))
+        raise
+    finally:
+        write_json(replay / "difference-check.json", result)
