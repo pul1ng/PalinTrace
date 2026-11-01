@@ -84,8 +84,12 @@ class RestoredNode:
 
         self.client = client
         self.container = None
+        self.run: Run | None = None
         self.node: Node | None = None
         self.state: State | None = None
+        self.config: object = None
+        self.context: object = None
+        self.input_position: object = None
         self.pool = None
         self.workspace = None
         self._owner = uuid4().hex
@@ -206,7 +210,10 @@ def _start_workspace(restored: RestoredNode, materials: RestoreMaterials) -> Non
         labels={},
     )
     restored.container = restored.workspace.container
-    restored.node, restored.state = materials.node, materials.state
+    restored.run, restored.node, restored.state = materials.run, materials.node, materials.state
+    restored.config = materials.config
+    restored.context = materials.context
+    restored.input_position = materials.input_position
     restored.report.update(
         container_name=restored.workspace.container_name,
         source_container_id=runtime.source_container_id,

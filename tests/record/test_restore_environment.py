@@ -20,7 +20,7 @@ from palinreplay.core.models import State
 from palinreplay.sandbox.base import SandboxError
 from palinreplay.storage.btrfs.models import Snapshot
 from palinreplay.storage.store import IntegrityError, RecordStore
-from tests.record.test_restore_materials import _record_run
+from tests.record.test_restore_materials import _record_run, _rewrite_record
 
 
 class MissingResource(Exception):
@@ -196,6 +196,46 @@ def test_light_restore_uses_selected_snapshot_without_scanning(environment, monk
     assert json.loads(report.read_text())["cleanup_confirmed"]
     with pytest.raises(SandboxError, match="not available"):
         restored.__enter__()
+
+
+@pytest.mark.parametrize("selected", [0, 1])
+def test_restored_context_delivers_selected_messages_config_counters_and_position(
+    environment, selected
+):
+    env = environment
+    expected = {}
+    with RecordStore.open(env.path, read_only=False) as store:
+        for index, node in enumerate((env.c0, env.c1)):
+            context = {
+                "messages": [{"role": "user", "content": f"at C{index}"}],
+                "agent_config": {"budget": 7 + index},
+                "model_config": {"model_name": "fixture"},
+                "counters": {"n_calls": index, "cost": index * 0.25},
+            }
+            position = {"next_message": index + 1, "event_sequence": node.accepted_event_sequence}
+            expected[index] = (context, position)
+            _rewrite_record(env.path, node.model_copy(update={
+                "context": store.put_json(context), "input_position": store.put_json(position),
+            }))
+    source = env.c0 if selected == 0 else env.c1
+    with RecordStore.open(env.path) as store:
+        with restore.restore_r1_node(
+            store, source.node_id, client=env.client, docker_host="unix:///fixture.sock",
+            report_path=env.path.parent / "context.json",
+        ) as restored:
+            assert restored.run == env.run and restored.node.node_id == source.node_id
+            assert restored.config == store.read_json(env.run.config)
+            assert restored.context == expected[selected][0]
+            assert restored.input_position == expected[selected][1]
+            assert restored.workspace is not None and restored.container is not None
+            restored.context["messages"][0]["content"] = "caller changed"
+            restored.context["counters"]["n_calls"] = 99
+            restored.config["name"] = "caller changed"
+            restored.input_position["next_message"] = 99
+            assert store.read_json(restored.node.context) == expected[selected][0]
+            assert store.read_json(restored.node.input_position) == expected[selected][1]
+            assert store.read_json(env.run.config)["name"] == "one"
+    assert restored.context["messages"][0]["content"] == "caller changed"
 
 
 def test_independent_workspaces_keep_the_source_and_fresh_restore(environment):
