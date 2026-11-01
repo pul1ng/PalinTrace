@@ -25,6 +25,7 @@ from palinreplay.sandbox.btrfs import BtrfsWorkspace
 from palinreplay.storage.btrfs.models import BtrfsRuntime
 from palinreplay.storage.btrfs.pool import BtrfsPool
 from palinreplay.storage.io import write_json
+from palinreplay.storage.rootfs import SCOPE
 from palinreplay.storage.store import RecordStore
 
 DIRECTORY = "/opt/palin-replay-service-fixture"
@@ -402,3 +403,71 @@ def replay_once(source, output, client):
     assert report["statistics"]["actual_model_calls"] == 0
     assert report["cleanup_confirmed"]
     return report
+
+
+def check_r1(source, replay, client):
+    source, replay = Path(source), Path(replay)
+    result = {"status": "failed"}
+    try:
+        with RecordStore.open(source / "record") as origin, \
+                RecordStore.open(replay / "record") as current:
+            expected = load_restore_materials(origin, "C2")
+            actual = load_restore_materials(current, "C0")
+            expected_context = origin.read_json(expected.node.context)
+            actual_context = current.read_json(actual.node.context)
+            historical_position = origin.read_json(expected.node.input_position)
+            config = current.read_json(actual.run.config)
+            inherited = {key: value for key, value in actual_context.items() if key != "replay"}
+            checks = {
+                "inherited_context": inherited == expected_context,
+                "messages": actual_context["messages"] == expected_context["messages"],
+                "inherited_config": {key: value for key, value in config.items() if key != "replay"}
+                                    == origin.read_json(expected.run.config),
+                "counters": actual_context["counters"] == expected_context["counters"],
+                "historical_input_position": actual_context["replay"] == {
+                    "historical_input_position": historical_position,
+                    "historical_answer_supplies": 0, "actual_model_calls": 0,
+                    "actual_model_cost": 0,
+                },
+                "local_input_position": current.read_json(actual.node.input_position) == {
+                    "next_message": len(expected_context["messages"]), "adoptions": [],
+                },
+                "independent_run": actual.run.run_id != expected.run.run_id
+                                   and actual.run.source_node_id is None,
+                "source_identity": config["replay"]["source"]
+                                   == json.loads((source / "identity.json").read_text())["selection"],
+                "starts_before_C3": len(actual_context["messages"])
+                                    < len(origin.read_json(load_restore_materials(origin, "C3")
+                                                           .node.context)["messages"]),
+            }
+            result["context_checks"] = checks
+            assert all(checks.values()), checks
+            assert expected.snapshot.location == actual.snapshot.location
+            with BtrfsPool(client, expected.snapshot.location) as pool:
+                pool.verify(expected.snapshot)
+                pool.verify(actual.snapshot)
+                compared = pool.command("verify", source=expected.snapshot.name,
+                                        workspace=actual.snapshot.name, scope=SCOPE,
+                                        oracle_sha256=expected.runtime.c0_oracle_sha256)
+                roots = pool.container.exec_run(["python3", "-B", "-c",
+                    "import json, os, stat; "
+                    f"paths = {[f'/pool/{s.name}' for s in (expected.snapshot, actual.snapshot)]!r}; "
+                    "print(json.dumps([{'type': stat.S_IFMT(os.stat(p).st_mode), "
+                    "'mode': stat.S_IMODE(os.stat(p).st_mode), 'uid': os.stat(p).st_uid, "
+                    "'gid': os.stat(p).st_gid} for p in paths]))"])
+                assert roots.exit_code == 0, roots.output
+                source_root, actual_root = json.loads(roots.output)
+                assert source_root == actual_root
+                result.update(files=compared, root_attributes={
+                    "source": source_root, "actual": actual_root, "equal": True,
+                })
+            result.update(status="passed", source_node_id=expected.node.node_id,
+                          node_id=actual.node.node_id,
+                          source_snapshot=expected.snapshot.model_dump(mode="json"),
+                          actual_snapshot=actual.snapshot.model_dump(mode="json"))
+            return result
+    except Exception as error:
+        result.update(error_type=type(error).__name__, error=str(error))
+        raise
+    finally:
+        write_json(replay / "r1-check.json", result)
