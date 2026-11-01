@@ -4,11 +4,11 @@ from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
 from palinreplay.replay.history import supply_history
 
 
-def execute_step(recorder, context, executor, history):
+def execute_step(recorder, context, executor, history, *, on_result=None):
     step = recorder.begin_step()
     supply_history(step, history, context.messages, context.adopt)
     calls, results = [], []
-    for tool in history.tools:
+    for index, tool in enumerate(history.tools):
         adapter = CallAdapter(
             name="mini.bash", execute=executor.execute, capture_request=Payload.json,
             capture_result=lambda result: ResultCapture(
@@ -22,6 +22,8 @@ def execute_step(recorder, context, executor, history):
         calls.append(call)
         result = call.invoke()
         results.append(result)
+        if on_result is not None:
+            on_result(index, tool, call, result, index == len(history.tools) - 1)
         # Preserve mini's native singleton submission behavior. A submission in
         # the middle of a group cannot publish a complete step.
         try:
