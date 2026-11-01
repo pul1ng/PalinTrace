@@ -16,11 +16,13 @@ def node_snapshot(store, node):
     return Snapshot.model_validate(store.read_json(store.get(State, node.state_id).manifest))
 
 
-def replay_range(recorder, context, executor, materials, compare_files=None):
+def replay_range(recorder, context, executor, materials, compare_files=None, *, report=None):
     plan = materials.plan
     mappings = [{"source_node_id": plan.start.node_id, "source_index": plan.start.index,
                  "node_id": recorder.current_node.node_id, "index": 0}]
-    report = {"status": "match", "mappings": mappings, "steps": []}
+    if report is None:
+        report = {}
+    report.update(status="match", mappings=mappings, steps=[])
     for index, history in enumerate(materials.steps):
         previous = recorder.current_node
         tool_comparisons = []

@@ -1,11 +1,15 @@
+import pytest
+
 from palinreplay.agents import AgentTask
 from palinreplay.core.interfaces import BoundaryAdapter, Payload
+from palinreplay.core.models import Node
 from palinreplay.record.recorder import Recorder
 from palinreplay.replay.context import ReplayContext
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.run import replay_range
 from palinreplay.replay.step import execute_step
+from palinreplay.sandbox.base import ExecResult
 from palinreplay.storage.store import RecordStore
 from tests.agents.test_mini_agent import (  # noqa: F401
     Capture,
@@ -61,5 +65,31 @@ def test_fixed_c20_to_c23_range_becomes_c0_to_c3(tmp_path):
                 assert [m["index"] for m in report["mappings"]] == [0, 1, 2, 3]
                 assert len(sandbox.calls) == 3
                 rec.finish()
+    finally:
+        source.close()
+
+
+@pytest.mark.parametrize("different_tool,expected_nodes,expected_calls", [(0, 1, 1), (1, 2, 2)])
+def test_early_and_final_tool_differences_keep_correct_boundary(tmp_path, different_tool, expected_nodes, expected_calls):
+    source, _, _, _, original = integrated(tmp_path, [response("read", "read"), response("submit")])
+    try:
+        original.run(AgentTask("task", "Task"))
+        materials = load_replay_materials(source, pin_replay(source, "C0", "C2"))
+        context, sandbox = ReplayContext(materials), Sandbox()
+        def execute(req):
+            result = sandbox.exec(req["action"]["command"])
+            if len(sandbox.calls) - 1 == different_tool:
+                return ExecResult(result.command, b"different", 0, 1)
+            return result
+        sandbox.execute = execute
+        with RecordStore.create(tmp_path / "replay") as store:
+            with Recorder(store, task_id="task", agent_name="mini", agent_version="v", config=Payload.json({}), boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
+                report = replay_range(rec, context, sandbox, materials, compare_files=lambda *args: {"equal": True})
+                assert report["status"] == "difference"
+                assert len(store.list(Node)) == expected_nodes
+                assert len(sandbox.calls) == expected_calls
+                assert store.check_integrity().ok
+                if rec.phase == "ready":
+                    rec.finish("difference")
     finally:
         source.close()
