@@ -54,12 +54,97 @@ sys.exit(code)
 '''
 
 
+LIFECYCLE = '''import http.client
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+root = Path(__file__).parent
+config = json.loads((root / "config.json").read_text())
+identity = root / "service.json"
+
+def process(pid):
+    try:
+        fields = Path("/proc/{}/stat".format(pid)).read_text().rsplit(")", 1)[1].split()
+        return {"state": fields[0], "start": fields[19]}
+    except FileNotFoundError:
+        return None
+
+def port_closed():
+    try:
+        with socket.create_connection((config["host"], config["port"]), timeout=0.5):
+            return False
+    except ConnectionRefusedError:
+        return True
+
+def ready():
+    connection = http.client.HTTPConnection(config["host"], config["port"], timeout=0.5)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        return response.status == 200 and response.read().decode() == config["body"]
+    except OSError:
+        return False
+    finally:
+        connection.close()
+
+if sys.argv[1] == "start":
+    if not port_closed():
+        raise RuntimeError("fixture port already in use")
+    child = subprocess.Popen([sys.executable, "-B", str(root / "server.py")],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            if child.poll() is not None:
+                raise RuntimeError("service exited before readiness")
+            if ready() and child.poll() is None:
+                identity.write_text(json.dumps({"pid": child.pid,
+                                                "start": process(child.pid)["start"]}))
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError("service readiness deadline exceeded")
+            time.sleep(0.05)
+    except BaseException:
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=5)
+        raise
+    print("PALIN_SERVICE_READY")
+elif sys.argv[1] == "stop":
+    saved = json.loads(identity.read_text())
+    current = process(saved["pid"])
+    if current is None or current["start"] != saved["start"] or current["state"] == "Z":
+        raise RuntimeError("this fixture service is not running")
+    os.kill(saved["pid"], signal.SIGTERM)
+    deadline = time.monotonic() + 5
+    while True:
+        current = process(saved["pid"])
+        exited = current is None or current["state"] == "Z"
+        if exited and port_closed():
+            identity.unlink()
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError("service shutdown unconfirmed")
+        time.sleep(0.05)
+    print("PALIN_SERVICE_STOPPED")
+else:
+    raise ValueError("expected start or stop")
+'''
+
+
 def python_command(code):
     return f"{PYTHON} -B -c " + shlex.quote(code)
 
 
 def fixture_files():
-    return {"server.py": SERVER, "request.py": REQUEST,
+    return {"server.py": SERVER, "request.py": REQUEST, "lifecycle.py": LIFECYCLE,
             "config.json": json.dumps(CONFIG, sort_keys=True) + "\n"}
 
 
@@ -72,3 +157,5 @@ def create_files_command():
 
 
 REQUEST_COMMAND = f"{PYTHON} -B {DIRECTORY}/request.py"
+START_COMMAND = f"{PYTHON} -B {DIRECTORY}/lifecycle.py start"
+STOP_COMMAND = f"{PYTHON} -B {DIRECTORY}/lifecycle.py stop"
