@@ -28,11 +28,7 @@ data/
 /outputs/
 
 # Snapshot optimization experiment outputs
-/docs/record_dev/step的快照优化/tasks/*/evidence/
-/docs/record_dev/step的快照优化/control/integration-*/
-/docs/record_dev/step的快照优化/control/check-slots/
-/docs/record_dev/step的快照优化/.resource.lock
-/docs/record_dev/step的快照优化/.任务索引.lock
+/docs/dev/*
 
 # macOS metadata in any directory
 .DS_Store
