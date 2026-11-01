@@ -227,9 +227,11 @@ def operation(request):
     if op == "changes":
         # This module is explicitly shipped alongside the standalone worker.
         if __package__:
+            from .links import close_links
             from .paths import candidates
             from .send_stream import parse_stream
         else:
+            from links import close_links
             from paths import candidates
             from send_stream import parse_stream
         before, after = info(request["before"]), info(request["after"])
@@ -247,10 +249,11 @@ def operation(request):
         if (operations[0]["uuid"] != UUID(after["uuid"]).hex
                 or operations[0]["parent_uuid"] != UUID(before["uuid"]).hex):
             raise ValueError("incremental stream snapshot identity mismatch")
+        roots = (target(request["before"]), target(request["after"]))
+        names = close_links(roots, candidates(operations, *roots))
         return {"protocol": 1, "no_data": True, "complete": True,
                 "stream_bytes": len(result.stdout), "operations": operations,
-                "candidates": candidates(operations, target(request["before"]),
-                                         target(request["after"]))}
+                "candidates": names}
     if op == "delete":
         if target(request["name"]).exists():
             command("btrfs", "subvolume", "delete", target(request["name"]))

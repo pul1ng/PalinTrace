@@ -76,12 +76,32 @@ def main(output):
                 "if a['entries'].get(p)!=b['entries'].get(p)]))"
             )
             assert set(json.loads(oracle)) <= set(renamed['candidates'])
+            link_cases = []
+            run("import os; from pathlib import Path; "
+                f"p=Path('/pool/{work}'); (p/'linked').write_text('same'); "
+                "os.link(p/'linked',p/'alias\\nname')")
+            link_before = snapshot()
+            for mutation, expected in [
+                ("(p/'linked').write_text('written through alias')", {'linked', 'alias\nname'}),
+                ("os.link(p/'linked',p/'third')", {'linked', 'alias\nname', 'third'}),
+                ("(p/'third').unlink()", {'linked', 'alias\nname', 'third'}),
+                ("data=(p/'linked').read_bytes(); (p/'linked').unlink(); "
+                 "(p/'linked').write_bytes(data)", {'linked', 'alias\nname'}),
+            ]:
+                run("import os; from pathlib import Path; " + f"p=Path('/pool/{work}'); " + mutation)
+                link_after = snapshot()
+                delta = pool.changes(link_before, link_after)
+                assert expected <= set(delta['candidates']), delta
+                link_cases.append(delta)
+                link_before = link_after
             pool.command("delete", name=work)
         report = {"status": "passed", "basic": changes, "renames": renamed,
+                  "hardlinks": link_cases,
                   "duration_sec": time.monotonic() - started, "cleanup_confirmed": True}
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2) + "\n")
-        print(json.dumps({k: v for k, v in report.items() if k != "basic"}))
+        print(json.dumps({k: v for k, v in report.items()
+                          if k in ("status", "duration_sec", "cleanup_confirmed")}))
     finally:
         try:
             pool.discard()
