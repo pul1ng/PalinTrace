@@ -305,6 +305,64 @@ def test_light_restore_failure_cleans_owned_resources(environment, failure):
     assert not env.client_closed
 
 
+def test_exception_in_restore_body_cleans_resources_without_closing_borrowed_handles(environment):
+    env = environment
+    failure = RuntimeError("caller failed")
+    report = env.path.parent / "body-failed.json"
+    with RecordStore.open(env.path) as store:
+        with pytest.raises(RuntimeError) as error:
+            with restore.restore_r1_node(
+                store, "C1", client=env.client, docker_host="unix:///fixture.sock",
+                report_path=report,
+            ):
+                raise failure
+        assert error.value is failure
+        assert store.get(State, env.c0.state_id).state_id == env.c0.state_id
+    assert len(env.closed) == 1 and not env.volumes and not env.containers
+    assert not env.client_closed
+    assert (env.root / env.snapshots[1].name / "file").read_text() == "saved C1"
+    assert json.loads(report.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("during_start", [False, True])
+def test_cleanup_failures_preserve_primary_error_and_attempt_both_resources(
+    environment, monkeypatch, during_start
+):
+    env = environment
+    env.fail_start = during_start
+    calls = []
+    workspace_close = restore.BtrfsWorkspace.close
+    pool_close = restore.BtrfsPool.close
+
+    def close_workspace(workspace):
+        calls.append("workspace")
+        workspace_close(workspace)
+        raise OSError("workspace cleanup confirmation failed")
+
+    def close_pool(pool):
+        calls.append("pool")
+        pool_close(pool)
+        raise OSError("pool cleanup confirmation failed")
+
+    monkeypatch.setattr(restore.BtrfsWorkspace, "close", close_workspace)
+    monkeypatch.setattr(restore.BtrfsPool, "close", close_pool)
+    report = env.path.parent / "cleanup-failed.json"
+    with RecordStore.open(env.path) as store:
+        with pytest.raises(RuntimeError, match="start failure" if during_start else "caller failed") as error:
+            with restore.restore_r1_node(
+                store, "C1", client=env.client, docker_host="unix:///fixture.sock",
+                report_path=report,
+            ):
+                raise RuntimeError("caller failed")
+        assert not store._closed
+    assert calls == ["workspace", "pool"]
+    assert any("cleanup" in note for note in error.value.__notes__)
+    saved = json.loads(report.read_text())
+    assert not saved["cleanup_confirmed"] and len(saved["cleanup_errors"]) == 2
+    assert not env.volumes and not env.containers and not env.client_closed
+    assert (env.root / env.snapshots[1].name / "file").read_text() == "saved C1"
+
+
 @pytest.mark.parametrize("difference", [False, True])
 def test_verify_restore_command_opens_one_pool_and_detects_differences(
     environment, monkeypatch, capsys, difference
