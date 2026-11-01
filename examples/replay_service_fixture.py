@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
-from r1_restore_validation import absent
+from r1_restore_validation import absent, store_hashes
 from replay_validation import fixed_response
 
 from palinreplay.agents import AgentTask
@@ -19,6 +19,7 @@ from palinreplay.record.calls import read_call
 from palinreplay.record.restore import load_restore_materials
 from palinreplay.record.state import BtrfsStateBackend
 from palinreplay.replay.environment import RestoredExecutor
+from palinreplay.replay.plan import pin_replay
 from palinreplay.sandbox.btrfs import BtrfsWorkspace
 from palinreplay.storage.btrfs.models import BtrfsRuntime
 from palinreplay.storage.btrfs.pool import BtrfsPool
@@ -241,6 +242,11 @@ def record_source(preload, output, client):
     try:
         with BtrfsPool(client, base.metadata.snapshot.location) as pool:
             workspace = BtrfsWorkspace(pool, base.metadata.snapshot, uuid4().hex)
+            report["resources"] = {
+                "container_name": workspace.container_name, "volume_name": workspace.volume_name,
+                "workspace": workspace.name, "pool_container_name": pool.name,
+                "pool_volume": pool.location.volume,
+            }
             try:
                 workspace.start(launch, base.metadata.bootstrap_image_id,
                                 environment=launch.environment, labels={})
@@ -298,6 +304,8 @@ def record_source(preload, output, client):
                                   tools=facts, c2_fixture_files_verified=True)
             finally:
                 workspace.close()
+                report["workspace_cleanup_confirmed"] = True
+        report["pool_cleanup_confirmed"] = True
         report["cleanup_confirmed"] = absent(client, report["container_id"])
         assert report["cleanup_confirmed"]
         return report
@@ -306,3 +314,59 @@ def record_source(preload, output, client):
         raise
     finally:
         write_json(output / "report.json", report, replace=True)
+
+
+def volume_absent(client, name):
+    try:
+        client.volumes.get(name)
+    except Exception as error:
+        if getattr(error, "status_code", None) == 404:
+            return True
+        raise
+    return False
+
+
+def source_identity(source, client):
+    """Persist a fixed C2-C4 selection only after original-instance removal."""
+    source = Path(source).absolute()
+    recording = json.loads((source / "report.json").read_text())
+    cleanup = {"container_removed": absent(client, recording["container_id"]),
+               "record_cleanup_confirmed": recording["cleanup_confirmed"]}
+    if not all(cleanup.values()):
+        raise AssertionError("source container cleanup is unconfirmed; Replay is forbidden")
+    with RecordStore.open(source / "record") as store:
+        plan = pin_replay(store, "C2", "C4", run_id=recording["run_id"])
+        materials = [load_restore_materials(store, node.node_id) for node in plan.nodes]
+        c2 = materials[0]
+        assert c2.runtime.source_container_id == recording["container_id"]
+        assert c2.runtime.launch.network_mode == "none"
+        resources = recording["resources"]
+        cleanup.update(
+            task_container_removed=absent(client, resources["container_name"]),
+            root_volume_removed=volume_absent(client, resources["volume_name"]),
+            pool_helper_removed=absent(client, resources["pool_container_name"]),
+        )
+        with BtrfsPool(client, c2.snapshot.location) as pool:
+            snapshots = []
+            for item in materials:
+                pool.verify(item.snapshot)
+                snapshots.append(item.snapshot.model_dump(mode="json"))
+            check = pool.container.exec_run(["python3", "-B", "-c",
+                "from pathlib import Path; "
+                f"assert not Path('/pool/{resources['workspace']}').exists(); "
+                f"root = Path('/pool/{c2.snapshot.name}{DIRECTORY}'); "
+                f"assert all((root/name).read_text() == body "
+                f"for name, body in {fixture_files()!r}.items())"])
+            assert check.exit_code == 0, check.output
+            cleanup["workspace_removed"] = True
+        cleanup["pool_helper_removed"] = absent(client, resources["pool_container_name"])
+        client.volumes.get(c2.snapshot.location.volume)
+        cleanup["persistent_pool_retained"] = True
+        assert all(cleanup.values()), cleanup
+        identity = {"source_store": str((source / "record").resolve()),
+                    "selection": plan.provenance(), "snapshots": snapshots,
+                    "store_hashes": store_hashes(source / "record"),
+                    "cleanup": cleanup, "snapshot_files_readable": True}
+    write_json(source / "identity.json", identity)
+    write_json(source / "cleanup.json", cleanup)
+    return identity
