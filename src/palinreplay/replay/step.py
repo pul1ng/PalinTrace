@@ -1,12 +1,21 @@
 """Record one actual historical step; scheduling and policy live above this seam."""
 
+from contextlib import nullcontext
+
 from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
 from palinreplay.replay.history import supply_history
 
 
-def execute_step(recorder, context, executor, history, *, on_result=None):
+def execute_step(recorder, context, executor, history, *, on_result=None, stats=None):
     step = recorder.begin_step()
     supply_history(step, history, context.messages, context.adopt)
+    if stats:
+        stats.data["historical_answer_supplies"] += 1
+
+    def commit():
+        with stats.timed("snapshot_commit") if stats else nullcontext():
+            return recorder.commit_step()
+
     calls, results = [], []
     for index, tool in enumerate(history.tools):
         adapter = CallAdapter(
@@ -20,7 +29,10 @@ def execute_step(recorder, context, executor, history, *, on_result=None):
         )
         call = step.tool(adapter, tool.request, tool_call_id=tool.source["tool_call_id"])
         calls.append(call)
-        result = call.invoke()
+        if stats:
+            stats.data["actual_tool_executions"] += 1
+        with stats.timed("execution") if stats else nullcontext():
+            result = call.invoke()
         results.append(result)
         if on_result is not None:
             on_result(index, tool, call, result, index == len(history.tools) - 1)
@@ -34,6 +46,6 @@ def execute_step(recorder, context, executor, history, *, on_result=None):
             if len(history.tools) != 1:
                 raise ValueError("submission short-circuited an incomplete tool group") from submitted
             context.adopt([(call, submitted.messages)], submitted.messages)
-            return recorder.commit_step(), results
+            return commit(), results
     context.accept_results(history, calls, results)
-    return recorder.commit_step(), results
+    return commit(), results

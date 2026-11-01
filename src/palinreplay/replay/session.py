@@ -9,6 +9,7 @@ from palinreplay.replay.initial import initial_recorder
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.run import btrfs_comparison, replay_range
+from palinreplay.replay.stats import ReplayStats
 from palinreplay.sandbox.client import connect_docker, docker_endpoint
 from palinreplay.storage.btrfs.models import Snapshot
 from palinreplay.storage.io import outside_store, write_json
@@ -24,6 +25,8 @@ def run_replay(source, start, end=None, *, run_id=None, output, client=None):
     report = {"schema_version": "palinreplay.replay-report.v1", "status": "failed",
               "phase": "preflight", "source_store": str(source), "output": str(output),
               "cleanup_confirmed": False, "cleanup_errors": []}
+    stats = ReplayStats()
+    report["statistics"] = stats.data
     write_json(output / "report.json", report)
     restored = recorder = store = None
     own_client = client is None
@@ -34,12 +37,13 @@ def run_replay(source, start, end=None, *, run_id=None, output, client=None):
             materials = load_replay_materials(origin, plan)
             baseline = load_restore_materials(origin, plan.start.node_id)
             snapshots = [Snapshot.model_validate(origin.read_json(state.manifest)) for state in plan.states]
+        stats.inherit(materials.context)
         report["source"] = plan.provenance()
         context = ReplayContext(materials)
         if client is None:
             client = connect_docker(600)
         report["phase"] = "restore"
-        with RecordStore.open(source) as origin:
+        with stats.timed("restore"), RecordStore.open(source) as origin:
             restored = restore_r1_node(origin, plan.start.node_id, client=client,
                                        docker_host=docker_endpoint(),
                                        report_path=output / "restore.json")
@@ -50,11 +54,12 @@ def run_replay(source, start, end=None, *, run_id=None, output, client=None):
                     raise ValueError("historical interpreter differs from the restored launch shell")
         store = RecordStore.create(output / "record")
         report["phase"] = "initial-boundary"
-        recorder = initial_recorder(store, materials, executor, context.export)
+        with stats.timed("snapshot_commit"):
+            recorder = initial_recorder(store, materials, executor, context.export)
         report["run_id"] = recorder.run.run_id
         report["phase"] = "execute"
         replay_range(recorder, context, executor, materials,
-                     btrfs_comparison(store, executor, snapshots), report=report)
+                     btrfs_comparison(store, executor, snapshots), report=report, stats=stats)
         if recorder.phase == "ready":
             recorder.finish("Replay " + report["status"], details={"replay": report})
         report["phase"] = "finished"

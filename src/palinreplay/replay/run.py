@@ -2,6 +2,7 @@
 
 from palinreplay.core.models import State
 from palinreplay.replay.compare import compare_tool
+from palinreplay.replay.stats import ReplayStats
 from palinreplay.replay.step import execute_step
 from palinreplay.storage.btrfs.models import Snapshot
 
@@ -16,13 +17,14 @@ def node_snapshot(store, node):
     return Snapshot.model_validate(store.read_json(store.get(State, node.state_id).manifest))
 
 
-def replay_range(recorder, context, executor, materials, compare_files=None, *, report=None):
+def replay_range(recorder, context, executor, materials, compare_files=None, *, report=None, stats=None):
+    stats = stats or ReplayStats()
     plan = materials.plan
     mappings = [{"source_node_id": plan.start.node_id, "source_index": plan.start.index,
                  "node_id": recorder.current_node.node_id, "index": 0}]
     if report is None:
         report = {}
-    report.update(status="match", mappings=mappings, steps=[])
+    report.update(status="match", mappings=mappings, steps=[], statistics=stats.data)
     for index, history in enumerate(materials.steps):
         previous = recorder.current_node
         tool_comparisons = []
@@ -38,7 +40,7 @@ def replay_range(recorder, context, executor, materials, compare_files=None, *, 
                 raise PartialDifference(compared)
 
         try:
-            node, _ = execute_step(recorder, context, executor, history, on_result=on_result)
+            node, _ = execute_step(recorder, context, executor, history, on_result=on_result, stats=stats)
         except PartialDifference as error:
             report.update(status="difference", stop_reason="tool-result", incomplete_step=True,
                           first_difference=error.comparison)
@@ -55,6 +57,7 @@ def replay_range(recorder, context, executor, materials, compare_files=None, *, 
             raise ValueError("Replay requires incremental file comparison")
         files = compare_files(index, previous, node)
         entry["files"] = files
+        stats.files(files)
         if not files["equal"]:
             report.update(status="difference", stop_reason="file-state", incomplete_step=False,
                           first_difference=files)

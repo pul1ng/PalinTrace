@@ -157,14 +157,18 @@ class BtrfsPool:
 
     def compare_incremental(self, source_before, source_after, actual_before, actual_after):
         """Assumes the previous pair matched under rootfs-files-v1."""
+        from time import monotonic
+
         from palinreplay.storage.rootfs import SCOPE
 
+        started = monotonic()
         source = self.changes(source_before, source_after)
         actual = self.changes(actual_before, actual_after)
         names = sorted(set(source["candidates"]) | set(actual["candidates"]))
+        discovery_sec = monotonic() - started
         compared = self.command("compare_candidates", source=source_after.name,
                                 actual=actual_after.name, candidates=names, scope=SCOPE)
-        return {**compared, "source_delta": source, "actual_delta": actual}
+        return {**compared, "discovery_sec": discovery_sec, "source_delta": source, "actual_delta": actual}
 
     def close(self):
         if self.closed:
