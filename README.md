@@ -46,7 +46,15 @@ bash scripts/quickstart_record.sh
 
 默认调用真实模型、最多运行两步。产物按类型保存在 `outputs/`，名称以 `YYMMDD_HHMMSS_` 开头；同一轮共用时间戳。脚本的 `--output DIR` 可更改产物根目录，其他参数见 `--help`。
 
-### 3. Replay（待实现）
+### 3. Replay
+
+从已提交节点恢复，并沿固定历史真实执行后续工具，不调用模型：
+
+```bash
+.venv/bin/palin replay "$PALIN_RUN" --from C20 --to C23
+```
+
+源 C20 成为新 C0，源 C21–C23 成为新 C1–C3。省略 `--to` 时固定启动时的末尾节点；`--run` 选择来源 Run，`--output` 指定新目录，默认写入 `outputs/replay/时间戳_任务ID/` 的 `report.json` 和独立 `record/`。工具原始输出、退出码及增量文件状态按固定规则比较，文件 mtime 严格按 `rootfs-files-v1` 的秒值比较。匹配返回 0，差异返回 2，执行/材料/清理失败返回 1；差异后停止并保留真实节点或未完成尾部。无自动重试或服务恢复，原轨迹保持不变。
 
 ### 4. Resume（待实现）
 

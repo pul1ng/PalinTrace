@@ -1,0 +1,55 @@
+"""Record one actual historical step; scheduling and policy live above this seam."""
+
+from contextlib import nullcontext
+
+from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
+from palinreplay.replay.history import supply_history
+
+
+def execute_step(recorder, context, executor, history, *, on_result=None, stats=None):
+    step = recorder.begin_step()
+    context.historical_answer(history)
+    supply_history(step, history, context.messages, context.adopt)
+    if stats:
+        stats.data["historical_answer_supplies"] += 1
+
+    def commit():
+        with stats.timed("snapshot_commit") if stats else nullcontext():
+            return recorder.commit_step()
+
+    calls, results = [], []
+    for index, tool in enumerate(history.tools):
+        def execute(request):
+            if stats:
+                stats.data["actual_tool_executions"] += 1
+            with stats.timed("execution") if stats else nullcontext():
+                return executor.execute(request)
+
+        adapter = CallAdapter(
+            name="mini.bash", execute=execute, capture_request=Payload.json,
+            capture_result=lambda result: ResultCapture(
+                Payload(result.output), "sandbox-merged-output-bytes",
+                details={"decoded": context.native.BorrowedEnvironment.output(result),
+                         "duration_sec": result.duration_sec},
+                outcome="error" if result.exit_code else "returned",
+            ), visibility="observed-attempt",
+        )
+        call = step.tool(adapter, tool.request, tool_call_id=tool.source["tool_call_id"])
+        calls.append(call)
+        result = call.invoke()
+        results.append(result)
+        if on_result is not None:
+            on_result(index, tool, call, result, index == len(history.tools) - 1)
+        # Preserve mini's native singleton submission behavior. A submission in
+        # the middle of a group cannot publish a complete step.
+        try:
+            context.native.DockerEnvironment._check_finished(
+                executor, context.native.BorrowedEnvironment.output(result)
+            )
+        except context.native.Submitted as submitted:
+            if len(history.tools) != 1:
+                raise ValueError("submission short-circuited an incomplete tool group") from submitted
+            context.adopt([(call, submitted.messages)], submitted.messages)
+            return commit(), results
+    context.accept_results(history, calls, results)
+    return commit(), results

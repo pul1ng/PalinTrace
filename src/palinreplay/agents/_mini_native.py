@@ -371,6 +371,23 @@ class BorrowedEnvironment:
         return output
 
 
+def adopt_messages(messages, adoptions, deliveries, offered, receive):
+    """Record native batch admission; shared by recording and local Replay."""
+    start = len(messages)
+    result = deliver_batch(deliveries, encode=Payload.json, receive=receive)
+    offset = start
+    for call, batch in deliveries:
+        stop = offset + len(batch)
+        event = call.accept({"start": offset, "stop": stop, "messages": messages[offset:stop]},
+                            encode=Payload.json)
+        adoptions.append({"execution_id": call.execution_id, "event_sequence": event.sequence,
+                          "start": offset, "stop": stop})
+        offset = stop
+    if offset != len(messages) or offset != start + len(offered):
+        raise ValueError("unexpected native message batch")
+    return result
+
+
 class RecordingAgent(DefaultAgent):
     """Keep DefaultAgent.run/query/execute_actions and their exception handlers."""
 
@@ -517,29 +534,13 @@ class RecordingAgent(DefaultAgent):
 
     @timed("agent.adopt")
     def _adopt(self, deliveries, messages):
-        start = len(self.messages)
-        result = deliver_batch(
-            deliveries,
-            encode=Payload.json,
-            receive=lambda offered: super(RecordingAgent, self).add_messages(*messages),
-        )
-        offset = start
-        for call, offered in deliveries:
-            stop = offset + len(offered)
-            adopted = {"start": offset, "stop": stop, "messages": self.messages[offset:stop]}
-            event = call.accept(adopted, encode=Payload.json)
-            self.adoptions.append(
-                {
-                    "execution_id": call.execution_id,
-                    "event_sequence": event.sequence,
-                    "start": offset,
-                    "stop": stop,
-                }
+        try:
+            return adopt_messages(
+                self.messages, self.adoptions, deliveries, messages,
+                lambda offered: super(RecordingAgent, self).add_messages(*messages),
             )
-            offset = stop
-        if offset != len(self.messages):
-            self.recorder._abort("adoption-map", ValueError("unexpected native message batch"))
-        return result
+        except ValueError as error:
+            self.recorder._abort("adoption-map", error)
 
     def add_messages(self, *messages):
         if self.recorder.phase in {"step", "ready"}:

@@ -19,6 +19,20 @@ from pathlib import Path
 POOL = Path("/pool")
 STORAGE = Path("/storage")
 DEV = Path("/kerneldev")
+REQUESTS = Path("/tmp")
+
+
+def read_request(arguments):
+    if len(arguments) == 1:
+        return json.loads(arguments[0])
+    if (len(arguments) != 2 or arguments[0] != "--request-file"
+            or not re.fullmatch(r"palin-btrfs-request-[0-9a-f]{32}\.json", arguments[1])):
+        raise ValueError("invalid Btrfs worker request arguments")
+    path = REQUESTS / arguments[1]
+    try:
+        return json.loads(path.read_bytes())
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def command(*args):
@@ -119,7 +133,7 @@ def healthy():
         raise OSError("Btrfs has recorded storage/checksum errors")
 
 
-def inventory(root, scope, include_root=False):
+def inventory(root, scope, include_root=True):
     entries, groups = {}, {}
     pending = [(".", root)]
     while pending:
@@ -224,6 +238,45 @@ def operation(request):
         )
         command("btrfs", "filesystem", "sync", POOL)
         return info(request["destination"])
+    if op == "changes":
+        # This module is explicitly shipped alongside the standalone worker.
+        if __package__:
+            from .links import close_links
+            from .paths import candidates
+            from .send_stream import parse_stream
+        else:
+            from links import close_links
+            from paths import candidates
+            from send_stream import parse_stream
+        before, after = info(request["before"]), info(request["after"])
+        if not before["readonly"] or not after["readonly"]:
+            raise ValueError("incremental discovery requires read-only snapshots")
+        result = subprocess.run(
+            ["btrfs", "send", "--proto", "1", "--no-data", "-p",
+             str(target(request["before"])), str(target(request["after"]))],
+            capture_output=True, timeout=1200,
+        )
+        if result.returncode:
+            raise ValueError("Btrfs no-data send failed: " + result.stderr.decode(errors="replace"))
+        operations = parse_stream(result.stdout)
+        from uuid import UUID
+        if (operations[0]["uuid"] != UUID(after["uuid"]).hex
+                or operations[0]["parent_uuid"] != UUID(before["uuid"]).hex):
+            raise ValueError("incremental stream snapshot identity mismatch")
+        roots = (target(request["before"]), target(request["after"]))
+        names = close_links(roots, candidates(operations, *roots))
+        return {"protocol": 1, "no_data": True, "complete": True,
+                "stream_bytes": len(result.stdout), "operations": operations,
+                "candidates": names}
+    if op == "compare_candidates":
+        if __package__:
+            from .incremental import compare_candidates
+        else:
+            from incremental import compare_candidates
+        if not info(request["source"])["readonly"] or not info(request["actual"])["readonly"]:
+            raise ValueError("file comparison requires read-only snapshots")
+        return compare_candidates(target(request["source"]), target(request["actual"]),
+                                  request["candidates"], request["scope"])
     if op == "delete":
         if target(request["name"]).exists():
             command("btrfs", "subvolume", "delete", target(request["name"]))
@@ -257,7 +310,7 @@ def operation(request):
 if __name__ == "__main__":
     started = time.monotonic()
     try:
-        value = operation(json.loads(sys.argv[1]))
+        value = operation(read_request(sys.argv[1:]))
         print(json.dumps({"ok": True, "result": value, "seconds": time.monotonic() - started}))
     except Exception as error:
         print(json.dumps({"ok": False, "type": type(error).__name__, "error": str(error)}))
