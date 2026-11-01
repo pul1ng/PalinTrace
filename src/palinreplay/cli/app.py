@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 import palinreplay.cli.preload as preload_cli
 import palinreplay.cli.record as record_cli
+import palinreplay.cli.replay as replay_cli
 from palinreplay.cli.outputs import conversion_name, default_output
 from palinreplay.tasks import convert, download_dataset, json_text, load_task, prepare_images
 
@@ -59,11 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     record_cli.add_commands(commands)
     preload_cli.add_commands(commands)
+    replay_cli.add_commands(commands)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "replay":
+        return replay_cli.execute(args)
     if args.command == "record":
         return record_cli.execute(args)
     if args.command == "preload":
