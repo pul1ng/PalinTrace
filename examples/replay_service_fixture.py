@@ -1,7 +1,9 @@
 """Real missing-service Replay acceptance with fixed decisions and no model service."""
 
+import argparse
 import json
 import shlex
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +24,7 @@ from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.session import run_replay
 from palinreplay.sandbox.btrfs import BtrfsWorkspace
+from palinreplay.sandbox.client import connect_docker
 from palinreplay.storage.btrfs.models import BtrfsRuntime
 from palinreplay.storage.btrfs.pool import BtrfsPool
 from palinreplay.storage.io import write_json
@@ -227,6 +230,8 @@ def tool_fact(store, node):
         "node_id": node.node_id, "index": node.index,
         "execution_id": trace.execution.execution_id,
         "request": store.read_json(trace.execution.request),
+        "outcome": result.outcome,
+        "definitive": result.outcome != "unknown" and details.get("exception") is None,
         "exit_code": details["backend"]["decoded"]["returncode"],
         "output": store.read_bytes(result.payload).decode("utf-8"),
         "accepted": store.read_json(trace.events[-1].payload),
@@ -484,14 +489,16 @@ def classify_result(source_tool, actual_tool, report, r1):
 
     observed = response(actual_tool)
     checks = {
-        "source_request_succeeded": source_tool["exit_code"] == 0
+        "source_request_succeeded": source_tool.get("definitive") is True
+                                    and source_tool["exit_code"] == 0
                                     and response(source_tool) == {"status": 200, "body": BODY},
         "r1_passed": r1.get("status") == "passed"
                      and r1.get("files", {}).get("equal") is True
                      and r1.get("root_attributes", {}).get("equal") is True
                      and bool(r1.get("context_checks"))
                      and all(r1["context_checks"].values()),
-        "connection_refused": type(actual_tool["exit_code"]) is int
+        "connection_refused": actual_tool.get("definitive") is True
+                              and type(actual_tool["exit_code"]) is int
                               and actual_tool["exit_code"] != 0
                               and observed.get("error") == "ConnectionRefusedError"
                               and observed.get("errno") == 111,
@@ -556,3 +563,114 @@ def check_difference(source, replay):
         raise
     finally:
         write_json(replay / "difference-check.json", result)
+
+
+def check_resources(source, replays, client):
+    """Query Docker and retained snapshots after every execution has closed."""
+    source = Path(source)
+    recording = json.loads((source / "report.json").read_text())
+    identity = json.loads((source / "identity.json").read_text())
+    resources = [recording["resources"]]
+    for replay in replays:
+        restored = json.loads((Path(replay) / "restore.json").read_text())
+        assert restored["cleanup_confirmed"] and not restored["cleanup_errors"]
+        resources.append(restored)
+    cleanup = {"temporary_resources": [], "retained_snapshots": []}
+    for item in resources:
+        checked = {"container_name": item["container_name"],
+                   "container_removed": absent(client, item["container_name"]),
+                   "root_volume_removed": volume_absent(client, item["volume_name"]),
+                   "pool_helper_removed": absent(client, item["pool_container_name"])}
+        assert all(checked[key] for key in ("container_removed", "root_volume_removed",
+                                            "pool_helper_removed")), checked
+        cleanup["temporary_resources"].append(checked)
+    with RecordStore.open(source / "record") as store:
+        location = load_restore_materials(store, "C2").snapshot.location
+    with BtrfsPool(client, location) as pool:
+        check = pool.container.exec_run(["python3", "-B", "-c",
+            "from pathlib import Path; "
+            f"assert all(not Path('/pool/'+name).exists() for name in "
+            f"{[item['workspace'] for item in resources]!r})"])
+        assert check.exit_code == 0, check.output
+        for directory in [source, *map(Path, replays)]:
+            with RecordStore.open(directory / "record") as store:
+                for node in sorted(store.list(Node), key=lambda node: node.index):
+                    materials = load_restore_materials(store, node.node_id)
+                    pool.verify(materials.snapshot)
+                    cleanup["retained_snapshots"].append({
+                        "store": str(store.root), "index": node.index,
+                        "snapshot": materials.snapshot.model_dump(mode="json"),
+                        "readonly_identity_verified": True,
+                    })
+    assert absent(client, pool.name)
+    client.volumes.get(location.volume)
+    cleanup.update(workspaces_removed=True, pool_helper_removed=True,
+                   pool_close_confirmed=pool.closed, persistent_pool_retained=True,
+                   source_unchanged=store_hashes(source / "record") == identity["store_hashes"])
+    assert cleanup["source_unchanged"]
+    return cleanup
+
+
+def main(preload, output):
+    output = Path(output).absolute()
+    output.mkdir(parents=True, exist_ok=False)
+    started = time.monotonic()
+    summary = {"status": "failed", "preload": str(Path(preload).absolute()),
+               "output": str(output), "service": {
+                   "address": ADDRESS, "start_command": START_COMMAND,
+                   "stop_command": STOP_COMMAND, "request_command": REQUEST_COMMAND,
+                   "manual_alive_boundary": {"after_nodes": ["C1", "C2", "C3"],
+                                             "stopped_after": "C4"},
+               }}
+    client = None
+    try:
+        client = connect_docker(600)
+        summary["phase"] = "record"
+        recording = record_source(preload, output / "source", client)
+        summary["phase"] = "source-identity"
+        identity = source_identity(output / "source", client)
+        summary["source"] = {"record": str(output / "source" / "record"),
+                             "run_id": recording["run_id"],
+                             "selection_sha256": identity["selection"]["selection_sha256"],
+                             "nodes": [{"index": node["index"], "node_id": node["node_id"]}
+                                       for node in identity["selection"]["nodes"]],
+                             "snapshots": identity["snapshots"],
+                             "fixed_response_supplies": recording["fixed_response_supplies"],
+                             "actual_model_calls": recording["actual_model_calls"]}
+        replay = output / "replay-1"
+        summary["phase"] = "replay"
+        report = replay_once(output / "source", replay, client)
+        summary["phase"] = "r1-check"
+        r1 = check_r1(output / "source", replay, client)
+        summary["phase"] = "difference-check"
+        difference = check_difference(output / "source", replay)
+        summary["replays"] = [{
+            "output": str(replay), "status": difference["status"],
+            "replay_status": report["status"], "stop_reason": report["stop_reason"],
+            "incomplete_step": report["incomplete_step"], "r1_paths": r1["files"]["paths"],
+            "source_result": {key: difference["source_tool"][key] for key in ("exit_code", "output")},
+            "actual_result": {key: difference["actual_tool"][key] for key in ("exit_code", "output")},
+            "statistics": report["statistics"], "mappings": report["mappings"],
+        }]
+        summary["phase"] = "cleanup-check"
+        cleanup = check_resources(output / "source", [replay], client)
+        write_json(output / "cleanup.json", cleanup)
+        summary.update(status="passed", phase="finished", source_unchanged=cleanup["source_unchanged"],
+                       cleanup_confirmed=True)
+    except Exception as error:
+        summary.update(error_type=type(error).__name__, error=str(error))
+    finally:
+        if client is not None:
+            client.close()
+        summary["duration_sec"] = time.monotonic() - started
+        write_json(output / "summary.json", summary)
+    print(json.dumps({key: summary[key] for key in ("status", "output", "duration_sec")}))
+    return 0 if summary["status"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preload", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    raise SystemExit(main(args.preload, args.output))
