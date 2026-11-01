@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 import palinreplay.storage.rootfs as _rootfs
-from palinreplay.core.models import Node, State
+from palinreplay.core.models import Node, Run, State
 from palinreplay.core.serialization import json_bytes
+from palinreplay.record.inspect import resolve_node
 from palinreplay.sandbox.base import SandboxCleanupError, SandboxError
 from palinreplay.sandbox.btrfs import BtrfsWorkspace
 from palinreplay.storage.artifacts import sync_directory
@@ -17,6 +21,60 @@ from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, Snapshot
 from palinreplay.storage.btrfs.pool import BtrfsPool
 from palinreplay.storage.btrfs.verification import capture_info
 from palinreplay.storage.store import IntegrityError, RecordStore
+
+
+@dataclass(frozen=True)
+class RestoreMaterials:
+    """Saved node materials; external snapshot identity and files are not verified."""
+
+    run: Run
+    node: Node
+    state: State
+    snapshot: Snapshot
+    runtime: BtrfsRuntime
+    config: object
+    context: object
+    input_position: object
+
+
+def load_restore_materials(
+    store: RecordStore, selector: str, *, run_id: str | None = None
+) -> RestoreMaterials:
+    """Read one committed node's required materials without creating restore resources."""
+    with store.snapshot():
+        node = resolve_node(store, selector, run_id)
+        run = store.get(Run, node.run_id)
+        state = store.get(State, node.state_id)
+        if state.backend != BACKEND or state.capture != capture_info() or state.dependencies:
+            raise IntegrityError("unsupported Btrfs capture scope or dependencies")
+
+        def read(role, ref):
+            try:
+                return store.read_json(ref)
+            except IntegrityError as error:
+                raise IntegrityError(f"invalid {role} material: {error}") from error
+
+        config = read("run config", run.config)
+        context = read("node context", node.context)
+        input_position = read("node input position", node.input_position)
+        try:
+            snapshot = Snapshot.model_validate(read("snapshot manifest", state.manifest))
+        except ValidationError as error:
+            raise IntegrityError("invalid snapshot manifest material") from error
+        try:
+            runtime = BtrfsRuntime.model_validate(read("Btrfs runtime", state.runtime))
+        except ValidationError as error:
+            raise IntegrityError("invalid Btrfs runtime material") from error
+
+        read_refs = (run.config, node.context, node.input_position, state.manifest, state.runtime)
+        for ref in state.artifacts:
+            if ref not in read_refs:
+                try:
+                    store.verify_artifact(ref)
+                except IntegrityError as error:
+                    raise IntegrityError(f"invalid state artifact {ref.sha256}: {error}") from error
+
+        return RestoreMaterials(run, node, state, snapshot, runtime, config, context, input_position)
 
 
 class RestoredNode:

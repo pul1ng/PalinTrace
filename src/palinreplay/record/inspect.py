@@ -70,9 +70,15 @@ def resolve_node(store: RecordStore, selector: str, run_id: str | None = None) -
         candidates = [node for node in nodes if node.index == int(selector[1:])]
     else:
         candidates = [node for node in nodes if node.node_id == selector]
-    if len(candidates) != 1:
+    if not candidates:
+        scope = f" in run {run_id!r}" if run_id is not None else ""
         raise RecordUsageError(
-            "node selector must match exactly one committed node; use --run or its ID"
+            f"node selector {selector!r} matches no committed node{scope}; expected exactly one"
+        )
+    if len(candidates) > 1:
+        raise RecordUsageError(
+            f"node selector {selector!r} matches {len(candidates)} committed nodes; "
+            "expected exactly one; use --run or its full ID"
         )
     return candidates[0]
 
