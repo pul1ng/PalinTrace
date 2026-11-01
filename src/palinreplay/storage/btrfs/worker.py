@@ -224,6 +224,29 @@ def operation(request):
         )
         command("btrfs", "filesystem", "sync", POOL)
         return info(request["destination"])
+    if op == "changes":
+        # This module is explicitly shipped alongside the standalone worker.
+        if __package__:
+            from .send_stream import parse_stream
+        else:
+            from send_stream import parse_stream
+        before, after = info(request["before"]), info(request["after"])
+        if not before["readonly"] or not after["readonly"]:
+            raise ValueError("incremental discovery requires read-only snapshots")
+        result = subprocess.run(
+            ["btrfs", "send", "--proto", "1", "--no-data", "-p",
+             str(target(request["before"])), str(target(request["after"]))],
+            capture_output=True, timeout=1200,
+        )
+        if result.returncode:
+            raise ValueError("Btrfs no-data send failed: " + result.stderr.decode(errors="replace"))
+        operations = parse_stream(result.stdout)
+        from uuid import UUID
+        if (operations[0]["uuid"] != UUID(after["uuid"]).hex
+                or operations[0]["parent_uuid"] != UUID(before["uuid"]).hex):
+            raise ValueError("incremental stream snapshot identity mismatch")
+        return {"protocol": 1, "no_data": True, "complete": True,
+                "stream_bytes": len(result.stdout), "operations": operations}
     if op == "delete":
         if target(request["name"]).exists():
             command("btrfs", "subvolume", "delete", target(request["name"]))

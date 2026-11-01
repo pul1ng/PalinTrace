@@ -94,12 +94,14 @@ class BtrfsPool:
             )
             self.container.start()
             # Upload only the trusted packaged worker, never user code.
-            body = Path(__file__).with_name("worker.py").read_bytes()
             stream = io.BytesIO()
             with tarfile.open(fileobj=stream, mode="w") as archive:
-                member = tarfile.TarInfo("palin-btrfs-worker.py")
-                member.size, member.mode = len(body), 0o400
-                archive.addfile(member, io.BytesIO(body))
+                for source, name in (("worker.py", "palin-btrfs-worker.py"),
+                                     ("send_stream.py", "send_stream.py")):
+                    body = Path(__file__).with_name(source).read_bytes()
+                    member = tarfile.TarInfo(name)
+                    member.size, member.mode = len(body), 0o400
+                    archive.addfile(member, io.BytesIO(body))
             self.container.put_archive("/", stream.getvalue())
             self.started = True
             # Finish ordinary archive transfers before mounting the private
@@ -145,6 +147,11 @@ class BtrfsPool:
         actual = self.command("info", name=snapshot.name)
         if not actual["readonly"] or UUID(actual["uuid"]) != snapshot.uuid:
             raise IntegrityError("snapshot identity or read-only property differs")
+
+    def changes(self, before, after):
+        self.verify(before)
+        self.verify(after)
+        return self.command("changes", before=before.name, after=after.name)
 
     def close(self):
         if self.closed:
