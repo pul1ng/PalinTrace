@@ -637,23 +637,30 @@ def main(preload, output):
                              "snapshots": identity["snapshots"],
                              "fixed_response_supplies": recording["fixed_response_supplies"],
                              "actual_model_calls": recording["actual_model_calls"]}
-        replay = output / "replay-1"
-        summary["phase"] = "replay"
-        report = replay_once(output / "source", replay, client)
-        summary["phase"] = "r1-check"
-        r1 = check_r1(output / "source", replay, client)
-        summary["phase"] = "difference-check"
-        difference = check_difference(output / "source", replay)
-        summary["replays"] = [{
-            "output": str(replay), "status": difference["status"],
-            "replay_status": report["status"], "stop_reason": report["stop_reason"],
-            "incomplete_step": report["incomplete_step"], "r1_paths": r1["files"]["paths"],
-            "source_result": {key: difference["source_tool"][key] for key in ("exit_code", "output")},
-            "actual_result": {key: difference["actual_tool"][key] for key in ("exit_code", "output")},
-            "statistics": report["statistics"], "mappings": report["mappings"],
-        }]
+        replays = [output / "replay-1", output / "replay-2"]
+        summary["replays"] = []
+        for replay in replays:
+            summary["phase"] = f"{replay.name}:replay"
+            report = replay_once(output / "source", replay, client)
+            summary["phase"] = f"{replay.name}:r1-check"
+            r1 = check_r1(output / "source", replay, client)
+            summary["phase"] = f"{replay.name}:difference-check"
+            difference = check_difference(output / "source", replay)
+            summary["replays"].append({
+                "output": str(replay), "status": difference["status"], "run_id": report["run_id"],
+                "source_selection_sha256": report["source"]["selection_sha256"],
+                "replay_status": report["status"], "stop_reason": report["stop_reason"],
+                "incomplete_step": report["incomplete_step"], "r1_paths": r1["files"]["paths"],
+                "source_result": {key: difference["source_tool"][key]
+                                  for key in ("exit_code", "output")},
+                "actual_result": {key: difference["actual_tool"][key]
+                                  for key in ("exit_code", "output")},
+                "statistics": report["statistics"], "mappings": report["mappings"],
+            })
+        assert len({item["run_id"] for item in summary["replays"]}) == 2
+        assert len({item["mappings"][0]["node_id"] for item in summary["replays"]}) == 2
         summary["phase"] = "cleanup-check"
-        cleanup = check_resources(output / "source", [replay], client)
+        cleanup = check_resources(output / "source", replays, client)
         write_json(output / "cleanup.json", cleanup)
         summary.update(status="passed", phase="finished", source_unchanged=cleanup["source_unchanged"],
                        cleanup_confirmed=True)
