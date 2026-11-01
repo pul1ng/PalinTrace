@@ -23,7 +23,7 @@ def selected_inventory(root, names, scope):
     entries, groups, read_bytes = {}, {}, 0
     hashes = {}
     for name in sorted(names):
-        if name == "." or not included(name, scope):
+        if not included(name, scope):
             continue
         path = endpoint_path(root, name)
         if path is None:
@@ -58,7 +58,7 @@ def selected_inventory(root, names, scope):
 def compare_candidates(source, actual, names, scope):
     started = time.monotonic()
     names = close_links((source, actual), names)
-    names = [name for name in names if name != "." and included(name, scope)]
+    names = [name for name in names if included(name, scope)]
     left, left_bytes = selected_inventory(source, names, scope)
     right, right_bytes = selected_inventory(actual, names, scope)
     paths = sorted(p for p in names if left["entries"].get(p) != right["entries"].get(p))

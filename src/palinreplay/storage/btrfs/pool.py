@@ -125,6 +125,44 @@ class BtrfsPool:
         response = self.container.exec_run(
             ["python3", "/palin-btrfs-worker.py", json.dumps({"op": op, **values})],
         )
+        return self._command_result(response, op)
+
+    def _file_command(self, op, **values):
+        # Keep large candidate lists out of exec argv. The request lives on the
+        # owned helper's /tmp, outside /pool and the task workspace. Never use
+        # archive transfers to the privately mounted Btrfs filesystem.
+        name = "palin-btrfs-request-" + uuid4().hex + ".json"
+        body = json.dumps({"op": op, **values}).encode("utf-8")
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as archive:
+            member = tarfile.TarInfo(name)
+            member.size, member.mode = len(body), 0o600
+            archive.addfile(member, io.BytesIO(body))
+        primary = None
+        try:
+            if not self.container.put_archive("/tmp", stream.getvalue()):
+                raise SandboxError("Btrfs request transfer was rejected")
+            response = self.container.exec_run(
+                ["python3", "/palin-btrfs-worker.py", "--request-file", name],
+            )
+            return self._command_result(response, op)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            # The worker consumes the file before dispatch. Also remove it if
+            # upload or process startup failed, preserving the original error.
+            try:
+                cleanup = self.container.exec_run(["rm", "-f", "--", "/tmp/" + name])
+                if cleanup.exit_code:
+                    raise SandboxCleanupError("Btrfs request file removal unconfirmed")
+            except BaseException as error:
+                if primary is None:
+                    raise
+                primary.add_note(f"Btrfs request cleanup also failed: {error!r}")
+
+    @staticmethod
+    def _command_result(response, op):
         try:
             value = json.loads(response.output)
         except (ValueError, TypeError) as error:
@@ -166,8 +204,8 @@ class BtrfsPool:
         actual = self.changes(actual_before, actual_after)
         names = sorted(set(source["candidates"]) | set(actual["candidates"]))
         discovery_sec = monotonic() - started
-        compared = self.command("compare_candidates", source=source_after.name,
-                                actual=actual_after.name, candidates=names, scope=SCOPE)
+        compared = self._file_command("compare_candidates", source=source_after.name,
+                                      actual=actual_after.name, candidates=names, scope=SCOPE)
         return {**compared, "discovery_sec": discovery_sec, "source_delta": source, "actual_delta": actual}
 
     def close(self):

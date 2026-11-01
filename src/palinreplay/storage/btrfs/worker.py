@@ -19,6 +19,20 @@ from pathlib import Path
 POOL = Path("/pool")
 STORAGE = Path("/storage")
 DEV = Path("/kerneldev")
+REQUESTS = Path("/tmp")
+
+
+def read_request(arguments):
+    if len(arguments) == 1:
+        return json.loads(arguments[0])
+    if (len(arguments) != 2 or arguments[0] != "--request-file"
+            or not re.fullmatch(r"palin-btrfs-request-[0-9a-f]{32}\.json", arguments[1])):
+        raise ValueError("invalid Btrfs worker request arguments")
+    path = REQUESTS / arguments[1]
+    try:
+        return json.loads(path.read_bytes())
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def command(*args):
@@ -119,7 +133,7 @@ def healthy():
         raise OSError("Btrfs has recorded storage/checksum errors")
 
 
-def inventory(root, scope, include_root=False):
+def inventory(root, scope, include_root=True):
     entries, groups = {}, {}
     pending = [(".", root)]
     while pending:
@@ -296,7 +310,7 @@ def operation(request):
 if __name__ == "__main__":
     started = time.monotonic()
     try:
-        value = operation(json.loads(sys.argv[1]))
+        value = operation(read_request(sys.argv[1:]))
         print(json.dumps({"ok": True, "result": value, "seconds": time.monotonic() - started}))
     except Exception as error:
         print(json.dumps({"ok": False, "type": type(error).__name__, "error": str(error)}))
