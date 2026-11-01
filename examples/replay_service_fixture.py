@@ -2,6 +2,28 @@
 
 import json
 import shlex
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from uuid import uuid4
+
+from r1_restore_validation import absent
+from replay_validation import fixed_response
+
+from palinreplay.agents import AgentTask
+from palinreplay.agents.mini import MiniSweAgent, load_native
+from palinreplay.core.models import Node
+from palinreplay.preload.base import open_preload
+from palinreplay.record.calls import read_call
+from palinreplay.record.restore import load_restore_materials
+from palinreplay.record.state import BtrfsStateBackend
+from palinreplay.replay.environment import RestoredExecutor
+from palinreplay.sandbox.btrfs import BtrfsWorkspace
+from palinreplay.storage.btrfs.models import BtrfsRuntime
+from palinreplay.storage.btrfs.pool import BtrfsPool
+from palinreplay.storage.io import write_json
+from palinreplay.storage.store import RecordStore
 
 DIRECTORY = "/opt/palin-replay-service-fixture"
 PYTHON = "/opt/miniconda3/bin/python"
@@ -159,3 +181,128 @@ def create_files_command():
 REQUEST_COMMAND = f"{PYTHON} -B {DIRECTORY}/request.py"
 START_COMMAND = f"{PYTHON} -B {DIRECTORY}/lifecycle.py start"
 STOP_COMMAND = f"{PYTHON} -B {DIRECTORY}/lifecycle.py stop"
+
+
+def commands():
+    confirm = python_command(
+        "from pathlib import Path; "
+        f"root = Path({DIRECTORY!r}); "
+        f"assert all((root/name).is_file() for name in {list(fixture_files())!r}); "
+        "assert (root/'service.json').is_file()"
+    )
+    return [
+        create_files_command() + " && " + START_COMMAND,
+        confirm + " && " + REQUEST_COMMAND,
+        REQUEST_COMMAND,
+        STOP_COMMAND + " >/dev/null && printf 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\\nservice fixture complete\\n'",
+    ]
+
+
+@contextmanager
+def no_model_calls():
+    """Reject the native model transport, while permitting fixed completion replies."""
+    native = load_native()
+    from minisweagent.models import litellm_model
+
+    with patch.object(native.LitellmModel, "_query",
+                      side_effect=AssertionError("external model calls are forbidden")) as transport:
+        with patch.object(litellm_model.litellm.cost_calculator,
+                          "completion_cost", return_value=0):
+            yield transport
+        assert transport.call_count == 0
+
+
+def tool_fact(store, node):
+    if len(node.tool_execution_ids) != 1:
+        raise AssertionError("fixture requires one tool per committed step")
+    trace = read_call(store, node.tool_execution_ids[0])
+    if trace.phase != "accepted":
+        raise AssertionError("tool result was not accepted")
+    result = next(event for event in trace.events if event.kind == "result")
+    details = store.read_json(result.details)
+    return {
+        "node_id": node.node_id, "index": node.index,
+        "execution_id": trace.execution.execution_id,
+        "request": store.read_json(trace.execution.request),
+        "exit_code": details["backend"]["decoded"]["returncode"],
+        "output": store.read_bytes(result.payload).decode("utf-8"),
+        "accepted": store.read_json(trace.events[-1].payload),
+    }
+
+
+def record_source(preload, output, client):
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    report = {"status": "failed", "fixed_response_supplies": 0,
+              "actual_model_calls": 0, "actual_model_cost": 0, "cleanup_confirmed": False}
+    write_json(output / "report.json", report)
+    base = open_preload(preload)
+    launch = base.metadata.launch.model_copy(update={"network_mode": "none"})
+    try:
+        with BtrfsPool(client, base.metadata.snapshot.location) as pool:
+            workspace = BtrfsWorkspace(pool, base.metadata.snapshot, uuid4().hex)
+            try:
+                workspace.start(launch, base.metadata.bootstrap_image_id,
+                                environment=launch.environment, labels={})
+                report["container_id"] = workspace.container.id
+                runtime = BtrfsRuntime(
+                    source_container_id=workspace.container.id,
+                    source_image_id=base.metadata.source_image_id,
+                    bootstrap_image_id=base.metadata.bootstrap_image_id, launch=launch,
+                    c0_oracle_sha256=base.metadata.oracle_sha256,
+                )
+                restored = SimpleNamespace(pool=pool, workspace=workspace,
+                                           container=workspace.container, close=workspace.close)
+                sandbox = RestoredExecutor(restored, runtime)
+                sandbox.inspect = lambda: SimpleNamespace(
+                    actual_image_id=runtime.bootstrap_image_id, workdir=launch.workdir,
+                    environment=launch.environment, shell=launch.shell,
+                )
+                backend = BtrfsStateBackend(sandbox, public_env_keys=launch.environment,
+                                            runtime=runtime)
+                replies = iter(fixed_response(cmd, i) for i, cmd in enumerate(commands(), 1))
+
+                def completion(**request):
+                    report["fixed_response_supplies"] += 1
+                    return next(replies)
+
+                with RecordStore.create(output / "record") as store:
+                    agent = MiniSweAgent(
+                        sandbox=sandbox, store=store, capture_state=backend.capture,
+                        model_config={"model_name": "openai/replay-fixture",
+                                      "cost_tracking": "ignore_errors",
+                                      "model_kwargs": {"num_retries": 0}},
+                        agent_config={"system_template": "Fixed HTTP service fixture",
+                                      "instance_template": "{{task}}", "step_limit": 5,
+                                      "cost_limit": 0},
+                        completion=completion, retry_attempts=1,
+                    )
+                    with no_model_calls():
+                        agent.run(AgentTask("astropy-service-fixture", "Execute the fixed decisions."))
+                    nodes = sorted(store.list(Node), key=lambda node: node.index)
+                    assert [node.index for node in nodes] == list(range(5))
+                    assert report["fixed_response_supplies"] == 4
+                    facts = [tool_fact(store, node) for node in nodes[1:]]
+                    assert all(fact["exit_code"] == 0 for fact in facts), facts
+                    assert json.loads(facts[2]["output"]) == {"status": 200, "body": BODY}
+                    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in facts[3]["output"]
+                    c2 = load_restore_materials(store, nodes[2].node_id)
+                    check = pool.container.exec_run(["python3", "-B", "-c",
+                        "from pathlib import Path; "
+                        f"root = Path('/pool/{c2.snapshot.name}{DIRECTORY}'); "
+                        f"assert all((root/name).read_text() == body "
+                        f"for name, body in {fixture_files()!r}.items())"])
+                    assert check.exit_code == 0, check.output
+                    report.update(status="recorded", run_id=nodes[0].run_id,
+                                  node_ids=[node.node_id for node in nodes],
+                                  tools=facts, c2_fixture_files_verified=True)
+            finally:
+                workspace.close()
+        report["cleanup_confirmed"] = absent(client, report["container_id"])
+        assert report["cleanup_confirmed"]
+        return report
+    except Exception as error:
+        report.update(status="failed", error_type=type(error).__name__, error=str(error))
+        raise
+    finally:
+        write_json(output / "report.json", report, replace=True)
