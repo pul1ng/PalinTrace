@@ -130,7 +130,9 @@ def test_restore_refuses_other_backends_before_using_docker(tmp_path):
                 store, node.node_id, client=None, docker_host="unix:///fixture.sock",
                 report_path=tmp_path / "restore.json",
             )
-    assert not (tmp_path / "restore.json").exists()
+    report = json.loads((tmp_path / "restore.json").read_text())
+    assert report["status"] == "failed" and report["phase"] == "validate_material"
+    assert report["cleanup_confirmed"] and not report["checks"]["materials"]
 
 
 @pytest.mark.parametrize("failure", [False, True])

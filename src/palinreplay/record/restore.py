@@ -146,6 +146,11 @@ class RestoredNode:
         return self
 
     def __exit__(self, exc_type, error, traceback) -> None:
+        if error is not None:
+            self.report.update(
+                status="failed", phase="caller", error_type=type(error).__name__,
+                error_message=str(error),
+            )
         try:
             self.close()
         except BaseException as cleanup:
@@ -174,9 +179,8 @@ def restore_r1_node(
 ) -> RestoredNode:
     """Create an independent idle environment without a full filesystem comparison."""
     report_path = _restore_report_path(store, docker_host, report_path)
-    materials = load_restore_materials(store, selector, run_id=run_id)
     return _restore_btrfs_node(
-        store, materials, client=client, report_path=report_path, compare_files=False
+        store, selector, run_id=run_id, client=client, report_path=report_path, compare_files=False
     )
 
 
@@ -194,15 +198,23 @@ def restore_node(
 
 
 def restore_btrfs_node(store, node_id, *, client, report_path):
-    materials = load_restore_materials(store, node_id)
+    report_path = Path(report_path).absolute()
+    if report_path.resolve().is_relative_to(store.root.resolve()):
+        raise ValueError("restore report must be outside the immutable source store")
     return _restore_btrfs_node(
-        store, materials, client=client, report_path=Path(report_path), compare_files=True
+        store, node_id, client=client, report_path=report_path, compare_files=True
     )
 
 
 def _start_workspace(restored: RestoredNode, materials: RestoreMaterials) -> None:
     runtime = materials.runtime
     restored.workspace = BtrfsWorkspace(restored.pool, materials.snapshot, restored._owner)
+    restored.report.update(
+        workspace=restored.workspace.name,
+        volume_name=restored.workspace.volume_name,
+        container_name=restored.workspace.container_name,
+    )
+    restored._write_report()
     restored.workspace.start(
         runtime.launch,
         runtime.bootstrap_image_id,
@@ -215,6 +227,7 @@ def _start_workspace(restored: RestoredNode, materials: RestoreMaterials) -> Non
     restored.context = materials.context
     restored.input_position = materials.input_position
     restored.report.update(
+        container_id=restored.container.id,
         container_name=restored.workspace.container_name,
         source_container_id=runtime.source_container_id,
         source_image_id=runtime.source_image_id,
@@ -233,21 +246,49 @@ def _compare_files(restored: RestoredNode, materials: RestoreMaterials) -> dict:
     )
 
 
-def _restore_btrfs_node(store, materials, *, client, report_path, compare_files):
-    restored = RestoredNode(client, materials.node.node_id, report_path)
-    restored.report["backend"] = BACKEND
+def _restore_btrfs_node(
+    store, selector, *, run_id=None, client, report_path, compare_files
+):
+    restored = RestoredNode(client, selector, report_path)
+    restored.report.update(
+        backend=BACKEND,
+        selector=selector,
+        source_store=str(store.root),
+        run_id=run_id,
+        checks={"materials": False, "snapshot_identity": False, "full_filesystem": False},
+    )
     try:
+        materials = load_restore_materials(store, selector, run_id=run_id)
+        restored.report.update(
+            run_id=materials.run.run_id,
+            node_id=materials.node.node_id,
+            node_index=materials.node.index,
+            state_id=materials.state.state_id,
+            source_records={
+                "run": materials.run.model_dump(mode="json"),
+                "node": materials.node.model_dump(mode="json"),
+                "state": materials.state.model_dump(mode="json"),
+            },
+            snapshot=materials.snapshot.model_dump(mode="json"),
+            capture=materials.state.capture.model_dump(mode="json"),
+            phase="open_pool",
+        )
+        restored.report["checks"]["materials"] = True
+        restored._write_report()
         restored.pool = BtrfsPool(client, materials.snapshot.location)
+        restored.report["pool_container_name"] = restored.pool.name
         restored.pool.__enter__()
         if compare_files:
             # The active session pool serves strict graph/material checks too.
             store.get_node(materials.node.node_id)
         restored.report["phase"] = "create_environment"
         _start_workspace(restored, materials)
+        restored.report["checks"]["snapshot_identity"] = True
         if compare_files:
             restored.report["phase"] = "verify_files"
             restored._write_report()
             comparison = _compare_files(restored, materials)
+            restored.report["checks"]["full_filesystem"] = True
             restored.report.update(
                 status="verified",
                 material_verified=True,
@@ -260,7 +301,9 @@ def _restore_btrfs_node(store, materials, *, client, report_path, compare_files)
         restored._write_report()
         return restored
     except BaseException as error:
-        restored.report.update(status="failed", error_type=type(error).__name__)
+        restored.report.update(
+            status="failed", error_type=type(error).__name__, error_message=str(error)
+        )
         try:
             restored.close()
         except Exception as cleanup:

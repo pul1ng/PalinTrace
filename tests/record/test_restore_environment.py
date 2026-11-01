@@ -301,7 +301,12 @@ def test_light_restore_failure_cleans_owned_resources(environment, failure):
     assert len(env.opened) == len(env.closed) == 1
     assert not env.volumes and not env.containers
     assert not list((env.root / "workspaces").glob("*"))
-    assert json.loads(report.read_text())["cleanup_confirmed"]
+    saved = json.loads(report.read_text())
+    assert saved["cleanup_confirmed"]
+    assert saved["phase"] == "create_environment" and saved["error_message"]
+    assert saved["source_records"]["node"]["node_id"] == env.c1.node_id
+    assert saved["workspace"].startswith("workspaces/")
+    assert saved["volume_name"].startswith("pr-btrfs-root-")
     assert not env.client_closed
 
 
@@ -361,6 +366,64 @@ def test_cleanup_failures_preserve_primary_error_and_attempt_both_resources(
     assert not saved["cleanup_confirmed"] and len(saved["cleanup_errors"]) == 2
     assert not env.volumes and not env.containers and not env.client_closed
     assert (env.root / env.snapshots[1].name / "file").read_text() == "saved C1"
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_report_identifies_source_materials_scope_resources_and_checks(environment, full):
+    env = environment
+    report = env.path.parent / "report.json"
+    with RecordStore.open(env.path) as store:
+        entry = restore.restore_node if full else restore.restore_r1_node
+        with entry(
+            store, env.c1.node_id, client=env.client, docker_host="unix:///fixture.sock",
+            report_path=report,
+        ) as restored:
+            saved = json.loads(report.read_text())
+            assert saved["run_id"] == env.run.run_id and saved["node_index"] == 1
+            assert saved["source_records"]["run"]["config"] == env.run.config.model_dump()
+            assert saved["source_records"]["node"]["context"] == env.c1.context.model_dump()
+            assert saved["snapshot"] == env.snapshots[1].model_dump(mode="json")
+            assert saved["capture"]["scope"] == "rootfs-files-v1"
+            assert saved["container_id"] == restored.container.id
+            assert saved["workspace"] == restored.workspace.name
+            assert saved["checks"] == {
+                "materials": True, "snapshot_identity": True, "full_filesystem": full,
+            }
+            assert saved["status"] == ("verified" if full else "ready")
+    assert json.loads(report.read_text())["cleanup_confirmed"]
+
+
+def test_material_failure_is_reported_before_opening_pool(environment):
+    env = environment
+    target = env.path / "artifacts" / env.c1.context.sha256[:2] / env.c1.context.sha256[2:]
+    target.unlink()
+    report = env.path.parent / "material-failed.json"
+    with RecordStore.open(env.path) as store:
+        with pytest.raises(IntegrityError, match="node context") as error:
+            restore.restore_r1_node(
+                store, "C1", client=env.client, docker_host="unix:///fixture.sock",
+                report_path=report,
+            )
+    saved = json.loads(report.read_text())
+    assert saved == error.value.restore_report
+    assert saved["status"] == "failed" and saved["phase"] == "validate_material"
+    assert "node context" in saved["error_message"]
+    assert saved["cleanup_confirmed"] and not env.opened
+    assert not any(saved["checks"].values())
+
+
+@pytest.mark.parametrize("inside", [False, True])
+def test_restore_report_cannot_overwrite_existing_output_or_source(environment, inside):
+    env = environment
+    report = env.path / "source.json" if inside else env.path.parent / "existing.json"
+    report.write_text("preserve existing material")
+    with RecordStore.open(env.path) as store:
+        with pytest.raises(ValueError if inside else FileExistsError):
+            restore.restore_r1_node(
+                store, "C1", client=env.client, docker_host="unix:///fixture.sock",
+                report_path=report,
+            )
+    assert report.read_text() == "preserve existing material" and not env.opened
 
 
 @pytest.mark.parametrize("difference", [False, True])
