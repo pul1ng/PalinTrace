@@ -10,16 +10,17 @@ from palinreplay.storage.btrfs.verification import capture_info
 
 
 class BtrfsStateBackend:
-    def __init__(self, sandbox, *, public_env_keys):
+    def __init__(self, sandbox, *, public_env_keys, runtime=None):
         self.sandbox = sandbox
         self.public_env_keys = frozenset(public_env_keys)
+        self.runtime = runtime
 
     def capture(self, store, boundary, previous):
         started = time.monotonic()
         sandbox, pool = self.sandbox, self.sandbox.pool
         container = sandbox._container
         sandbox.check_root()
-        if boundary.index == 0:
+        if boundary.index == 0 and self.runtime is None:
             snapshot = sandbox.preload.base.metadata.snapshot
             pool.verify(snapshot)
         else:
@@ -34,12 +35,12 @@ class BtrfsStateBackend:
         actual = _environment(container.attrs["Config"])
         if self.public_env_keys - actual.keys():
             raise EnvironmentMismatch("public environment keys missing from Btrfs container")
-        base = sandbox.preload.base.metadata
+        base = self.runtime if self.runtime is not None else sandbox.preload.base.metadata
         launch = base.launch.model_copy(
             update={
                 "environment": {k: actual[k] for k in sorted(self.public_env_keys)},
                 "omitted_environment_keys": tuple(sorted(actual.keys() - self.public_env_keys)),
-                "network_mode": sandbox._network,
+                "network_mode": base.launch.network_mode if self.runtime is not None else sandbox._network,
             }
         )
         runtime = BtrfsRuntime(
@@ -47,7 +48,7 @@ class BtrfsStateBackend:
             source_image_id=base.source_image_id,
             bootstrap_image_id=base.bootstrap_image_id,
             launch=launch,
-            c0_oracle_sha256=base.oracle_sha256,
+            c0_oracle_sha256=(base.c0_oracle_sha256 if self.runtime is not None else base.oracle_sha256),
         )
         manifest = store.put_json(snapshot.model_dump(mode="json"))
         state = store.save(
