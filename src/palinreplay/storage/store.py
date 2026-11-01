@@ -354,6 +354,18 @@ class RecordStore:
             params.append(run_id)
         return tuple(self._decode(row) for row in self._db.execute(sql + " ORDER BY rowid", params))
 
+    def find_node_ids(
+        self, *, node_id: str | None = None, index: int | None = None, run_id: str | None = None
+    ) -> tuple[str, ...]:
+        """Locate candidates in the catalog; get() validates the selected node's metadata."""
+        self._ensure_open()
+        sql, params = "SELECT id FROM records WHERE kind='node'", []
+        for column, value in (("id", node_id), ("ordinal", index), ("run_id", run_id)):
+            if value is not None:
+                sql += f" AND {column}=?"
+                params.append(value)
+        return tuple(row[0] for row in self._db.execute(sql + " ORDER BY rowid", params))
+
     def _insert(self, record: Fact) -> None:
         body = json_bytes(record.model_dump(mode="json"))
         ordinal = (

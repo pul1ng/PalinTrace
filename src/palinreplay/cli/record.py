@@ -280,7 +280,6 @@ def execute(args) -> int:
                 outside_store(source, args.report)
                 if args.report.exists() or args.report.is_symlink():
                     raise FileExistsError("restore report already exists")
-                store.get_node(node.node_id)
                 if default_report:
                     args.report.parent.mkdir(parents=True, exist_ok=True)
                 endpoint = docker_endpoint()

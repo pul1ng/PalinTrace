@@ -2,32 +2,138 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 import palinreplay.storage.rootfs as _rootfs
-from palinreplay.core.models import Node, State
+from palinreplay.core.interfaces import Payload
+from palinreplay.core.models import Node, Run, State
 from palinreplay.core.serialization import json_bytes
+from palinreplay.record.inspect import resolve_node
 from palinreplay.sandbox.base import SandboxCleanupError, SandboxError
 from palinreplay.sandbox.btrfs import BtrfsWorkspace
 from palinreplay.storage.artifacts import sync_directory
 from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, Snapshot
 from palinreplay.storage.btrfs.pool import BtrfsPool
 from palinreplay.storage.btrfs.verification import capture_info
+from palinreplay.storage.codec import JSON_TYPES, decode
 from palinreplay.storage.store import IntegrityError, RecordStore
 
 
-class RestoredNode:
-    """Independent idle Btrfs container with owned resources and a durable report."""
+class _SavedContext:
+    """Preserve opaque payloads; decode a JSON view only when requested."""
+
+    config_payload: Payload | None
+    context_payload: Payload | None
+    input_position_payload: Payload | None
+
+    @staticmethod
+    def _value(payload: Payload | None):
+        if payload is None:
+            return None
+        if payload.media_type not in JSON_TYPES:
+            return payload
+        try:
+            return json.loads(decode(payload.data, payload.media_type))
+        except (ValueError, UnicodeError) as error:
+            raise IntegrityError("saved payload is not valid JSON") from error
+
+    @cached_property
+    def config(self):
+        return self._value(self.config_payload)
+
+    @cached_property
+    def context(self):
+        return self._value(self.context_payload)
+
+    @cached_property
+    def input_position(self):
+        return self._value(self.input_position_payload)
+
+
+@dataclass(frozen=True)
+class RestoreMaterials(_SavedContext):
+    """Saved node materials, retaining original payload bytes and media types.
+
+    JSON views decode on access. External snapshot identity and files are not verified.
+    """
+
+    run: Run
+    node: Node
+    state: State
+    snapshot: Snapshot
+    runtime: BtrfsRuntime
+    config_payload: Payload
+    context_payload: Payload
+    input_position_payload: Payload
+
+
+def load_restore_materials(
+    store: RecordStore, selector: str, *, run_id: str | None = None
+) -> RestoreMaterials:
+    """Read one committed node's required materials without creating restore resources."""
+    with store.snapshot():
+        node = resolve_node(store, selector, run_id)
+        run = store.get(Run, node.run_id)
+        state = store.get(State, node.state_id)
+        if state.backend != BACKEND or state.capture != capture_info() or state.dependencies:
+            raise IntegrityError("unsupported Btrfs capture scope or dependencies")
+
+        def read(role, ref):
+            try:
+                return store.read_json(ref)
+            except IntegrityError as error:
+                raise IntegrityError(f"invalid {role} material: {error}") from error
+
+        def read_payload(role, ref):
+            try:
+                return Payload(store.read_bytes(ref), ref.media_type)
+            except IntegrityError as error:
+                raise IntegrityError(f"invalid {role} material: {error}") from error
+
+        config = read_payload("run config", run.config)
+        context = read_payload("node context", node.context)
+        input_position = read_payload("node input position", node.input_position)
+        try:
+            snapshot = Snapshot.model_validate(read("snapshot manifest", state.manifest))
+        except ValidationError as error:
+            raise IntegrityError("invalid snapshot manifest material") from error
+        try:
+            runtime = BtrfsRuntime.model_validate(read("Btrfs runtime", state.runtime))
+        except ValidationError as error:
+            raise IntegrityError("invalid Btrfs runtime material") from error
+
+        read_refs = (run.config, node.context, node.input_position, state.manifest, state.runtime)
+        for ref in state.artifacts:
+            if ref not in read_refs:
+                try:
+                    store.verify_artifact(ref)
+                except IntegrityError as error:
+                    raise IntegrityError(f"invalid state artifact {ref.sha256}: {error}") from error
+
+        return RestoreMaterials(run, node, state, snapshot, runtime, config, context, input_position)
+
+
+class RestoredNode(_SavedContext):
+    """Independent idle Btrfs container, saved payloads and an owned resource report."""
 
     def __init__(self, client, node_id: str, report_path: Path):
 
         self.client = client
         self.container = None
+        self.run: Run | None = None
         self.node: Node | None = None
         self.state: State | None = None
+        self.config_payload: Payload | None = None
+        self.context_payload: Payload | None = None
+        self.input_position_payload: Payload | None = None
         self.pool = None
         self.workspace = None
         self._owner = uuid4().hex
@@ -79,17 +185,47 @@ class RestoredNode:
         self._closed = True
 
     def __enter__(self) -> RestoredNode:
-        if self._closed or self.report["status"] != "verified":
+        if self._closed or self.report["status"] not in ("ready", "verified"):
             raise SandboxError("restored node is not available")
         return self
 
     def __exit__(self, exc_type, error, traceback) -> None:
+        if error is not None:
+            self.report.update(
+                status="failed", phase="caller", error_type=type(error).__name__,
+                error_message=str(error),
+            )
         try:
             self.close()
         except BaseException as cleanup:
             if error is None:
                 raise
             error.add_note(f"restore cleanup also failed: {cleanup!r}")
+
+
+def _restore_report_path(store, docker_host, report_path):
+    if not docker_host.startswith("unix:///"):
+        raise ValueError("restoration supports an explicit local Unix Docker endpoint")
+    report_path = Path(report_path).absolute()
+    if report_path.resolve().is_relative_to(store.root.resolve()):
+        raise ValueError("restore report must be outside the immutable source store")
+    return report_path
+
+
+def restore_r1_node(
+    store: RecordStore,
+    selector: str,
+    *,
+    run_id: str | None = None,
+    client,
+    docker_host: str,
+    report_path: str | Path,
+) -> RestoredNode:
+    """Create an independent idle environment without a full filesystem comparison."""
+    report_path = _restore_report_path(store, docker_host, report_path)
+    return _restore_btrfs_node(
+        store, selector, run_id=run_id, client=client, report_path=report_path, compare_files=False
+    )
 
 
 def restore_node(
@@ -101,68 +237,117 @@ def restore_node(
     report_path: str | Path,
 ) -> RestoredNode:
     """Restore a committed Btrfs node and fully compare its saved file state."""
-    if not docker_host.startswith("unix:///"):
-        raise ValueError("restoration supports an explicit local Unix Docker endpoint")
+    report_path = _restore_report_path(store, docker_host, report_path)
+    return restore_btrfs_node(store, node_id, client=client, report_path=report_path)
+
+
+def restore_btrfs_node(store, node_id, *, client, report_path):
     report_path = Path(report_path).absolute()
     if report_path.resolve().is_relative_to(store.root.resolve()):
         raise ValueError("restore report must be outside the immutable source store")
+    return _restore_btrfs_node(
+        store, node_id, client=client, report_path=report_path, compare_files=True
+    )
 
-    node = store.get(Node, node_id)
-    state = store.get(State, node.state_id)
-    if state.backend != BACKEND:
-        raise IntegrityError("only Btrfs file restoration is supported")
-    return restore_btrfs_node(store, node_id, client=client, report_path=report_path)
 
-def restore_btrfs_node(store, node_id, *, client, report_path):
+def _start_workspace(restored: RestoredNode, materials: RestoreMaterials) -> None:
+    runtime = materials.runtime
+    restored.workspace = BtrfsWorkspace(restored.pool, materials.snapshot, restored._owner)
+    restored.report.update(
+        workspace=restored.workspace.name,
+        volume_name=restored.workspace.volume_name,
+        container_name=restored.workspace.container_name,
+    )
+    restored._write_report()
+    restored.workspace.start(
+        runtime.launch,
+        runtime.bootstrap_image_id,
+        environment=runtime.launch.environment,
+        labels={},
+    )
+    restored.container = restored.workspace.container
+    restored.run, restored.node, restored.state = materials.run, materials.node, materials.state
+    restored.config_payload = materials.config_payload
+    restored.context_payload = materials.context_payload
+    restored.input_position_payload = materials.input_position_payload
+    restored.report.update(
+        container_id=restored.container.id,
+        container_name=restored.workspace.container_name,
+        source_container_id=runtime.source_container_id,
+        source_image_id=runtime.source_image_id,
+        bootstrap_image_id=runtime.bootstrap_image_id,
+        state_id=materials.state.state_id,
+    )
 
-    restored = RestoredNode(client, node_id, report_path)
-    restored.report["backend"] = BACKEND
+
+def _compare_files(restored: RestoredNode, materials: RestoreMaterials) -> dict:
+    return restored.pool.command(
+        "verify",
+        source=materials.snapshot.name,
+        workspace=restored.workspace.name,
+        scope=_rootfs.SCOPE,
+        oracle_sha256=materials.runtime.c0_oracle_sha256,
+    )
+
+
+def _restore_btrfs_node(
+    store, selector, *, run_id=None, client, report_path, compare_files
+):
+    restored = RestoredNode(client, selector, report_path)
+    restored.report.update(
+        backend=BACKEND,
+        selector=selector,
+        source_store=str(store.root),
+        run_id=run_id,
+        checks={"materials": False, "snapshot_identity": False, "full_filesystem": False},
+    )
     try:
-        node = store.get(Node, node_id)
-        state = store.get(State, node.state_id)
-        if state.backend != BACKEND or state.capture != capture_info() or state.dependencies:
-            raise IntegrityError("unsupported Btrfs capture scope or dependencies")
-        snapshot = Snapshot.model_validate(store.read_json(state.manifest))
-        runtime = BtrfsRuntime.model_validate(store.read_json(state.runtime))
-        restored.pool = BtrfsPool(client, snapshot.location)
-        restored.pool.__enter__()
-        store.get_node(node_id)  # Validates graph, immutable artifacts and snapshot identity.
-        restored.workspace = BtrfsWorkspace(restored.pool, snapshot, restored._owner)
-        restored.workspace.start(
-            runtime.launch,
-            runtime.bootstrap_image_id,
-            environment=runtime.launch.environment,
-            labels={},
-        )
-        restored.container = restored.workspace.container
-        restored.node, restored.state = node, state
+        materials = load_restore_materials(store, selector, run_id=run_id)
         restored.report.update(
-            container_name=restored.workspace.container_name,
-            source_container_id=runtime.source_container_id,
-            source_image_id=runtime.source_image_id,
-            bootstrap_image_id=runtime.bootstrap_image_id,
-            state_id=state.state_id,
-            phase="verify_files",
+            run_id=materials.run.run_id,
+            node_id=materials.node.node_id,
+            node_index=materials.node.index,
+            state_id=materials.state.state_id,
+            source_records={
+                "run": materials.run.model_dump(mode="json"),
+                "node": materials.node.model_dump(mode="json"),
+                "state": materials.state.model_dump(mode="json"),
+            },
+            snapshot=materials.snapshot.model_dump(mode="json"),
+            capture=materials.state.capture.model_dump(mode="json"),
+            phase="open_pool",
         )
+        restored.report["checks"]["materials"] = True
         restored._write_report()
-        comparison = restored.pool.command(
-            "verify",
-            source=snapshot.name,
-            workspace=restored.workspace.name,
-            scope=_rootfs.SCOPE,
-            oracle_sha256=runtime.c0_oracle_sha256,
-        )
-        restored.report.update(
-            status="verified",
-            phase="complete",
-            material_verified=True,
-            file_comparison=comparison,
-            verification="full-logical-filesystem",
-        )
+        restored.pool = BtrfsPool(client, materials.snapshot.location)
+        restored.report["pool_container_name"] = restored.pool.name
+        restored.pool.__enter__()
+        if compare_files:
+            # The active session pool serves strict graph/material checks too.
+            store.get_node(materials.node.node_id)
+        restored.report["phase"] = "create_environment"
+        _start_workspace(restored, materials)
+        restored.report["checks"]["snapshot_identity"] = True
+        if compare_files:
+            restored.report["phase"] = "verify_files"
+            restored._write_report()
+            comparison = _compare_files(restored, materials)
+            restored.report["checks"]["full_filesystem"] = True
+            restored.report.update(
+                status="verified",
+                material_verified=True,
+                file_comparison=comparison,
+                verification="full-logical-filesystem",
+            )
+        else:
+            restored.report.update(status="ready", verification="snapshot-identity")
+        restored.report["phase"] = "complete"
         restored._write_report()
         return restored
     except BaseException as error:
-        restored.report.update(status="failed", error_type=type(error).__name__)
+        restored.report.update(
+            status="failed", error_type=type(error).__name__, error_message=str(error)
+        )
         try:
             restored.close()
         except Exception as cleanup:
