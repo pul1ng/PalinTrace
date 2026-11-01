@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from palinreplay.core.errors import IntegrityError
 from palinreplay.record.restore import load_restore_materials, restore_r1_node
 from palinreplay.replay.context import ReplayContext
 from palinreplay.replay.environment import RestoredExecutor
@@ -11,7 +12,8 @@ from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.run import btrfs_comparison, replay_range
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.sandbox.client import connect_docker, docker_endpoint
-from palinreplay.storage.btrfs.models import Snapshot
+from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, Snapshot
+from palinreplay.storage.btrfs.verification import capture_info
 from palinreplay.storage.io import outside_store, write_json
 from palinreplay.storage.store import RecordStore
 
@@ -37,6 +39,14 @@ def run_replay(source, start, end=None, *, run_id=None, output, client=None):
             materials = load_replay_materials(origin, plan)
             baseline = load_restore_materials(origin, plan.start.node_id)
             snapshots = [Snapshot.model_validate(origin.read_json(state.manifest)) for state in plan.states]
+            for state, snapshot in zip(plan.states, snapshots, strict=True):
+                runtime = BtrfsRuntime.model_validate(origin.read_json(state.runtime))
+                if (state.backend != BACKEND or state.capture != capture_info() or state.dependencies
+                        or snapshot.location != baseline.snapshot.location
+                        or runtime.launch.shell != baseline.runtime.launch.shell):
+                    raise IntegrityError("unsupported historical snapshot scope or execution semantics")
+                for ref in state.artifacts:
+                    origin.verify_artifact(ref)
         stats.inherit(materials.context)
         report["source"] = plan.provenance()
         context = ReplayContext(materials)
@@ -48,14 +58,15 @@ def run_replay(source, start, end=None, *, run_id=None, output, client=None):
                                        docker_host=docker_endpoint(),
                                        report_path=output / "restore.json")
         executor = RestoredExecutor(restored, baseline.runtime)
+        for snapshot in snapshots:
+            executor.pool.verify(snapshot)
         for history in materials.steps:
             for tool in history.tools:
                 if tuple(tool.request["interpreter"]) != tuple(executor.runtime.launch.shell):
                     raise ValueError("historical interpreter differs from the restored launch shell")
         store = RecordStore.create(output / "record")
         report["phase"] = "initial-boundary"
-        with stats.timed("snapshot_commit"):
-            recorder = initial_recorder(store, materials, executor, context.export)
+        recorder = initial_recorder(store, materials, executor, context.export, stats=stats)
         report["run_id"] = recorder.run.run_id
         report["phase"] = "execute"
         replay_range(recorder, context, executor, materials,

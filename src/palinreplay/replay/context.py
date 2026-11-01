@@ -1,6 +1,7 @@
 """Mini's message formatting/admission without its autonomous model loop."""
 
 import logging
+import time
 from copy import deepcopy
 
 from palinreplay.agents.mini import load_native
@@ -17,6 +18,23 @@ class ReplayContext:
         self.adoptions = []
         self.config = materials.config
         self.logger = logging.getLogger("agent")
+        self.started = time.monotonic()
+        self.supplied = 0
+        self.base_calls = self.context.get("counters", {}).get("n_calls", 0)
+        self.base_elapsed = self.context.get("clock", {}).get("elapsed_seconds", 0)
+
+    def historical_answer(self, history):
+        self.supplied += 1
+        counters = self.context.setdefault("counters", {})
+        counters["n_calls"] = self.base_calls + self.supplied
+        format_error = history.model.details.get("backend", {}).get("parse") == "format-error"
+        counters["consecutive_format_errors"] = (
+            counters.get("consecutive_format_errors", 0) + 1 if format_error else 0
+        )
+        variables = self.context.setdefault("template_vars", {})
+        variables["n_model_calls"] = counters["n_calls"]
+        variables["model_cost"] = counters.get("cost", 0)
+        variables["elapsed_seconds"] = self.base_elapsed + int(time.monotonic() - self.started)
 
     def adopt(self, deliveries, messages):
         return self.native.adopt_messages(
@@ -52,7 +70,9 @@ class ReplayContext:
     def export(self, boundary):
         context = deepcopy(self.context)
         context["messages"] = deepcopy(self.messages)
-        context["replay"] = {"historical_input_position": self.inherited_position}
+        context["replay"] = {"historical_input_position": self.inherited_position,
+                             "historical_answer_supplies": self.supplied,
+                             "actual_model_calls": 0, "actual_model_cost": 0}
         return AgentSnapshot(Payload.json(context), Payload.json({
             "next_message": len(self.messages), "adoptions": self.adoptions,
         }))

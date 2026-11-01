@@ -64,6 +64,10 @@ def test_fixed_c20_to_c23_range_becomes_c0_to_c3(tmp_path):
                 assert [m["source_index"] for m in report["mappings"]] == [20, 21, 22, 23]
                 assert [m["index"] for m in report["mappings"]] == [0, 1, 2, 3]
                 assert len(sandbox.calls) == 3
+                saved = store.read_json(rec.current_node.context)
+                assert saved["counters"]["n_calls"] == 23
+                assert saved["replay"]["historical_answer_supplies"] == 3
+                assert saved["replay"]["actual_model_calls"] == 0
                 rec.finish()
     finally:
         source.close()

@@ -8,6 +8,7 @@ from palinreplay.replay.history import supply_history
 
 def execute_step(recorder, context, executor, history, *, on_result=None, stats=None):
     step = recorder.begin_step()
+    context.historical_answer(history)
     supply_history(step, history, context.messages, context.adopt)
     if stats:
         stats.data["historical_answer_supplies"] += 1
@@ -18,8 +19,14 @@ def execute_step(recorder, context, executor, history, *, on_result=None, stats=
 
     calls, results = [], []
     for index, tool in enumerate(history.tools):
+        def execute(request):
+            if stats:
+                stats.data["actual_tool_executions"] += 1
+            with stats.timed("execution") if stats else nullcontext():
+                return executor.execute(request)
+
         adapter = CallAdapter(
-            name="mini.bash", execute=executor.execute, capture_request=Payload.json,
+            name="mini.bash", execute=execute, capture_request=Payload.json,
             capture_result=lambda result: ResultCapture(
                 Payload(result.output), "sandbox-merged-output-bytes",
                 details={"decoded": context.native.BorrowedEnvironment.output(result),
@@ -29,10 +36,7 @@ def execute_step(recorder, context, executor, history, *, on_result=None, stats=
         )
         call = step.tool(adapter, tool.request, tool_call_id=tool.source["tool_call_id"])
         calls.append(call)
-        if stats:
-            stats.data["actual_tool_executions"] += 1
-        with stats.timed("execution") if stats else nullcontext():
-            result = call.invoke()
+        result = call.invoke()
         results.append(result)
         if on_result is not None:
             on_result(index, tool, call, result, index == len(history.tools) - 1)
