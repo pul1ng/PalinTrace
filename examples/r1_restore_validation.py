@@ -263,17 +263,32 @@ def validate_nodes(source, output, client, *, controlled=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--preload", type=Path, required=True)
+    parser.add_argument("--preload", type=Path)
+    parser.add_argument("--source", type=Path, help="validate an existing Astropy Record store")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if (args.preload is None) == (args.source is None):
+        parser.error("select exactly one of --preload or --source")
     args.output.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     client = connect_docker(600)
     try:
-        source_container = record_controlled(args.preload, args.output, client)
-        results = validate_nodes(args.output / "record", args.output, client, controlled=True)
+        if args.source is None:
+            source_container = record_controlled(args.preload, args.output, client)
+            source = args.output / "record"
+            scenario = "controlled"
+        else:
+            source = args.source.resolve()
+            with RecordStore.open(source) as store:
+                materials = load_restore_materials(store, store.list(Node)[0].node_id)
+                assert materials.run.task_id.startswith("astropy__astropy-")
+                source_container = materials.runtime.source_container_id
+            assert absent(client, source_container)
+            scenario = "existing-astropy"
+        results = validate_nodes(source, args.output, client, controlled=args.source is None)
         write_json(args.output / "summary.json", {
-            "status": "passed", "scenario": "controlled", "llm_calls": 0,
+            "status": "passed", "scenario": scenario, "llm_calls": 0,
+            "source_store": str(source), "history_tools_reexecuted": 0,
             "source_container_removed": source_container, "restores": results,
             "source_unchanged": True, "duration_seconds": time.monotonic() - started,
             "daemon_id": client.info()["ID"],
