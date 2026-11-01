@@ -137,7 +137,7 @@ class RestoredNode:
         self._closed = True
 
     def __enter__(self) -> RestoredNode:
-        if self._closed or self.report["status"] != "verified":
+        if self._closed or self.report["status"] not in ("ready", "verified"):
             raise SandboxError("restored node is not available")
         return self
 
@@ -150,6 +150,32 @@ class RestoredNode:
             error.add_note(f"restore cleanup also failed: {cleanup!r}")
 
 
+def _restore_report_path(store, docker_host, report_path):
+    if not docker_host.startswith("unix:///"):
+        raise ValueError("restoration supports an explicit local Unix Docker endpoint")
+    report_path = Path(report_path).absolute()
+    if report_path.resolve().is_relative_to(store.root.resolve()):
+        raise ValueError("restore report must be outside the immutable source store")
+    return report_path
+
+
+def restore_r1_node(
+    store: RecordStore,
+    selector: str,
+    *,
+    run_id: str | None = None,
+    client,
+    docker_host: str,
+    report_path: str | Path,
+) -> RestoredNode:
+    """Create an independent idle environment without a full filesystem comparison."""
+    report_path = _restore_report_path(store, docker_host, report_path)
+    materials = load_restore_materials(store, selector, run_id=run_id)
+    return _restore_btrfs_node(
+        store, materials, client=client, report_path=report_path, compare_files=False
+    )
+
+
 def restore_node(
     store: RecordStore,
     node_id: str,
@@ -159,64 +185,71 @@ def restore_node(
     report_path: str | Path,
 ) -> RestoredNode:
     """Restore a committed Btrfs node and fully compare its saved file state."""
-    if not docker_host.startswith("unix:///"):
-        raise ValueError("restoration supports an explicit local Unix Docker endpoint")
-    report_path = Path(report_path).absolute()
-    if report_path.resolve().is_relative_to(store.root.resolve()):
-        raise ValueError("restore report must be outside the immutable source store")
-
-    node = store.get(Node, node_id)
-    state = store.get(State, node.state_id)
-    if state.backend != BACKEND:
-        raise IntegrityError("only Btrfs file restoration is supported")
+    report_path = _restore_report_path(store, docker_host, report_path)
     return restore_btrfs_node(store, node_id, client=client, report_path=report_path)
 
-def restore_btrfs_node(store, node_id, *, client, report_path):
 
-    restored = RestoredNode(client, node_id, report_path)
+def restore_btrfs_node(store, node_id, *, client, report_path):
+    materials = load_restore_materials(store, node_id)
+    return _restore_btrfs_node(
+        store, materials, client=client, report_path=Path(report_path), compare_files=True
+    )
+
+
+def _start_workspace(restored: RestoredNode, materials: RestoreMaterials) -> None:
+    runtime = materials.runtime
+    restored.workspace = BtrfsWorkspace(restored.pool, materials.snapshot, restored._owner)
+    restored.workspace.start(
+        runtime.launch,
+        runtime.bootstrap_image_id,
+        environment=runtime.launch.environment,
+        labels={},
+    )
+    restored.container = restored.workspace.container
+    restored.node, restored.state = materials.node, materials.state
+    restored.report.update(
+        container_name=restored.workspace.container_name,
+        source_container_id=runtime.source_container_id,
+        source_image_id=runtime.source_image_id,
+        bootstrap_image_id=runtime.bootstrap_image_id,
+        state_id=materials.state.state_id,
+    )
+
+
+def _compare_files(restored: RestoredNode, materials: RestoreMaterials) -> dict:
+    return restored.pool.command(
+        "verify",
+        source=materials.snapshot.name,
+        workspace=restored.workspace.name,
+        scope=_rootfs.SCOPE,
+        oracle_sha256=materials.runtime.c0_oracle_sha256,
+    )
+
+
+def _restore_btrfs_node(store, materials, *, client, report_path, compare_files):
+    restored = RestoredNode(client, materials.node.node_id, report_path)
     restored.report["backend"] = BACKEND
     try:
-        node = store.get(Node, node_id)
-        state = store.get(State, node.state_id)
-        if state.backend != BACKEND or state.capture != capture_info() or state.dependencies:
-            raise IntegrityError("unsupported Btrfs capture scope or dependencies")
-        snapshot = Snapshot.model_validate(store.read_json(state.manifest))
-        runtime = BtrfsRuntime.model_validate(store.read_json(state.runtime))
-        restored.pool = BtrfsPool(client, snapshot.location)
+        restored.pool = BtrfsPool(client, materials.snapshot.location)
         restored.pool.__enter__()
-        store.get_node(node_id)  # Validates graph, immutable artifacts and snapshot identity.
-        restored.workspace = BtrfsWorkspace(restored.pool, snapshot, restored._owner)
-        restored.workspace.start(
-            runtime.launch,
-            runtime.bootstrap_image_id,
-            environment=runtime.launch.environment,
-            labels={},
-        )
-        restored.container = restored.workspace.container
-        restored.node, restored.state = node, state
-        restored.report.update(
-            container_name=restored.workspace.container_name,
-            source_container_id=runtime.source_container_id,
-            source_image_id=runtime.source_image_id,
-            bootstrap_image_id=runtime.bootstrap_image_id,
-            state_id=state.state_id,
-            phase="verify_files",
-        )
-        restored._write_report()
-        comparison = restored.pool.command(
-            "verify",
-            source=snapshot.name,
-            workspace=restored.workspace.name,
-            scope=_rootfs.SCOPE,
-            oracle_sha256=runtime.c0_oracle_sha256,
-        )
-        restored.report.update(
-            status="verified",
-            phase="complete",
-            material_verified=True,
-            file_comparison=comparison,
-            verification="full-logical-filesystem",
-        )
+        if compare_files:
+            # The active session pool serves strict graph/material checks too.
+            store.get_node(materials.node.node_id)
+        restored.report["phase"] = "create_environment"
+        _start_workspace(restored, materials)
+        if compare_files:
+            restored.report["phase"] = "verify_files"
+            restored._write_report()
+            comparison = _compare_files(restored, materials)
+            restored.report.update(
+                status="verified",
+                material_verified=True,
+                file_comparison=comparison,
+                verification="full-logical-filesystem",
+            )
+        else:
+            restored.report.update(status="ready", verification="snapshot-identity")
+        restored.report["phase"] = "complete"
         restored._write_report()
         return restored
     except BaseException as error:

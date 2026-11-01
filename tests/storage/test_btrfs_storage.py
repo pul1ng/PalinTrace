@@ -31,6 +31,7 @@ from palinreplay.storage.btrfs.verification import capture_info
 from palinreplay.storage.io import write_json
 from palinreplay.storage.store import IntegrityError, RecordStore
 from tests.preload.test_preload_environment import inputs
+from tests.storage.test_store import start
 
 
 @pytest.fixture
@@ -122,14 +123,13 @@ def test_fully_supplied_preload_environment_needs_no_source_image():
 
 
 def test_restore_refuses_other_backends_before_using_docker(tmp_path):
-    state = SimpleNamespace(backend="other-filesystem")
-    node = SimpleNamespace(state_id="state")
-    store = SimpleNamespace(root=tmp_path / "record", get=lambda model, key: state if model is State else node)
-    with pytest.raises(IntegrityError, match="only Btrfs"):
-        restore_node(
-            store, "node", client=None, docker_host="unix:///fixture.sock",
-            report_path=tmp_path / "restore.json",
-        )
+    with RecordStore.create(tmp_path / "record") as store:
+        node = start(store)[-1]
+        with pytest.raises(IntegrityError, match="unsupported Btrfs"):
+            restore_node(
+                store, node.node_id, client=None, docker_host="unix:///fixture.sock",
+                report_path=tmp_path / "restore.json",
+            )
     assert not (tmp_path / "restore.json").exists()
 
 
