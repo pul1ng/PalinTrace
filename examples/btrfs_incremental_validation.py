@@ -50,8 +50,34 @@ def main(output):
             assert "chmod" in by_path["mode"]
             assert any(op["command"] == "rename" and op.get("to") == "new"
                        for op in changes["operations"])
+            # Rename chains, directory descendants and replacement of an old name.
+            run("from pathlib import Path; "
+                f"p=Path('/pool/{work}'); (p/'dir').mkdir(); "
+                "(p/'dir'/'child').write_text('before'); (p/'victim').write_text('victim')")
+            rename_before = snapshot()
+            run("from pathlib import Path; "
+                f"p=Path('/pool/{work}'); (p/'dir').rename(p/'tmp'); "
+                "(p/'tmp').rename(p/'moved'); (p/'moved'/'child').write_text('after'); "
+                "(p/'edit').rename(p/'victim')")
+            rename_after = snapshot()
+            renamed = pool.changes(rename_before, rename_after)
+            assert {'dir', 'dir/child', 'moved', 'moved/child', 'edit', 'victim'} <= set(
+                renamed['candidates'])
+            # Explicit full comparison is an acceptance oracle, not discovery.
+            oracle = run(
+                "import sys,json; sys.path.insert(0,'/'); "
+                "import importlib.util; "
+                "s=importlib.util.spec_from_file_location('w','/palin-btrfs-worker.py'); "
+                "w=importlib.util.module_from_spec(s); s.loader.exec_module(w); "
+                "scope={'exclude_paths':[],'exclude_subtrees':[]}; "
+                f"a=w.inventory(w.target('{rename_before.name}'),scope); "
+                f"b=w.inventory(w.target('{rename_after.name}'),scope); "
+                "print(json.dumps([p for p in a['entries'].keys()|b['entries'].keys() "
+                "if a['entries'].get(p)!=b['entries'].get(p)]))"
+            )
+            assert set(json.loads(oracle)) <= set(renamed['candidates'])
             pool.command("delete", name=work)
-        report = {"status": "passed", "basic": changes,
+        report = {"status": "passed", "basic": changes, "renames": renamed,
                   "duration_sec": time.monotonic() - started, "cleanup_confirmed": True}
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2) + "\n")

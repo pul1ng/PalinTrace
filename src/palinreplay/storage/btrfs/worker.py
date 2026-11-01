@@ -227,8 +227,10 @@ def operation(request):
     if op == "changes":
         # This module is explicitly shipped alongside the standalone worker.
         if __package__:
+            from .paths import candidates
             from .send_stream import parse_stream
         else:
+            from paths import candidates
             from send_stream import parse_stream
         before, after = info(request["before"]), info(request["after"])
         if not before["readonly"] or not after["readonly"]:
@@ -246,7 +248,9 @@ def operation(request):
                 or operations[0]["parent_uuid"] != UUID(before["uuid"]).hex):
             raise ValueError("incremental stream snapshot identity mismatch")
         return {"protocol": 1, "no_data": True, "complete": True,
-                "stream_bytes": len(result.stdout), "operations": operations}
+                "stream_bytes": len(result.stdout), "operations": operations,
+                "candidates": candidates(operations, target(request["before"]),
+                                         target(request["after"]))}
     if op == "delete":
         if target(request["name"]).exists():
             command("btrfs", "subvolume", "delete", target(request["name"]))

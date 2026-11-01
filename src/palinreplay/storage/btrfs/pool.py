@@ -97,7 +97,8 @@ class BtrfsPool:
             stream = io.BytesIO()
             with tarfile.open(fileobj=stream, mode="w") as archive:
                 for source, name in (("worker.py", "palin-btrfs-worker.py"),
-                                     ("send_stream.py", "send_stream.py")):
+                                     ("send_stream.py", "send_stream.py"),
+                                     ("paths.py", "paths.py")):
                     body = Path(__file__).with_name(source).read_bytes()
                     member = tarfile.TarInfo(name)
                     member.size, member.mode = len(body), 0o400
