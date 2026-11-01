@@ -11,6 +11,7 @@ import palinreplay.record.restore as restore
 import palinreplay.sandbox.client as sandbox_client
 import palinreplay.storage.btrfs.verification as verification
 from palinreplay.core.errors import RecordUsageError
+from palinreplay.core.interfaces import Payload
 from palinreplay.core.models import Attempt, Node, Run, State
 from palinreplay.core.serialization import json_bytes
 from palinreplay.sandbox.runtime import C0LaunchConfig
@@ -20,7 +21,13 @@ from palinreplay.storage.store import IntegrityError, RecordStore
 from tests.storage.test_store import begin_step, call, candidate
 
 
-def _record_run(store, name):
+def _record_run(store, name, *, payloads=None, oracle_sha256="e" * 64):
+    payloads = payloads or {}
+
+    def put_payload(role, default):
+        value = payloads.get(role)
+        return store.put_bytes(value.data, media_type=value.media_type) if value else default()
+
     identity = uuid4()
     location = PoolLocation(
         volume="palinreplay-btrfs-" + identity.hex,
@@ -46,14 +53,16 @@ def _record_run(store, name):
         source_image_id="sha256:" + "c" * 64,
         bootstrap_image_id="sha256:" + "d" * 64,
         launch=launch,
-        c0_oracle_sha256="e" * 64,
+        c0_oracle_sha256=oracle_sha256,
     )
     run = store.save(Run(
         run_id=name,
         task_id="fixture",
         agent_name="fixture",
         agent_version="1",
-        config=store.put_json({"name": name, "text": "repeated " * 700}, compress=True),
+        config=put_payload("config", lambda: store.put_json(
+            {"name": name, "text": "repeated " * 700}, compress=True
+        )),
     ))
     attempt = store.save(Attempt(run_id=run.run_id))
     extra = store.put_bytes(b"extra state material")
@@ -73,8 +82,8 @@ def _record_run(store, name):
         run_id=run.run_id,
         attempt_id=attempt.attempt_id,
         index=0,
-        context=store.put_json({"messages": ["initial"]}),
-        input_position=store.put_json({"messages": 1}),
+        context=put_payload("context", lambda: store.put_json({"messages": ["initial"]})),
+        input_position=put_payload("input_position", lambda: store.put_json({"messages": 1})),
         state_id=c0_state.state_id,
         accepted_event_sequence=0,
     ))
@@ -175,6 +184,30 @@ def test_selection_fails_without_creating_resources(record, no_container, select
     assert not (path.parent / "restore.json").exists()
 
 
+@pytest.mark.parametrize("selector,run_id", [
+    ("full-id", None), ("C0", "one"), ("C0", None),
+])
+def test_node_selection_checks_only_matching_metadata(record, no_container, selector, run_id):
+    path, (_, c0, c1, _, _), (_, other_c0, _, _, _) = record
+    with sqlite3.connect(path / "catalog.sqlite") as catalog:
+        catalog.execute("UPDATE records SET sha256=? WHERE kind='node' AND id=?", (
+            "0" * 64, c1.node_id,
+        ))
+        # Even an unrelated run's C0 need not decode when the ID or run is explicit.
+        catalog.execute("UPDATE records SET sha256=? WHERE kind='node' AND id=?", (
+            "0" * 64, other_c0.node_id,
+        ))
+    with RecordStore.open(path) as store:
+        if run_id is None and selector == "C0":
+            with pytest.raises(RecordUsageError, match="matches 2 committed nodes"):
+                restore.load_restore_materials(store, selector)
+        else:
+            value = c0.node_id if selector == "full-id" else selector
+            assert restore.load_restore_materials(store, value, run_id=run_id).node == c0
+        with pytest.raises(IntegrityError, match="metadata hash mismatch"):
+            restore.load_restore_materials(store, c1.node_id)
+
+
 def test_full_id_with_wrong_run_fails(record, no_container):
     path, (_, c0, _, _, _), _ = record
     with RecordStore.open(path) as store:
@@ -226,18 +259,26 @@ def test_valid_digest_but_invalid_json_or_schema_fails(
     owner = run if role == "config" else c0 if role in ("context", "input_position") else state
     _rewrite_record(path, owner.model_copy(update={role: ref}))
     with RecordStore.open(path) as store:
-        with pytest.raises(IntegrityError, match=reason):
-            restore.load_restore_materials(store, c0.node_id)
+        if role in ("config", "context", "input_position"):
+            materials = restore.load_restore_materials(store, c0.node_id)
+            assert getattr(materials, f"{role}_payload") == Payload(content, "application/json")
+            with pytest.raises(IntegrityError, match="not valid JSON"):
+                getattr(materials, role)
+        else:
+            with pytest.raises(IntegrityError, match=reason):
+                restore.load_restore_materials(store, c0.node_id)
 
 
-def test_invalid_compressed_config_with_valid_digest_fails(record, no_container):
+def test_invalid_compressed_config_with_valid_digest_fails_when_decoded(record, no_container):
     path, (run, c0, _, _, _), _ = record
     with RecordStore.open(path, read_only=False) as store:
         ref = store.put_bytes(b"invalid compressed material", media_type=ZLIB_MEDIA)
     _rewrite_record(path, run.model_copy(update={"config": ref}))
     with RecordStore.open(path) as store:
-        with pytest.raises(IntegrityError, match="run config"):
-            restore.load_restore_materials(store, c0.node_id)
+        materials = restore.load_restore_materials(store, c0.node_id)
+        assert materials.config_payload == Payload(b"invalid compressed material", ZLIB_MEDIA)
+        with pytest.raises(IntegrityError, match="compressed JSON"):
+            _ = materials.config
 
 
 @pytest.mark.parametrize("change", [

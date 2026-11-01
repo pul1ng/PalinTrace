@@ -4,8 +4,10 @@ Directory copies replace Btrfs snapshot syscalls here; actual CoW isolation stil
 requires a Linux Docker/Btrfs acceptance run.
 """
 
+import hashlib
 import json
 import shutil
+import sqlite3
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -16,9 +18,11 @@ import palinreplay.storage.btrfs.pool as pool_module
 import palinreplay.storage.btrfs.verification as verification
 import palinreplay.storage.btrfs.worker as worker
 from palinreplay.cli import main
+from palinreplay.core.interfaces import Payload
 from palinreplay.core.models import State
 from palinreplay.sandbox.base import SandboxError
 from palinreplay.storage.btrfs.models import Snapshot
+from palinreplay.storage.rootfs import SCOPE
 from palinreplay.storage.store import IntegrityError, RecordStore
 from tests.record.test_restore_materials import _record_run, _rewrite_record
 
@@ -28,12 +32,23 @@ class MissingResource(Exception):
 
 
 @pytest.fixture
-def environment(tmp_path, monkeypatch):
+def environment(tmp_path, monkeypatch, request):
+    root = tmp_path / "pool"
+    c0_source = root / "bases/C0"
+    c0_source.mkdir(parents=True)
+    (c0_source / "file").write_text("saved C0")
+    oracle = worker.encoded(worker.inventory(c0_source, SCOPE))
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    (storage / "expected-C0.json").write_bytes(oracle)
     path = tmp_path / "record"
     with monkeypatch.context() as recording:
         recording.setattr(verification, "verify_state", lambda store, state: None)
         with RecordStore.create(path) as store:
-            run, c0, c1, _, _ = _record_run(store, "one")
+            run, c0, c1, _, _ = _record_run(
+                store, "one", payloads=getattr(request, "param", None),
+                oracle_sha256=hashlib.sha256(oracle).hexdigest(),
+            )
             snapshots = {
                 node.index: Snapshot.model_validate(
                     store.read_json(store.get(State, node.state_id).manifest)
@@ -41,12 +56,12 @@ def environment(tmp_path, monkeypatch):
                 for node in (c0, c1)
             }
 
-    root = tmp_path / "pool"
     identities = {}
     for index, snapshot in snapshots.items():
         source = root / snapshot.name
-        source.mkdir(parents=True)
-        (source / "file").write_text(f"saved C{index}")
+        if index:
+            source.mkdir(parents=True)
+            (source / "file").write_text(f"saved C{index}")
         identities[snapshot.name] = {"uuid": str(snapshot.uuid), "readonly": True}
 
     state = SimpleNamespace(
@@ -148,8 +163,91 @@ def environment(tmp_path, monkeypatch):
 
     monkeypatch.setattr(restore, "BtrfsPool", Pool)
     monkeypatch.setattr(worker, "POOL", root)
+    monkeypatch.setattr(worker, "STORAGE", storage)
     monkeypatch.setattr(worker, "healthy", lambda: None)
     return state
+
+
+@pytest.mark.parametrize("environment", [
+    {
+        "config": Payload(b"public config", "text/plain"),
+        "context": Payload(b"plain text context", "text/plain"),
+        "input_position": Payload(b"\x00\xff\x01", "application/octet-stream"),
+    },
+    {
+        "config": Payload(b"not json", "application/json"),
+        "context": Payload(b"opaque context", "application/vnd.fixture.context"),
+        "input_position": Payload(b"opaque position", "text/plain"),
+    },
+], indirect=True)
+@pytest.mark.parametrize("full", [False, True])
+def test_restore_accepts_normally_committed_non_json_payloads(environment, full):
+    env = environment
+    report = env.path.parent / "opaque.json"
+    with RecordStore.open(env.path) as store:
+        entry = restore.restore_node if full else restore.restore_r1_node
+        with entry(
+            store, env.c0.node_id, client=env.client, docker_host="unix:///fixture.sock",
+            report_path=report,
+        ) as restored:
+            assert restored.report["status"] == ("verified" if full else "ready")
+            for role, ref in (
+                ("config", env.run.config), ("context", env.c0.context),
+                ("input_position", env.c0.input_position),
+            ):
+                assert getattr(restored, f"{role}_payload") == Payload(
+                    store.read_bytes(ref), ref.media_type
+                )
+    assert len(env.opened) == len(env.closed) == 1
+    assert [op for op, _ in env.commands].count("verify") == int(full)
+
+
+@pytest.mark.parametrize("environment", [{
+    "context": Payload(b"plain text context", "text/plain"),
+    "input_position": Payload(b"\x00\xff\x01", "application/octet-stream"),
+}], indirect=True)
+def test_verify_restore_command_accepts_non_json_context(environment, monkeypatch, capsys):
+    import palinreplay.sandbox.client as connection
+
+    env = environment
+    monkeypatch.setattr(connection, "docker_endpoint", lambda: "unix:///fixture.sock")
+    monkeypatch.setattr(connection, "connect_docker", lambda _: env.client)
+    report = env.path.parent / "opaque-cli.json"
+    assert main([
+        "record", "verify-restore", str(env.path), "--node", env.c0.node_id,
+        "--report", str(report),
+    ]) == 0
+    saved = json.loads(report.read_text())
+    assert saved["status"] == "verified" and saved["checks"]["full_filesystem"]
+    assert saved["cleanup_confirmed"] and env.client_closed
+    assert "File restoration verified" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_restore_earlier_node_ignores_corrupt_later_node(environment, full, monkeypatch, capsys):
+    import palinreplay.sandbox.client as connection
+
+    env = environment
+    with sqlite3.connect(env.path / "catalog.sqlite") as catalog:
+        catalog.execute("UPDATE records SET sha256=? WHERE kind='node' AND id=?", (
+            "0" * 64, env.c1.node_id,
+        ))
+    if full:
+        monkeypatch.setattr(connection, "docker_endpoint", lambda: "unix:///fixture.sock")
+        monkeypatch.setattr(connection, "connect_docker", lambda _: env.client)
+        assert main([
+            "record", "verify-restore", str(env.path), "--node", env.c0.node_id,
+            "--report", str(env.path.parent / "earlier-full.json"),
+        ]) == 0
+        assert "File restoration verified" in capsys.readouterr().out
+    else:
+        with RecordStore.open(env.path) as store:
+            with restore.restore_r1_node(
+                store, "C0", run_id=env.run.run_id, client=env.client,
+                docker_host="unix:///fixture.sock", report_path=env.path.parent / "earlier.json",
+            ) as restored:
+                assert restored.node == env.c0
+    assert len(env.opened) == len(env.closed) == 1
 
 
 @pytest.mark.parametrize("selector", ["C0", "C1", "full-id"])

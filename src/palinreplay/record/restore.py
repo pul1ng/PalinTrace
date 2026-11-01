@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from uuid import uuid4
 
 from pydantic import ValidationError
 
 import palinreplay.storage.rootfs as _rootfs
+from palinreplay.core.interfaces import Payload
 from palinreplay.core.models import Node, Run, State
 from palinreplay.core.serialization import json_bytes
 from palinreplay.record.inspect import resolve_node
@@ -20,21 +23,56 @@ from palinreplay.storage.artifacts import sync_directory
 from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, Snapshot
 from palinreplay.storage.btrfs.pool import BtrfsPool
 from palinreplay.storage.btrfs.verification import capture_info
+from palinreplay.storage.codec import JSON_TYPES, decode
 from palinreplay.storage.store import IntegrityError, RecordStore
 
 
+class _SavedContext:
+    """Preserve opaque payloads; decode a JSON view only when requested."""
+
+    config_payload: Payload | None
+    context_payload: Payload | None
+    input_position_payload: Payload | None
+
+    @staticmethod
+    def _value(payload: Payload | None):
+        if payload is None:
+            return None
+        if payload.media_type not in JSON_TYPES:
+            return payload
+        try:
+            return json.loads(decode(payload.data, payload.media_type))
+        except (ValueError, UnicodeError) as error:
+            raise IntegrityError("saved payload is not valid JSON") from error
+
+    @cached_property
+    def config(self):
+        return self._value(self.config_payload)
+
+    @cached_property
+    def context(self):
+        return self._value(self.context_payload)
+
+    @cached_property
+    def input_position(self):
+        return self._value(self.input_position_payload)
+
+
 @dataclass(frozen=True)
-class RestoreMaterials:
-    """Saved node materials; external snapshot identity and files are not verified."""
+class RestoreMaterials(_SavedContext):
+    """Saved node materials, retaining original payload bytes and media types.
+
+    JSON views decode on access. External snapshot identity and files are not verified.
+    """
 
     run: Run
     node: Node
     state: State
     snapshot: Snapshot
     runtime: BtrfsRuntime
-    config: object
-    context: object
-    input_position: object
+    config_payload: Payload
+    context_payload: Payload
+    input_position_payload: Payload
 
 
 def load_restore_materials(
@@ -54,9 +92,15 @@ def load_restore_materials(
             except IntegrityError as error:
                 raise IntegrityError(f"invalid {role} material: {error}") from error
 
-        config = read("run config", run.config)
-        context = read("node context", node.context)
-        input_position = read("node input position", node.input_position)
+        def read_payload(role, ref):
+            try:
+                return Payload(store.read_bytes(ref), ref.media_type)
+            except IntegrityError as error:
+                raise IntegrityError(f"invalid {role} material: {error}") from error
+
+        config = read_payload("run config", run.config)
+        context = read_payload("node context", node.context)
+        input_position = read_payload("node input position", node.input_position)
         try:
             snapshot = Snapshot.model_validate(read("snapshot manifest", state.manifest))
         except ValidationError as error:
@@ -77,8 +121,8 @@ def load_restore_materials(
         return RestoreMaterials(run, node, state, snapshot, runtime, config, context, input_position)
 
 
-class RestoredNode:
-    """Independent idle Btrfs container with owned resources and a durable report."""
+class RestoredNode(_SavedContext):
+    """Independent idle Btrfs container, saved payloads and an owned resource report."""
 
     def __init__(self, client, node_id: str, report_path: Path):
 
@@ -87,9 +131,9 @@ class RestoredNode:
         self.run: Run | None = None
         self.node: Node | None = None
         self.state: State | None = None
-        self.config: object = None
-        self.context: object = None
-        self.input_position: object = None
+        self.config_payload: Payload | None = None
+        self.context_payload: Payload | None = None
+        self.input_position_payload: Payload | None = None
         self.pool = None
         self.workspace = None
         self._owner = uuid4().hex
@@ -223,9 +267,9 @@ def _start_workspace(restored: RestoredNode, materials: RestoreMaterials) -> Non
     )
     restored.container = restored.workspace.container
     restored.run, restored.node, restored.state = materials.run, materials.node, materials.state
-    restored.config = materials.config
-    restored.context = materials.context
-    restored.input_position = materials.input_position
+    restored.config_payload = materials.config_payload
+    restored.context_payload = materials.context_payload
+    restored.input_position_payload = materials.input_position_payload
     restored.report.update(
         container_id=restored.container.id,
         container_name=restored.workspace.container_name,

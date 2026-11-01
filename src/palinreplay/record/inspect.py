@@ -65,11 +65,10 @@ def call_document(store: RecordStore, execution_id: str, *, contents: bool = Tru
 
 
 def resolve_node(store: RecordStore, selector: str, run_id: str | None = None) -> Node:
-    nodes = store.list(Node, run_id=run_id)
     if selector.startswith("C") and selector[1:].isdigit():
-        candidates = [node for node in nodes if node.index == int(selector[1:])]
+        candidates = store.find_node_ids(index=int(selector[1:]), run_id=run_id)
     else:
-        candidates = [node for node in nodes if node.node_id == selector]
+        candidates = store.find_node_ids(node_id=selector, run_id=run_id)
     if not candidates:
         scope = f" in run {run_id!r}" if run_id is not None else ""
         raise RecordUsageError(
@@ -80,7 +79,7 @@ def resolve_node(store: RecordStore, selector: str, run_id: str | None = None) -
             f"node selector {selector!r} matches {len(candidates)} committed nodes; "
             "expected exactly one; use --run or its full ID"
         )
-    return candidates[0]
+    return store.get(Node, candidates[0])
 
 
 def node_document(store: RecordStore, node: Node, *, include_calls: bool = True) -> dict:
