@@ -25,6 +25,7 @@ def run_replay(source, start, end=None, *, run_id=None, output, client=None):
         raise ValueError("output cannot contain the source Record store")
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     report = {"schema_version": "palinreplay.replay-report.v1", "status": "failed",
+              "execution_status": "failed", "validation_status": "incomplete",
               "phase": "preflight", "source_store": str(source), "output": str(output),
               "cleanup_confirmed": False, "cleanup_errors": []}
     stats = ReplayStats()
@@ -76,7 +77,8 @@ def run_replay(source, start, end=None, *, run_id=None, output, client=None):
         report["phase"] = "finished"
     except BaseException as error:
         primary = error
-        report.update(status="failed", error_type=type(error).__name__, error=str(error))
+        report.update(status="failed", execution_status="failed",
+                      error_type=type(error).__name__, error=str(error))
         if recorder is not None and recorder.phase not in ("stopped", "closed"):
             try:
                 recorder.__exit__(type(error), error, error.__traceback__)
@@ -92,7 +94,7 @@ def run_replay(source, start, end=None, *, run_id=None, output, client=None):
                     report["cleanup_errors"].append(f"{name}: {type(error).__name__}: {error}")
         report["cleanup_confirmed"] = not report["cleanup_errors"]
         if report["cleanup_errors"] and report["status"] == "match":
-            report.update(status="failed", error="resource cleanup failed")
+            report.update(status="failed", execution_status="failed", error="resource cleanup failed")
         write_json(output / "report.json", report, replace=True)
     if primary is not None and not isinstance(primary, Exception):
         raise primary

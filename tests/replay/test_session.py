@@ -17,6 +17,8 @@ def test_preflight_failure_retains_report_without_starting_docker(tmp_path, monk
     output = tmp_path / "output"
     report = run_replay(source, "C0", output=output)
     assert report["status"] == "failed" and report["phase"] == "preflight"
+    assert report["execution_status"] == "failed"
+    assert report["validation_status"] == "incomplete"
     assert "version" in report["error"]
     assert report["cleanup_confirmed"]
     assert json.loads((output / "report.json").read_text()) == report

@@ -17,6 +17,12 @@ def node_snapshot(store, node):
     return Snapshot.model_validate(store.read_json(store.get(State, node.state_id).manifest))
 
 
+def _difference(report, comparison, reason):
+    comparison["difference_reason"] = reason
+    report["validation_status"] = "difference"
+    report.setdefault("first_difference", comparison)
+
+
 def replay_range(recorder, context, executor, materials, compare_files=None, *, report=None, stats=None):
     stats = stats or ReplayStats()
     plan = materials.plan
@@ -24,44 +30,53 @@ def replay_range(recorder, context, executor, materials, compare_files=None, *, 
                  "node_id": recorder.current_node.node_id, "index": 0}]
     if report is None:
         report = {}
-    report.update(status="match", mappings=mappings, steps=[], statistics=stats.data)
+    report.update(status="failed", execution_status="failed", validation_status="incomplete",
+                  incomplete_step=False, mappings=mappings, steps=[], statistics=stats.data)
+
+    def stop(reason):
+        completed = len(mappings) == len(materials.steps) + 1
+        report.update(status="difference", execution_status="completed" if completed else "stopped")
+        if not completed:
+            report["stop_reason"] = reason
+        return report
+
     for index, history in enumerate(materials.steps):
         previous = recorder.current_node
         tool_comparisons = []
-        entry = {"source_node_id": history.node.node_id, "source_index": history.node.index,
-                 "tools": tool_comparisons}
+        location = {"source_node_id": history.node.node_id, "source_index": history.node.index}
+        entry = {**location, "tools": tool_comparisons}
         report["steps"].append(entry)
+        report["incomplete_step"] = True
 
         def on_result(i, tool, call, result, last):
-            compared = compare_tool(tool, result)
-            compared["execution_id"] = call.execution_id
+            compared = {**compare_tool(tool, result), **location,
+                        "tool_index": i, "execution_id": call.execution_id}
             tool_comparisons.append(compared)
-            if not compared["equal"] and not last:
-                raise PartialDifference(compared)
+            if not compared["equal"]:
+                _difference(report, compared, "tool-result")
+                if not last:
+                    raise PartialDifference(compared)
 
         try:
             node, _ = execute_step(recorder, context, executor, history, on_result=on_result, stats=stats)
-        except PartialDifference as error:
-            report.update(status="difference", stop_reason="tool-result", incomplete_step=True,
-                          first_difference=error.comparison)
+        except PartialDifference:
+            stop("tool-result")
             recorder.end_incomplete("Replay tool difference", details={"replay": report})
             return report
-        mappings.append({"source_node_id": history.node.node_id, "source_index": history.node.index,
-                         "node_id": node.node_id, "index": node.index})
+        mappings.append({**location, "node_id": node.node_id, "index": node.index})
         entry["node_id"] = node.node_id
+        report["incomplete_step"] = False
         if any(not c["equal"] for c in tool_comparisons):
-            report.update(status="difference", stop_reason="tool-result", incomplete_step=False,
-                          first_difference=next(c for c in tool_comparisons if not c["equal"]))
-            return report
+            return stop("tool-result")
         if compare_files is None:
             raise ValueError("Replay requires incremental file comparison")
-        files = compare_files(index, previous, node)
+        files = {**compare_files(index, previous, node), **location}
         entry["files"] = files
         stats.files(files)
         if not files["equal"]:
-            report.update(status="difference", stop_reason="file-state", incomplete_step=False,
-                          first_difference=files)
-            return report
+            _difference(report, files, "file-state")
+            return stop("file-state")
+    report.update(status="match", execution_status="completed", validation_status="match")
     return report
 
 

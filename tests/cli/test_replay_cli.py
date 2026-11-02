@@ -23,3 +23,17 @@ def test_minimal_cli_paths_and_status(tmp_path, monkeypatch, capsys, status, cod
     assert main(["replay", str(tmp_path), "--from", "C20", "--to", "C23",
                  "--run", "run-id", "--output", "custom"]) == code
     assert seen[1][1]["output"] == Path("custom") and seen[1][1]["run_id"] == "run-id"
+
+
+def test_final_difference_does_not_claim_early_stop(tmp_path, monkeypatch, capsys):
+    import palinreplay.cli.replay as cli
+    import palinreplay.replay.session as session
+
+    monkeypatch.setattr(cli, "store_path", lambda path: path)
+    monkeypatch.setattr(session, "run_replay", lambda *a, **kw: {
+        "status": "difference", "execution_status": "completed", "validation_status": "difference",
+        "first_difference": {"difference_reason": "file-state"},
+    })
+    assert main(["replay", str(tmp_path), "--from", "C0", "--output", "custom"]) == 2
+    output = capsys.readouterr().out
+    assert "DIFFERENCE" in output and "Stopped" not in output

@@ -61,6 +61,8 @@ def test_fixed_c20_to_c23_range_becomes_c0_to_c3(tmp_path):
                 report = replay_range(rec, context, sandbox, materials,
                                       compare_files=lambda *args: {"equal": True})
                 assert report["status"] == "match"
+                assert report["execution_status"] == "completed"
+                assert report["validation_status"] == "match"
                 assert [m["source_index"] for m in report["mappings"]] == [20, 21, 22, 23]
                 assert [m["index"] for m in report["mappings"]] == [0, 1, 2, 3]
                 assert len(sandbox.calls) == 3
@@ -73,12 +75,15 @@ def test_fixed_c20_to_c23_range_becomes_c0_to_c3(tmp_path):
         source.close()
 
 
+@pytest.mark.parametrize("end", ["C1", "C2"])
 @pytest.mark.parametrize("different_tool,expected_nodes,expected_calls", [(0, 1, 1), (1, 2, 2)])
-def test_early_and_final_tool_differences_keep_correct_boundary(tmp_path, different_tool, expected_nodes, expected_calls):
+def test_early_and_final_tool_differences_keep_correct_boundary(
+    tmp_path, end, different_tool, expected_nodes, expected_calls,
+):
     source, _, _, _, original = integrated(tmp_path, [response("read", "read"), response("submit")])
     try:
         original.run(AgentTask("task", "Task"))
-        materials = load_replay_materials(source, pin_replay(source, "C0", "C2"))
+        materials = load_replay_materials(source, pin_replay(source, "C0", end))
         context, sandbox = ReplayContext(materials), Sandbox()
         def execute(req):
             result = sandbox.exec(req["action"]["command"])
@@ -90,10 +95,100 @@ def test_early_and_final_tool_differences_keep_correct_boundary(tmp_path, differ
             with Recorder(store, task_id="task", agent_name="mini", agent_version="v", config=Payload.json({}), boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
                 report = replay_range(rec, context, sandbox, materials, compare_files=lambda *args: {"equal": True})
                 assert report["status"] == "difference"
+                completed = end == "C1" and different_tool == 1
+                assert report["execution_status"] == ("completed" if completed else "stopped")
+                assert report["validation_status"] == "difference"
+                assert report["incomplete_step"] == (different_tool == 0)
+                assert ("stop_reason" in report) == (not completed)
+                assert report["first_difference"]["source_index"] == 1
+                assert report["first_difference"]["source_node_id"] == materials.steps[0].node.node_id
+                assert report["first_difference"]["tool_index"] == different_tool
                 assert len(store.list(Node)) == expected_nodes
                 assert len(sandbox.calls) == expected_calls
                 assert store.check_integrity().ok
                 if rec.phase == "ready":
                     rec.finish("difference")
+    finally:
+        source.close()
+
+
+@pytest.mark.parametrize("end", ["C1", "C2"])
+def test_file_difference_distinguishes_completed_range(tmp_path, end):
+    source, _, _, _, original = integrated(
+        tmp_path, [response("write"), response("read"), response("submit")]
+    )
+    try:
+        original.run(AgentTask("task", "Task"))
+        materials = load_replay_materials(source, pin_replay(source, "C0", end))
+        context, sandbox = ReplayContext(materials), Sandbox()
+        sandbox.execute = lambda req: sandbox.exec(req["action"]["command"])
+        with RecordStore.create(tmp_path / "replay") as store:
+            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
+                          config=Payload.json({}),
+                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
+                report = replay_range(rec, context, sandbox, materials,
+                                      compare_files=lambda *args: {"equal": False,
+                                                                   "different_paths": ["file"]})
+                assert report["execution_status"] == ("completed" if end == "C1" else "stopped")
+                assert report["validation_status"] == "difference"
+                assert ("stop_reason" in report) == (end != "C1")
+                assert not report["incomplete_step"]
+                assert report["first_difference"] == report["steps"][0]["files"]
+                assert report["first_difference"]["source_index"] == 1
+                assert report["first_difference"]["different_paths"] == ["file"]
+                assert len(sandbox.calls) == 1 and len(store.list(Node)) == 2
+                rec.finish("difference")
+    finally:
+        source.close()
+
+
+def test_empty_range_is_completed_and_matched(tmp_path):
+    source, _, _, _, original = integrated(tmp_path, [response("submit")])
+    try:
+        original.run(AgentTask("task", "Task"))
+        materials = load_replay_materials(source, pin_replay(source, "C0", "C0"))
+        context, sandbox = ReplayContext(materials), Sandbox()
+        with RecordStore.create(tmp_path / "replay") as store:
+            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
+                          config=Payload.json({}),
+                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
+                report = replay_range(rec, context, sandbox, materials)
+                assert report["execution_status"] == "completed"
+                assert report["validation_status"] == "match"
+                assert not report["steps"] and len(report["mappings"]) == 1
+                assert not sandbox.calls
+                rec.finish()
+    finally:
+        source.close()
+
+
+@pytest.mark.parametrize("after_difference", [False, True])
+def test_execution_fault_preserves_first_observed_difference(tmp_path, monkeypatch, after_difference):
+    source, _, _, _, original = integrated(tmp_path, [response("read"), response("submit")])
+    try:
+        original.run(AgentTask("task", "Task"))
+        materials = load_replay_materials(source, pin_replay(source, "C0", "C1"))
+        context, sandbox = ReplayContext(materials), Sandbox()
+
+        def fault(*args):
+            raise RuntimeError("execution fault")
+
+        sandbox.execute = fault
+        if after_difference:
+            sandbox.execute = lambda req: ExecResult("read", b"different", 0, 1)
+            monkeypatch.setattr(context, "accept_results", fault)
+        report = {}
+        with RecordStore.create(tmp_path / "replay") as store:
+            with pytest.raises(RuntimeError, match="execution fault"):
+                with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
+                              config=Payload.json({}),
+                              boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
+                    replay_range(rec, context, sandbox, materials, report=report)
+            assert report["execution_status"] == "failed"
+            assert report["validation_status"] == ("difference" if after_difference else "incomplete")
+            assert ("first_difference" in report) == after_difference
+            assert report["incomplete_step"] and len(store.list(Node)) == 1
+            if after_difference:
+                assert report["first_difference"]["source_index"] == 1
     finally:
         source.close()

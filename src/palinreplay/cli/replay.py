@@ -32,7 +32,9 @@ def execute(args):
         if report.get("error"):
             print(f"error: {report['error']}", file=sys.stderr)
         if report.get("first_difference"):
-            print(f"  Stopped: {report['stop_reason']} (details: {output / 'report.json'})")
+            action = "Stopped" if report["execution_status"] == "stopped" else "Difference"
+            reason = report["first_difference"]["difference_reason"]
+            print(f"  {action}: {reason} (details: {output / 'report.json'})")
         return {"match": 0, "difference": 2, "failed": 1}[report["status"]]
     except KeyboardInterrupt:
         print("Replay cancelled", file=sys.stderr)
