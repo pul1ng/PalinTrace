@@ -1,4 +1,4 @@
-"""Read-only recording events; observers cannot change recording decisions."""
+"""Read-only execution events; observers cannot change execution decisions."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,6 +12,8 @@ class ProgressEvent:
         "preparing",
         "connecting",
         "starting",
+        "restoring",
+        "replaying",
         "capturing",
         "committing",
         "committed",
@@ -41,6 +43,8 @@ class ProgressEvent:
     label: str | None = None
     duration_sec: float | None = None
     inclusive_sec: float | None = None
+    source_step: int | None = None
+    total_steps: int | None = None
 
 
 ProgressCallback = Callable[[ProgressEvent], None]

@@ -5,7 +5,7 @@ Execution trace recording, environment restoration, and historical replay for co
 PalinTrace links an agent's model interactions, tool calls, execution results, context, and task environment state. The goal is to let users select any saved node, restore its associated environment, and replay recorded interactions from that point, keeping playback and environment state aligned with the same position in history.
 
 - **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and future replay.
-- **Replay · Historical playback (planned)**: Restore the environment at any saved node and play back recorded interactions and results in their original order, keeping the environment aligned with the history. Replay uses saved records without making new model requests or rerunning historical tool calls.
+- **Replay · Historical re-execution (MVP implemented)**: Restore a committed node and execute subsequent tools from a fixed history without model requests. Compare raw results and file states; retain confirmed differences and continue by default, or select strict mode to stop on differences.
 - **Resume · Fork and continue (planned)**: Restore the agent context and task environment at any saved node, optionally provide new instructions, and continue on an independent trajectory while preserving the original history.
 
 ## Quickstart
@@ -44,7 +44,25 @@ The script prepares an Astropy task, preloads C0, records the run, verifies rest
 
 By default, it calls a real model and runs at most two steps. Outputs are grouped by type under `outputs/`, with names starting with `YYMMDD_HHMMSS_`. All stages in the same invocation share a timestamp. Use the script's `--output DIR` to change the output root; see `--help` for other options.
 
-### 3. Replay (not yet implemented)
+### 3. Replay
+
+Restore a committed baseline and execute subsequent historical tools without calling a model:
+
+```bash
+.venv/bin/palin replay "$PALIN_RUN" --from C20 --to C23
+.venv/bin/palin replay "$PALIN_RUN" --from C2 --to C4 --validation lenient
+.venv/bin/palin replay "$PALIN_RUN" --from C2 --to C4 --validation strict
+```
+
+The baseline becomes the new C0. `--to` is inclusive and defaults to the last committed node at startup; `--run` selects the source Run. `--output` selects a fresh directory, otherwise `outputs/replay/DATE_TASK/` contains `report.json` and an independent `record/`. The source trace remains unchanged.
+
+Terminal progress shows the current phase, source-to-replay node mapping, completed steps and elapsed time. Redirected output uses plain text; `--progress off` disables progress. The restored baseline does not count as an executed step, and completion does not imply a validation match.
+
+`--validation {strict,lenient}` defaults to `lenient`. Lenient mode retains confirmed tool exit-code, raw-output and file differences while continuing remaining calls and historical steps using the actual workspace and context. Every completed step still receives the existing incremental file comparison. Strict mode stops on the first difference, preserving the actual completed node or unfinished tool group. The report saves `validation_mode`, and the new recording configuration saves `replay.validation_mode`. The Python API also defaults to `run_replay(..., validation_mode="lenient")`.
+
+Execution is reported as `completed / stopped / failed`, separately from validation `match / difference / incomplete`. A fully matching run exits `0`; any difference exits `2`, including a completed final step or a completed continuation. Operational faults take precedence and exit `1`, preserving earlier differences. The first difference remains recorded, and later steps carry `starting_divergent`. A later local incremental match cannot establish that the whole filesystem has converged.
+
+Both modes preserve the same comparison policy, including file mtime at integer-second precision and `.pyc` files. Corrupt materials, restore or snapshot failures, comparison exceptions, and uncertain tool results still stop execution. Replay does not rewrite commands, retry tools, repair files, or replace actual results with source snapshots. See the [command reference (Chinese)](docs/命令参考.md#replay).
 
 ### 4. Resume (not yet implemented)
 
@@ -174,7 +192,7 @@ outputs/             Local outputs grouped by type and timestamp (Git-ignored)
 
 ## TODO
 
-- [ ] Replay: Reproduce recorded outputs and filesystem states within the declared scope, without making new model requests or rerunning historical tools.
+- [x] Replay MVP: Restore committed nodes and execute fixed historical tools without model requests, using unchanged comparison rules; retain differences and continue by default, or select strict mode to stop on differences.
 - [ ] Resume: Restore agent context and a runnable environment, then create an independent branch from a historical node while preserving the original trace.
 - [ ] Incremental storage management: Merge and split storage increments while retaining historical nodes.
 - [ ] Portable backups and migration across machines.

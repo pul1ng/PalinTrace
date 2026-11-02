@@ -10,7 +10,9 @@ from palinreplay.storage.btrfs.models import Snapshot
 from palinreplay.storage.rootfs import SCOPE
 
 
-def initial_recorder(store, materials, executor, export_agent=None, *, stats=None):
+def initial_recorder(
+    store, materials, executor, export_agent=None, *, stats=None, validation_mode="lenient",
+):
     if export_agent is None:
         initial = AgentSnapshot(Payload.json(materials.context), Payload.json(materials.input_position))
         def export_agent(boundary):
@@ -24,6 +26,7 @@ def initial_recorder(store, materials, executor, export_agent=None, *, stats=Non
             "source": materials.plan.provenance(),
             "used_history": [step.document() for step in materials.steps],
             "comparison_policy": "rootfs-files-v1-strict-mtime-seconds",
+            "validation_mode": validation_mode,
         },
     }
     recorder = Recorder(store, task_id=materials.plan.run.task_id,

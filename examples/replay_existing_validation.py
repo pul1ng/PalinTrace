@@ -1,4 +1,4 @@
-"""Validate two preselected existing Astropy intervals once under strict rules."""
+"""Validate two preselected existing Astropy intervals once in strict validation mode."""
 
 import argparse
 import json
@@ -28,7 +28,8 @@ def main(source, output):
         # alternate ranges are chosen after observing their outcomes.
         for name, start, end in (("read-only-C20-C23", "C20", "C23"),
                                  ("write-C2-C4", "C2", "C4")):
-            report = run_replay(source, start, end, output=output / name, client=client)
+            report = run_replay(source, start, end, output=output / name, client=client,
+                                validation_mode="strict")
             reports.append({"name": name, "from": start, "to": end, "report": report})
             print(json.dumps({"name": name, "status": report["status"],
                               "reason": report.get("stop_reason"),

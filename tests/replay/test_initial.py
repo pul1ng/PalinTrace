@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
 from palinreplay.core.models import Node, State
 from palinreplay.replay.initial import initial_recorder
 from palinreplay.storage.btrfs import pool as pools
@@ -9,7 +11,8 @@ from palinreplay.storage.store import RecordStore
 from tests.storage.test_btrfs_storage import C0LaunchConfig
 
 
-def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch):
+@pytest.mark.parametrize("option", [None, "strict", "lenient"])
+def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch, option):
     identity = uuid4()
     location = PoolLocation(volume="palinreplay-btrfs-" + identity.hex, uuid=identity,
                             daemon_id="fixture", helper_image_id="sha256:" + "a" * 64)
@@ -38,7 +41,11 @@ def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch
                                                                          agent_version="v"),
                                                      provenance=lambda: {"source_node": "C20"}))
     with RecordStore.create(tmp_path / "record") as store:
-        rec = initial_recorder(store, materials, executor)
+        options = {} if option is None else {"validation_mode": option}
+        rec = initial_recorder(store, materials, executor, **options)
+        config = store.read_json(rec.run.config)["replay"]
+        assert config["validation_mode"] == (option or "lenient")
+        assert "continue_on_difference" not in config
         assert rec.run.source_node_id is None
         node = rec.current_node
         assert node.index == 0 and node.parent_node_id is None
