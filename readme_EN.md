@@ -8,6 +8,10 @@ PalinTrace links an agent's model interactions, tool calls, execution results, c
 - **Replay · Historical re-execution (MVP implemented)**: Restore a committed node and execute subsequent tools from a fixed history without model requests. Compare raw results and file states; retain confirmed differences and continue by default, or select strict mode to stop on differences.
 - **Resume · Fork and continue (planned)**: Restore the agent context and task environment at any saved node, optionally provide new instructions, and continue on an independent trajectory while preserving the original history.
 
+## Demo (Chinese)
+
+https://github.com/user-attachments/assets/26b0c034-820d-426f-8b40-8113f72c9520
+
 ## Quickstart
 
 Run the following commands from the project root. After installation and configuration, use the script to start Record. The resulting traces and snapshots are intended to serve as inputs for future Replay and Resume workflows.
