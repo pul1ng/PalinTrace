@@ -15,6 +15,8 @@ def add_commands(commands):
     replay.add_argument("--to", dest="end", help="inclusive end (default: fixed last committed node)")
     replay.add_argument("--run", dest="run_id", help="source Run ID")
     replay.add_argument("--output", type=Path, help="new directory (default: outputs/replay/DATE_TASK)")
+    replay.add_argument("--continue-on-difference", action="store_true",
+                        help="retain confirmed differences and continue historical execution")
 
 
 def execute(args):
@@ -24,18 +26,25 @@ def execute(args):
         source = store_path(args.source)
         output = args.output or default_output("replay", record_name(source))
         with cancellation_signals():
-            report = run_replay(source, args.start, args.end, run_id=args.run_id, output=output)
-        label = {"match": "MATCH", "difference": "DIFFERENCE", "failed": "FAILED"}[report["status"]]
-        print(f"Replay {label} -> {output}")
+            report = run_replay(source, args.start, args.end, run_id=args.run_id, output=output,
+                                continue_on_difference=args.continue_on_difference)
+        execution, validation = report["execution_status"], report["validation_status"]
+        print(f"Replay {execution.upper()} -> {output}")
+        print(f"  Validation: {validation.upper()}")
         for mapping in report.get("mappings", []):
             print(f"  Source C{mapping['source_index']} -> C{mapping['index']}")
         if report.get("error"):
             print(f"error: {report['error']}", file=sys.stderr)
         if report.get("first_difference"):
-            action = "Stopped" if report["execution_status"] == "stopped" else "Difference"
-            reason = report["first_difference"]["difference_reason"]
-            print(f"  {action}: {reason} (details: {output / 'report.json'})")
-        return {"match": 0, "difference": 2, "failed": 1}[report["status"]]
+            action = "Stopped on difference" if execution == "stopped" else "First difference"
+            first = report["first_difference"]
+            print(f"  {action}: {first['difference_reason']} at source C{first['source_index']}"
+                  f" (details: {output / 'report.json'})")
+        if execution == "failed":
+            return 1
+        if validation == "difference":
+            return 2
+        return 0 if execution == "completed" and validation == "match" else 1
     except KeyboardInterrupt:
         print("Replay cancelled", file=sys.stderr)
         return 130
