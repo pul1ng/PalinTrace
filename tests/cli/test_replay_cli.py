@@ -30,13 +30,16 @@ def test_minimal_cli_paths_and_status(tmp_path, monkeypatch, capsys, status, cod
     assert seen[0][0] == (tmp_path / "record", "C20", None)
     assert seen[0][1]["output"] == default_output("replay", "task")
     assert seen[0][1]["validation_mode"] == "lenient"
+    assert seen[0][1]["services_config"] is None
     assert callable(seen[0][1]["progress"])
     output = capsys.readouterr().out
     assert "Validation mode: lenient" in output
     assert f"Validation: {'INCOMPLETE' if status == 'failed' else status.upper()}" in output
     for index, mode in enumerate(("lenient", "strict"), start=1):
         assert main(["replay", str(tmp_path), "--from", "C20", "--to", "C23",
-                     "--run", "run-id", "--output", "custom", "--validation", mode]) == code
+                     "--run", "run-id", "--output", "custom", "--validation", mode,
+                     "--services-config", "services.json"]) == code
+        assert seen[index][1]["services_config"] == Path("services.json")
         assert seen[index][1]["output"] == Path("custom")
         assert seen[index][1]["run_id"] == "run-id"
         assert seen[index][1]["validation_mode"] == mode

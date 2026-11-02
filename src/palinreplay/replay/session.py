@@ -10,7 +10,9 @@ from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.initial import initial_recorder, validate_r1
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
-from palinreplay.replay.run import btrfs_comparison, replay_range
+from palinreplay.replay.run import btrfs_comparison, preparation_comparison, replay_range
+from palinreplay.replay.service_config import load_services
+from palinreplay.replay.services import PreparationJournal, prepare_services
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.sandbox.client import connect_docker, docker_endpoint
 from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, Snapshot
@@ -21,10 +23,11 @@ from palinreplay.storage.store import RecordStore
 
 def run_replay(
     source, start, end=None, *, run_id=None, output, client=None, validation_mode="lenient",
-    progress: ProgressCallback | None = None,
+    progress: ProgressCallback | None = None, services_config: str | Path | None = None,
 ):
     if validation_mode not in ("strict", "lenient"):
         raise ValueError("validation_mode must be 'strict' or 'lenient'")
+    services = load_services(services_config) if services_config is not None else None
     source, output = Path(source).absolute(), Path(output).absolute()
     outside_store(source, output)
     if source.resolve().is_relative_to(output.resolve()):
@@ -80,11 +83,23 @@ def run_replay(
         report["phase"] = "r1-validation"
         notify(ProgressEvent("verifying", source_step=plan.start.index, step=0))
         report["r1"] = validate_r1(materials, executor, stats=stats)
+        preparation = None
+        if services is not None:
+            report["phase"] = "service-preparation"
+            journal = PreparationJournal(output / "preparation.json", services)
+            report["preparation"] = journal.data
+            notify(ProgressEvent("service-preparation"))
+            preparation = prepare_services(executor, services, journal)
         store = RecordStore.create(output / "record")
         report["phase"] = "initial-boundary"
         recorder = initial_recorder(store, materials, executor, context.export, stats=stats,
-                                    validation_mode=validation_mode)
+                                    validation_mode=validation_mode, preparation=preparation)
         report["run_id"] = recorder.run.run_id
+        if preparation is not None:
+            files = preparation_comparison(store, executor, snapshots[0], plan.start,
+                                           recorder.current_node, report=report)
+            stats.files(files)
+            write_json(output / "preparation-files.json", files)
         report["phase"] = "execute"
         replay_range(recorder, context, executor, materials,
                      btrfs_comparison(store, executor, snapshots), report=report, stats=stats,

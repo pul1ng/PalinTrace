@@ -13,6 +13,7 @@ class ProgressEvent:
         "connecting",
         "starting",
         "restoring",
+        "service-preparation",
         "replaying",
         "capturing",
         "committing",

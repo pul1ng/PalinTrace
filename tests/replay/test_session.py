@@ -7,6 +7,9 @@ import pytest
 import palinreplay.replay.session as session
 from palinreplay.agents import AgentTask
 from palinreplay.core.models import Node, State
+from palinreplay.record.calls import read_call
+from palinreplay.replay.materials import load_replay_materials
+from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.session import run_replay
 from palinreplay.sandbox.base import ExecResult, SandboxTimeout
 from palinreplay.sandbox.runtime import C0LaunchConfig
@@ -42,7 +45,8 @@ def replay_session(tmp_path, monkeypatch):
     """Real history, session and recorder, with only the external Btrfs boundary replaced."""
     state = SimpleNamespace(fault=None, different_call=None, file_difference=False,
                             cleanup_fault=False, termination_fault=False, closed=[],
-                            comparisons=[], captures=0, restored=False, recorder=None)
+                            comparisons=[], captures=0, restored=False, recorder=None,
+                            preparation_difference=False)
     identity = uuid4()
     location = PoolLocation(volume="palinreplay-btrfs-" + identity.hex, uuid=identity,
                             daemon_id="fixture", helper_image_id="sha256:" + "a" * 64)
@@ -95,6 +99,15 @@ def replay_session(tmp_path, monkeypatch):
             assert op in ("verify", "usage")
             return {"equal": True}
 
+        def changes(self, before, after):
+            assert state.captures == 1, "compare preparation only after actual C0 exists"
+            return {"complete": True, "candidates": ["service.pid"]}
+
+        def _file_command(self, op, **kwargs):
+            assert op == "compare_candidates"
+            return {"equal": not state.preparation_difference,
+                    "different_paths": ["service.pid"] if state.preparation_difference else []}
+
         def compare_incremental(self, *snapshots):
             index = len(state.comparisons)
             state.comparisons.append(snapshots)
@@ -130,6 +143,7 @@ def replay_session(tmp_path, monkeypatch):
             return ExecResult(result.command, b"actual", 0, 1)
         return result
 
+    state.executor = executor
     executor.execute = execute
     client = SimpleNamespace(close=lambda: state.closed.append("client"))
     state.client = client
@@ -166,6 +180,66 @@ def replay_session(tmp_path, monkeypatch):
     monkeypatch.setattr(session, "RestoredExecutor", lambda *args: executor)
     monkeypatch.setattr(session, "initial_recorder", initial_recorder)
     return state
+
+
+@pytest.mark.parametrize("difference", [False, True])
+def test_services_prepare_after_r1_before_c0_and_leave_history_unchanged(tmp_path, replay_session, difference):
+    state = replay_session
+    state.preparation_difference = difference
+    commands = []
+    spec = {"name": "A", "start_command": "start A", "readiness_command": "ready A",
+            "timeout_sec": 10, "cwd": "/srv/A", "env": {"ONLY_SERVICE": "1"}}
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [spec]}))
+
+    def execute(command, **kwargs):
+        assert state.executor.restored.report["checks"]["full_filesystem"]
+        assert state.captures == 0 and not state.sandbox.calls
+        assert kwargs["cwd"] == spec["cwd"] and kwargs["env"] == spec["env"]
+        commands.append(command)
+        return ExecResult(command, b"real service result", 0, 0.1)
+
+    state.executor.exec = execute
+    output = tmp_path / "output"
+    events = []
+    report = run_replay(state.source, "C0", "C3", output=output,
+                        services_config=config, progress=events.append)
+    assert commands == ["start A", "ready A"]
+    assert report["r1"]["status"] == "passed" and report["preparation"]["status"] == "ready"
+    assert report["execution_status"] == "completed"
+    assert report["validation_status"] == ("difference" if difference else "match")
+    assert all(step["starting_divergent"] == difference for step in report["steps"])
+    assert json.loads((output / "preparation.json").read_text()) == report["preparation"]
+    assert json.loads((output / "preparation-files.json").read_text()) == report["preparation_files"]
+    assert [event.phase for event in events].index("service-preparation") < [event.phase for event in events].index("committed")
+    assert [event.step for event in events if event.phase == "committed"] == [0, 1, 2, 3]
+    assert report["statistics"]["actual_model_calls"] == 0
+    assert report["statistics"]["actual_tool_executions"] == 4
+    with RecordStore.open(state.source) as origin, RecordStore.open(output / "record") as actual:
+        history = load_replay_materials(origin, pin_replay(origin, "C0", "C3"))
+        for step, mapping in zip(history.steps, report["mappings"][1:], strict=True):
+            node = actual.get(Node, mapping["node_id"])
+            for tool, execution_id in zip(step.tools, node.tool_execution_ids, strict=True):
+                trace = read_call(actual, execution_id)
+                assert actual.read_json(trace.execution.request) == tool.request
+        assert actual.read_json(actual.get(Node, report["mappings"][0]["node_id"]).context)["messages"] == history.context["messages"]
+    assert state.executor.runtime.launch.workdir == "/testbed"
+    assert state.executor.runtime.launch.environment == {"PATH": "/bin"}
+    assert report["cleanup_confirmed"]
+
+
+def test_invalid_service_config_is_rejected_before_source_or_output(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid service configuration must be rejected before opening resources")
+
+    monkeypatch.setattr(session.RecordStore, "open", forbidden)
+    monkeypatch.setattr(session, "connect_docker", forbidden)
+    config = tmp_path / "services.json"
+    config.write_text('{"services": [{"name": "A"}]}')
+    output = tmp_path / "output"
+    with pytest.raises(ValueError):
+        run_replay(tmp_path / "missing-source", "C0", services_config=config, output=output)
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("validation_mode", [None, "strict", "lenient"])

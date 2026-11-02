@@ -21,6 +21,7 @@ def describe(event: ProgressEvent) -> str:
     return {
         "preparing": "读取历史轨迹",
         "connecting": "连接 Docker",
+        "service-preparation": "准备指定服务",
         "cleanup": "清理临时资源",
     }[event.phase]
 
