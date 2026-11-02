@@ -23,7 +23,10 @@ def _difference(report, comparison, reason):
     report.setdefault("first_difference", comparison)
 
 
-def replay_range(recorder, context, executor, materials, compare_files=None, *, report=None, stats=None):
+def replay_range(
+    recorder, context, executor, materials, compare_files=None, *, report=None, stats=None,
+    continue_on_difference=False,
+):
     stats = stats or ReplayStats()
     plan = materials.plan
     mappings = [{"source_node_id": plan.start.node_id, "source_index": plan.start.index,
@@ -52,9 +55,11 @@ def replay_range(recorder, context, executor, materials, compare_files=None, *, 
             compared = {**compare_tool(tool, result), **location,
                         "tool_index": i, "execution_id": call.execution_id}
             tool_comparisons.append(compared)
+            if not compared["definitive"]:
+                raise RuntimeError("Replay tool result is not definitive")
             if not compared["equal"]:
                 _difference(report, compared, "tool-result")
-                if not last:
+                if not last and not continue_on_difference:
                     raise PartialDifference(compared)
 
         try:
@@ -67,7 +72,9 @@ def replay_range(recorder, context, executor, materials, compare_files=None, *, 
         entry["node_id"] = node.node_id
         report["incomplete_step"] = False
         if any(not c["equal"] for c in tool_comparisons):
-            return stop("tool-result")
+            if not continue_on_difference:
+                return stop("tool-result")
+            continue
         if compare_files is None:
             raise ValueError("Replay requires incremental file comparison")
         files = {**compare_files(index, previous, node), **location}
@@ -76,7 +83,8 @@ def replay_range(recorder, context, executor, materials, compare_files=None, *, 
         if not files["equal"]:
             _difference(report, files, "file-state")
             return stop("file-state")
-    report.update(status="match", execution_status="completed", validation_status="match")
+    validation = "difference" if "first_difference" in report else "match"
+    report.update(status=validation, execution_status="completed", validation_status=validation)
     return report
 
 

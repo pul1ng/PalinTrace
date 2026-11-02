@@ -3,6 +3,7 @@ import pytest
 from palinreplay.agents import AgentTask
 from palinreplay.core.interfaces import BoundaryAdapter, Payload
 from palinreplay.core.models import Node
+from palinreplay.record.calls import read_call
 from palinreplay.record.recorder import Recorder
 from palinreplay.replay.context import ReplayContext
 from palinreplay.replay.materials import load_replay_materials
@@ -190,5 +191,61 @@ def test_execution_fault_preserves_first_observed_difference(tmp_path, monkeypat
             assert report["incomplete_step"] and len(store.list(Node)) == 1
             if after_difference:
                 assert report["first_difference"]["source_index"] == 1
+    finally:
+        source.close()
+
+
+@pytest.mark.parametrize("continue_on_difference", [False, True])
+@pytest.mark.parametrize("different_tools", [(0,), (1,), (0, 1, 2)])
+@pytest.mark.parametrize("kind", ["output", "exit-code"])
+def test_continue_tool_differences_retains_actual_results(
+    tmp_path, continue_on_difference, different_tools, kind,
+):
+    source, _, _, _, original = integrated(
+        tmp_path, [response("read", "read"), response("read"), response("submit")]
+    )
+    try:
+        original.run(AgentTask("task", "Task"))
+        materials = load_replay_materials(source, pin_replay(source, "C0", "C2"))
+        context, sandbox = ReplayContext(materials), Sandbox()
+
+        def execute(req):
+            result = sandbox.exec(req["action"]["command"])
+            if len(sandbox.calls) - 1 in different_tools:
+                return ExecResult(result.command, b"actual" if kind == "output" else result.output,
+                                  1 if kind == "exit-code" else result.exit_code, 1)
+            return result
+
+        sandbox.execute = execute
+        with RecordStore.create(tmp_path / "replay") as store:
+            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
+                          config=Payload.json({}),
+                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
+                report = replay_range(rec, context, sandbox, materials,
+                                      compare_files=lambda *args: {"equal": True},
+                                      continue_on_difference=continue_on_difference)
+                assert report["execution_status"] == ("completed" if continue_on_difference else "stopped")
+                assert report["validation_status"] == report["status"] == "difference"
+                first = report["steps"][0]["tools"][different_tools[0]]
+                assert report["first_difference"] == first
+                assert first["source_index"] == 1 and first["tool_index"] == different_tools[0]
+                actual = read_call(store, first["execution_id"])
+                assert store.read_bytes(actual.events[1].payload) == (b"actual" if kind == "output" else b"ok\n")
+                details = store.read_json(actual.events[1].details)
+                assert details["backend"]["decoded"]["returncode"] == (1 if kind == "exit-code" else 0)
+                expected_calls = 3 if continue_on_difference else different_tools[0] + 1
+                assert len(sandbox.calls) == expected_calls
+                expected_nodes = 3 if continue_on_difference else (1 if different_tools[0] == 0 else 2)
+                assert len(store.list(Node)) == expected_nodes
+                if continue_on_difference:
+                    assert not report["incomplete_step"] and "stop_reason" not in report
+                    node = store.list(Node)[1]
+                    messages = store.read_json(node.context)["messages"]
+                    actual_text = "actual" if kind == "output" else "ok\n"
+                    assert messages[-2:][different_tools[0]]["extra"]["raw_output"] == actual_text
+                    assert len(report["steps"]) == 2
+                assert store.check_integrity().ok
+                if rec.phase == "ready":
+                    rec.finish("Replay difference")
     finally:
         source.close()
