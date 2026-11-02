@@ -55,6 +55,6 @@ def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch
         assert store.read_json(state.runtime)["source_container_id"] == "new-container"
         assert store.read_json(state.manifest)["name"] == "checkpoints/" + node.node_id
         assert calls[0] == "pause" and calls[2] == "unpause"
-        assert any(isinstance(c, tuple) and c[0] == "verify" for c in calls)
+        assert not any(isinstance(c, tuple) and c[0] == "verify" for c in calls)
         assert len(store.list(Node)) == 1
         rec.finish()

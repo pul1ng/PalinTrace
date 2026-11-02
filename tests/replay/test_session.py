@@ -88,6 +88,8 @@ def replay_session(tmp_path, monkeypatch):
             return {"uuid": str(uuid4())}
 
         def command(self, op, **kwargs):
+            if op == "verify":
+                assert state.captures == 0, "full R1 check must precede initial capture"
             if op == "verify" and state.fault == "baseline":
                 raise RuntimeError("baseline verification fault")
             assert op in ("verify", "usage")
@@ -111,8 +113,10 @@ def replay_session(tmp_path, monkeypatch):
             raise RuntimeError("restore cleanup fault")
 
     restored = SimpleNamespace(pool=pool, close=close_restore,
-                               report={"snapshot": Snapshot(location=location, name="bases/C0",
-                                                            uuid=uuid4()).model_dump(mode="json")})
+                               _write_report=lambda: None,
+                               report={"checks": {}, "snapshot": Snapshot(
+                                   location=location, name="bases/C0", uuid=uuid4()
+                               ).model_dump(mode="json")})
     executor = SimpleNamespace(runtime=runtime, pool=pool, workspace="workspaces/fixture",
                                _container=container, check_root=lambda: None, restored=restored)
 
@@ -130,7 +134,13 @@ def replay_session(tmp_path, monkeypatch):
     client = SimpleNamespace(close=lambda: state.closed.append("client"))
     state.client = client
 
-    def restore(*args, **kwargs):
+    def restore(store, selector, **kwargs):
+        saved = session.load_restore_materials(store, selector)
+        restored.context = saved.context
+        restored.input_position = saved.input_position
+        restored.config = saved.config
+        if state.fault == "context":
+            restored.context = {"messages": ["future context"]}
         state.restored = True
         if state.fault == "restore":
             state.closed.append("restore-internal")
@@ -249,7 +259,8 @@ def test_strict_final_complete_step_is_completed_with_difference(
 
 
 @pytest.mark.parametrize("fault,expected_calls,expected_nodes", [
-    ("snapshot-read", 0, 0), ("baseline", 0, 1), ("tool", 2, 1), ("unknown", 2, 1),
+    ("snapshot-read", 0, 0), ("baseline", 0, 0), ("context", 0, 0),
+    ("tool", 2, 1), ("unknown", 2, 1),
     ("compare", 2, 2), ("snapshot-capture", 3, 2),
 ])
 @pytest.mark.parametrize("validation_mode,prior_difference", [

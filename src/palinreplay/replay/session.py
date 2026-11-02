@@ -7,7 +7,7 @@ from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressR
 from palinreplay.record.restore import load_restore_materials, restore_r1_node
 from palinreplay.replay.context import ReplayContext
 from palinreplay.replay.environment import RestoredExecutor
-from palinreplay.replay.initial import initial_recorder
+from palinreplay.replay.initial import initial_recorder, validate_r1
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.run import btrfs_comparison, replay_range
@@ -77,9 +77,11 @@ def run_replay(
             for tool in history.tools:
                 if tuple(tool.request["interpreter"]) != tuple(executor.runtime.launch.shell):
                     raise ValueError("historical interpreter differs from the restored launch shell")
+        report["phase"] = "r1-validation"
+        notify(ProgressEvent("verifying", source_step=plan.start.index, step=0))
+        report["r1"] = validate_r1(materials, executor, stats=stats)
         store = RecordStore.create(output / "record")
         report["phase"] = "initial-boundary"
-        notify(ProgressEvent("verifying", source_step=plan.start.index, step=0))
         recorder = initial_recorder(store, materials, executor, context.export, stats=stats,
                                     validation_mode=validation_mode)
         report["run_id"] = recorder.run.run_id
@@ -95,6 +97,8 @@ def run_replay(
         report.update(status="failed", execution_status="failed",
                       error_type=type(error).__name__, error=str(error))
         report.pop("stop_reason", None)
+        if hasattr(error, "r1_report"):
+            report["r1"] = error.r1_report
         if hasattr(error, "restore_report"):
             report["restore_report"] = error.restore_report
             report["cleanup_errors"].extend(
@@ -122,6 +126,8 @@ def run_replay(
                 report.update(status="failed", execution_status="failed")
                 report.setdefault("error", "resource cleanup failed")
                 report.pop("stop_reason", None)
+            if "r1" in report:
+                write_json(output / "r1-validation.json", report["r1"])
             write_json(output / "report.json", report, replace=True)
     if primary is not None and not isinstance(primary, Exception):
         notify(ProgressEvent("finished",
