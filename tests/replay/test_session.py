@@ -228,6 +228,82 @@ def test_services_prepare_after_r1_before_c0_and_leave_history_unchanged(tmp_pat
     assert report["cleanup_confirmed"]
 
 
+@pytest.mark.parametrize("cleanup_fault", [False, True])
+@pytest.mark.parametrize("fault", ["startup", "readiness", "partial", "cancel", "cancel-before"])
+def test_preparation_failure_blocks_c0_and_history_and_keeps_primary_error(
+    tmp_path, replay_session, cleanup_fault, fault,
+):
+    state = replay_session
+    state.cleanup_fault = cleanup_fault
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [
+        {"name": name, "start_command": "start " + name, "readiness_command": "ready " + name,
+         "timeout_sec": 10} for name in ("A", "B")
+    ]}))
+    commands = []
+
+    def execute(command, **kwargs):
+        commands.append(command)
+        if fault == "readiness" and command == "ready A":
+            raise SandboxTimeout("readiness command timed out; environment discarded")
+        if fault == "cancel" and command == "start B":
+            raise KeyboardInterrupt("cancelled during B")
+        failed = (fault == "startup" and command == "start A") or (fault == "partial" and command == "start B")
+        return ExecResult(command, b"\xffactual output", 17 if failed else 0, 0.1)
+
+    def progress(event):
+        if fault == "cancel-before" and event.phase == "service-preparation":
+            raise KeyboardInterrupt("cancelled before commands")
+
+    state.executor.exec = execute
+    output = tmp_path / "output"
+    if fault.startswith("cancel"):
+        with pytest.raises(KeyboardInterrupt):
+            run_replay(state.source, "C0", "C3", output=output,
+                       services_config=config, progress=progress)
+        report = json.loads((output / "report.json").read_text())
+    else:
+        report = run_replay(state.source, "C0", "C3", output=output,
+                            services_config=config, progress=progress)
+    assert report["execution_status"] == "failed" and report["phase"] == "service-preparation"
+    assert report["r1"]["status"] == "passed"
+    assert report["error_type"] == ("KeyboardInterrupt" if fault.startswith("cancel") else
+                                    "SandboxTimeout" if fault == "readiness" else "PreparationError")
+    assert report["error"] != "resource cleanup failed"
+    assert not (output / "record").exists() and state.captures == 0
+    assert not state.sandbox.calls and state.recorder is None
+    assert report["statistics"]["actual_tool_executions"] == 0
+    saved = json.loads((output / "preparation.json").read_text())
+    assert saved == report["preparation"] and saved["status"] == "failed"
+    if fault in ("partial", "cancel"):
+        assert [service["status"] for service in saved["services"]] == ["ready", "failed"]
+        assert saved["services"][0]["startup"]["exit_code"] == 0
+        assert saved["services"][0]["readiness"][0]["exit_code"] == 0
+    assert len(commands) == {"startup": 1, "readiness": 2, "partial": 3, "cancel": 3, "cancel-before": 0}[fault]
+    assert report["cleanup_confirmed"] is (not cleanup_fault)
+    assert state.closed == ["restore", "client"]
+    assert bool(report["cleanup_errors"]) is cleanup_fault
+
+
+@pytest.mark.parametrize("fault", ["baseline", "context"])
+def test_failed_r1_never_runs_configured_service(tmp_path, replay_session, fault):
+    state = replay_session
+    state.fault = fault
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [{"name": "A", "start_command": "start A",
+                                              "readiness_command": "ready A", "timeout_sec": 10}]}))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("service commands must not run after failed R1")
+
+    state.executor.exec = forbidden
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C0", "C3", output=output, services_config=config)
+    assert report["r1"]["status"] == "failed" and not state.sandbox.calls
+    assert not (output / "preparation.json").exists() and not (output / "record").exists()
+    assert report["cleanup_confirmed"]
+
+
 def test_invalid_service_config_is_rejected_before_source_or_output(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("invalid service configuration must be rejected before opening resources")

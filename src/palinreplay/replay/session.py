@@ -41,7 +41,7 @@ def run_replay(
     stats = ReplayStats()
     report["statistics"] = stats.data
     write_json(output / "report.json", report)
-    restored = recorder = store = None
+    restored = recorder = store = journal = None
     own_client = client is None
     primary = None
     notify = ProgressReporter(progress)
@@ -112,6 +112,13 @@ def run_replay(
         report.update(status="failed", execution_status="failed",
                       error_type=type(error).__name__, error=str(error))
         report.pop("stop_reason", None)
+        if journal is not None and journal.data["status"] == "preparing":
+            journal.data.update(status="failed", error_type=type(error).__name__, error=str(error))
+            try:
+                journal.save()
+            except BaseException as diagnostic:
+                report["preparation_error"] = f"{type(diagnostic).__name__}: {diagnostic}"
+                error.add_note(f"preparation evidence could not be saved: {diagnostic!r}")
         if hasattr(error, "r1_report"):
             report["r1"] = error.r1_report
         if hasattr(error, "restore_report"):
