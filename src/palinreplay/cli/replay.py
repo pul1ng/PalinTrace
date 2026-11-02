@@ -20,7 +20,7 @@ def add_commands(commands):
                         help="JSON file listing services to prepare before saving C0")
     replay.add_argument("--validation", dest="validation_mode", choices=("strict", "lenient"),
                         default="lenient",
-                        help="stop on differences (strict) or retain them and continue (default: lenient)")
+                        help="stop on differences; lenient permits only file mtime differences (default: lenient)")
     replay.add_argument("--progress", choices=("auto", "plain", "off"), default="auto",
                         help="auto: live progress on a terminal, plain logs when redirected; off: no progress")
 
@@ -44,9 +44,8 @@ def execute(args):
         if report.get("error"):
             print(f"error: {report['error']}", file=sys.stderr)
         if report.get("first_difference"):
-            action = "Stopped on difference" if execution == "stopped" else "First difference"
             first = report["first_difference"]
-            print(f"  {action}: {first['difference_reason']} at source C{first['source_index']}"
+            print(f"  First difference: {first['difference_reason']} at source C{first['source_index']}"
                   f" (details: {output / 'report.json'})")
         if execution == "failed":
             return 1

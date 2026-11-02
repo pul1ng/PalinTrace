@@ -72,7 +72,8 @@ def test_cli_reports_mode_execution_and_validation_independently(
     assert f"Replay {execution.upper()}" in captured.out
     assert f"Validation mode: {mode}" in captured.out
     assert f"Validation: {validation.upper()}" in captured.out
-    assert ("Stopped on difference" in captured.out) == (execution == "stopped")
+    assert "Stopped on difference" not in captured.out
+    assert ("First difference" in captured.out) == (validation == "difference")
     if validation == "difference":
         assert "MATCH" not in captured.out and "source C3" in captured.out
     if execution == "failed":
@@ -85,6 +86,7 @@ def test_validation_modes_are_documented_in_help(capsys):
     assert exit.value.code == 0
     output = capsys.readouterr().out
     assert "--validation {strict,lenient}" in output and "default: lenient" in output
+    assert "lenient permits only file mtime differences" in " ".join(output.split())
     assert "--continue-on-difference" not in output
 
 

@@ -5,7 +5,7 @@ Execution trace recording, environment restoration, and historical replay for co
 PalinTrace links an agent's model interactions, tool calls, execution results, context, and task environment state. The goal is to let users select any saved node, restore its associated environment, and replay recorded interactions from that point, keeping playback and environment state aligned with the same position in history.
 
 - **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and future replay.
-- **Replay · Historical re-execution (MVP implemented)**: Restore a committed node and execute subsequent tools from a fixed history without model requests. Compare raw results and file states; retain confirmed differences and continue by default, or select strict mode to stop on differences.
+- **Replay · Historical re-execution (MVP implemented)**: Restore a committed node and execute subsequent tools from a fixed history without model requests. Preserve actual results and differences, stopping on critical mismatches; the default lenient mode permits only regular-file mtime differences.
 - **Resume · Fork and continue (planned)**: Restore the agent context and task environment at any saved node, optionally provide new instructions, and continue on an independent trajectory while preserving the original history.
 
 ## Quickstart
@@ -58,7 +58,7 @@ The baseline becomes the new C0. `--to` is inclusive and defaults to the last co
 
 Terminal progress shows the current phase, source-to-replay node mapping, completed steps and elapsed time. Redirected output uses plain text; `--progress off` disables progress. The restored baseline does not count as an executed step, and completion does not imply a validation match.
 
-`--validation {strict,lenient}` defaults to `lenient`. Lenient mode retains confirmed tool exit-code, raw-output and file differences while continuing remaining calls and historical steps using the actual workspace and context. Every completed step still receives the existing incremental file comparison. Strict mode stops on the first difference, preserving the actual completed node or unfinished tool group. The report saves `validation_mode`, and the new recording configuration saves `replay.validation_mode`. The Python API also defaults to `run_replay(..., validation_mode="lenient")`.
+`--validation {strict,lenient}` defaults to `lenient`. Both modes preserve actual tool results and stop further calls when exit codes or raw output differ from the recording. Matching nonzero exits pass. Lenient permits only regular files whose entries differ solely in `mtime_sec`, with unchanged hardlink relationships; content, additions/deletions, permissions and other differences stop execution. Permitted mtime differences remain recorded and keep validation at `difference`. Strict mode also stops on mtime differences. A mismatch inside a tool group preserves the incomplete group; a last-tool mismatch commits the actual node before stopping further history. Tool-matching completed steps receive the existing incremental file comparison. The report saves `validation_mode`, and the new recording configuration saves `replay.validation_mode`. The Python API also defaults to `run_replay(..., validation_mode="lenient")`.
 
 Execution is reported as `completed / stopped / failed`, separately from validation `match / difference / incomplete`. A fully matching run exits `0`; any difference exits `2`, including a completed final step or a completed continuation. Operational faults take precedence and exit `1`, preserving earlier differences. The first difference remains recorded, and later steps carry `starting_divergent`. A later local incremental match cannot establish that the whole filesystem has converged.
 
@@ -192,7 +192,7 @@ outputs/             Local outputs grouped by type and timestamp (Git-ignored)
 
 ## TODO
 
-- [x] Replay MVP: Restore committed nodes and execute fixed historical tools without model requests, using unchanged comparison rules; retain differences and continue by default, or select strict mode to stop on differences.
+- [x] Replay MVP: Restore committed nodes and execute fixed historical tools without model requests. Preserve actual results and stop on critical differences; lenient permits only regular-file mtime differences, while strict stops on every historical difference.
 - [ ] Resume: Restore agent context and a runnable environment, then create an independent branch from a historical node while preserving the original trace.
 - [ ] Incremental storage management: Merge and split storage increments while retaining historical nodes.
 - [ ] Portable backups and migration across machines.
