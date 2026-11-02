@@ -6,6 +6,7 @@ from palinreplay.core.errors import IntegrityError
 from palinreplay.core.interfaces import AgentSnapshot, BoundaryAdapter, Payload
 from palinreplay.record.recorder import Recorder
 from palinreplay.record.state import BtrfsStateBackend
+from palinreplay.replay.services import PreparationError
 from palinreplay.storage.btrfs.models import Snapshot
 from palinreplay.storage.rootfs import SCOPE
 
@@ -44,7 +45,10 @@ def validate_r1(materials, executor, *, stats=None):
 
 def initial_recorder(
     store, materials, executor, export_agent=None, *, stats=None, validation_mode="lenient",
+    preparation=None,
 ):
+    if preparation is not None and preparation["status"] != "ready":
+        raise PreparationError("service preparation must be ready before capturing C0")
     if export_agent is None:
         initial = AgentSnapshot(Payload.json(materials.context), Payload.json(materials.input_position))
         def export_agent(boundary):
@@ -61,6 +65,11 @@ def initial_recorder(
             "validation_mode": validation_mode,
         },
     }
+    if preparation is not None:
+        config["replay"]["preparation"] = {
+            "config": store.put_json(preparation["config"]).model_dump(mode="json"),
+            "evidence": store.put_json(preparation).model_dump(mode="json"),
+        }
     recorder = Recorder(store, task_id=materials.plan.run.task_id,
                         agent_name=materials.plan.run.agent_name,
                         agent_version=materials.plan.run.agent_version,

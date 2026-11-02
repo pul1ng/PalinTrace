@@ -3,15 +3,16 @@ from uuid import uuid4
 
 import pytest
 
-from palinreplay.core.models import Node, State
+from palinreplay.core.models import ArtifactRef, Node, Operation, Run, State, Step
 from palinreplay.replay.initial import initial_recorder
+from palinreplay.replay.services import PreparationError
 from palinreplay.storage.btrfs import pool as pools
 from palinreplay.storage.btrfs.models import BtrfsRuntime, PoolLocation, Snapshot
 from palinreplay.storage.store import RecordStore
 from tests.storage.test_btrfs_storage import C0LaunchConfig
 
 
-@pytest.mark.parametrize("option", [None, "strict", "lenient"])
+@pytest.mark.parametrize("option", [None, "strict", "lenient", "prepared"])
 def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch, option):
     identity = uuid4()
     location = PoolLocation(volume="palinreplay-btrfs-" + identity.hex, uuid=identity,
@@ -41,10 +42,22 @@ def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch
                                                                          agent_version="v"),
                                                      provenance=lambda: {"source_node": "C20"}))
     with RecordStore.create(tmp_path / "record") as store:
-        options = {} if option is None else {"validation_mode": option}
+        preparation = {"status": "ready", "config": {"services": [{"name": "A"}]},
+                       "services": [{"name": "A", "status": "ready", "startup": {"exit_code": 0}}]}
+        options = ({"preparation": preparation} if option == "prepared" else
+                   {} if option is None else {"validation_mode": option})
         rec = initial_recorder(store, materials, executor, **options)
         config = store.read_json(rec.run.config)["replay"]
-        assert config["validation_mode"] == (option or "lenient")
+        assert config["validation_mode"] == ("lenient" if option == "prepared" else option or "lenient")
+        if option == "prepared":
+            linked = config["preparation"]
+            assert store.read_json(ArtifactRef.model_validate(linked["config"])) == preparation["config"]
+            assert store.read_json(ArtifactRef.model_validate(linked["evidence"])) == preparation
+        else:
+            assert "preparation" not in config
+        assert config["source"] == materials.plan.provenance()
+        assert materials.config == {}
+        assert store.list(Step) == store.list(Operation) == ()
         assert "continue_on_difference" not in config
         assert rec.run.source_node_id is None
         node = rec.current_node
@@ -58,3 +71,11 @@ def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch
         assert not any(isinstance(c, tuple) and c[0] == "verify" for c in calls)
         assert len(store.list(Node)) == 1
         rec.finish()
+
+
+@pytest.mark.parametrize("status", ["preparing", "failed"])
+def test_preparation_must_succeed_before_c0_or_run_is_created(tmp_path, status):
+    with RecordStore.create(tmp_path / "record") as store:
+        with pytest.raises(PreparationError, match="must be ready"):
+            initial_recorder(store, None, None, preparation={"status": status})
+        assert store.list(Run) == store.list(Node) == ()
