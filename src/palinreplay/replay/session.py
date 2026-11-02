@@ -84,10 +84,17 @@ def run_replay(
         primary = error
         report.update(status="failed", execution_status="failed",
                       error_type=type(error).__name__, error=str(error))
+        report.pop("stop_reason", None)
+        if hasattr(error, "restore_report"):
+            report["restore_report"] = error.restore_report
+            report["cleanup_errors"].extend(
+                f"restore: {detail}" for detail in error.restore_report["cleanup_errors"]
+            )
         if recorder is not None and recorder.phase not in ("stopped", "closed"):
             try:
                 recorder.__exit__(type(error), error, error.__traceback__)
             except BaseException as diagnostic:
+                report["termination_error"] = f"{type(diagnostic).__name__}: {diagnostic}"
                 error.add_note(f"record termination also failed: {diagnostic!r}")
     finally:
         for name, resource in (("recorder", recorder), ("restore", restored), ("store", store),
@@ -98,8 +105,10 @@ def run_replay(
                 except BaseException as error:
                     report["cleanup_errors"].append(f"{name}: {type(error).__name__}: {error}")
         report["cleanup_confirmed"] = not report["cleanup_errors"]
-        if report["cleanup_errors"] and report["status"] == "match":
-            report.update(status="failed", execution_status="failed", error="resource cleanup failed")
+        if report["cleanup_errors"]:
+            report.update(status="failed", execution_status="failed")
+            report.setdefault("error", "resource cleanup failed")
+            report.pop("stop_reason", None)
         write_json(output / "report.json", report, replace=True)
     if primary is not None and not isinstance(primary, Exception):
         raise primary
