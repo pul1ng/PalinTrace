@@ -1,4 +1,4 @@
-"""Validate the existing Astropy C2→C4 range through the CLI in both difference modes."""
+"""Validate Astropy C2→C4 through the CLI with default, lenient, and strict validation."""
 
 import argparse
 import hashlib
@@ -21,11 +21,13 @@ from palinreplay.storage.io import write_json
 from palinreplay.storage.store import RecordStore
 
 
-def check_record(output, report, continuation):
+def check_record(output, report, validation_mode):
     evidence, snapshots = [], []
     with RecordStore.open(output / "record") as store:
         run = store.get(Run, report["run_id"])
-        assert store.read_json(run.config)["replay"]["continue_on_difference"] is continuation
+        config = store.read_json(run.config)["replay"]
+        assert config["validation_mode"] == validation_mode
+        assert "continue_on_difference" not in config
         nodes = sorted(store.list(Node, run_id=run.run_id), key=lambda node: node.index)
         assert len(nodes) == len(report["mappings"])
         for mapping, node in zip(report["mappings"], nodes, strict=True):
@@ -84,24 +86,33 @@ def main(source, output):
         summary["source_container_absent"] = True
         snapshots, workspaces = list(source_snapshots), []
         helper = None
-        for name, continuation, indices in (("strict", False, [2, 3]), ("continue", True, [2, 3, 4])):
+        # The source-pool helper name is shared, so each case must finish cleanup
+        # before the next one starts. Each case writes to a fresh directory.
+        cases = (("default", None, [2, 3, 4]),
+                 ("lenient", "lenient", [2, 3, 4]),
+                 ("strict", "strict", [2, 3]))
+        for name, requested_mode, indices in cases:
+            validation_mode = requested_mode or "lenient"
             target = output / name
             command = [str(Path(sys.executable).with_name("palin")), "replay", str(source),
                        "--from", "C2", "--to", "C4", "--output", str(target)]
-            if continuation:
-                command.append("--continue-on-difference")
+            if requested_mode is not None:
+                command.extend(["--validation", requested_mode])
             result = subprocess.run(command, capture_output=True, text=True)
             (output / f"{name}.stdout.txt").write_text(result.stdout)
             (output / f"{name}.stderr.txt").write_text(result.stderr)
             report = json.loads((target / "report.json").read_text())
             row = {"name": name, "command": command, "exit_code": result.returncode,
+                   "validation_mode": report["validation_mode"],
                    "execution_status": report["execution_status"],
                    "validation_status": report["validation_status"],
                    "report": str(target / "report.json")}
             summary["runs"].append(row)
             print(json.dumps(row), flush=True)
             assert result.returncode == 2 and "MATCH" not in result.stdout
-            assert report["execution_status"] == ("completed" if continuation else "stopped")
+            assert report["validation_mode"] == validation_mode
+            assert "continue_on_difference" not in report
+            assert report["execution_status"] == ("stopped" if validation_mode == "strict" else "completed")
             assert report["validation_status"] == report["status"] == "difference"
             assert [mapping["source_index"] for mapping in report["mappings"]] == indices
             assert [entry["source_index"] for entry in report["steps"]] == indices[1:]
@@ -109,7 +120,7 @@ def main(source, output):
             assert report["first_difference"]["source_index"] == 3
             assert report["first_difference"]["different_paths"]
             assert not report["steps"][0]["starting_divergent"]
-            if continuation:
+            if validation_mode == "lenient":
                 assert report["steps"][1]["starting_divergent"]
                 assert "stop_reason" not in report and "Stopped" not in result.stdout
             else:
@@ -117,7 +128,7 @@ def main(source, output):
             stats = report["statistics"]
             assert stats["actual_model_calls"] == stats["actual_model_cost"] == 0
             assert stats["historical_answer_supplies"] == len(indices) - 1
-            row["steps"], actual_snapshots = check_record(target, report, continuation)
+            row["steps"], actual_snapshots = check_record(target, report, validation_mode)
             snapshots.extend(actual_snapshots)
             assert stats["actual_tool_executions"] == sum(step["actual_tools"] for step in row["steps"])
             restored = json.loads((target / "restore.json").read_text())

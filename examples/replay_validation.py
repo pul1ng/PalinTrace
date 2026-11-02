@@ -108,7 +108,8 @@ def main(preload, output):
         source.mkdir()
         original = record_source(preload, source, client)
         hashes = store_hashes(source / "record")
-        report = run_replay(source / "record", "C1", "C3", output=output / "match", client=client)
+        report = run_replay(source / "record", "C1", "C3", output=output / "match", client=client,
+                            validation_mode="strict")
         write_json(output / "summary.json", {"source_container_removed": absent(client, original),
                                              "replay": report})
         assert report["status"] == "match", report
@@ -153,7 +154,8 @@ def main(preload, output):
             return result
 
         with patch.object(RestoredExecutor, "execute", inject):
-            difference = run_replay(source / "record", "C1", "C3", output=output / "difference", client=client)
+            difference = run_replay(source / "record", "C1", "C3", output=output / "difference", client=client,
+                                    validation_mode="strict")
         assert difference["status"] == "difference" and difference["stop_reason"] == "file-state"
         assert len(difference["steps"]) == 1 and len(difference["mappings"]) == 2
         assert difference["cleanup_confirmed"]

@@ -25,7 +25,7 @@ def _difference(report, comparison, reason):
 
 def replay_range(
     recorder, context, executor, materials, compare_files=None, *, report=None, stats=None,
-    continue_on_difference=False,
+    validation_mode="lenient",
 ):
     stats = stats or ReplayStats()
     plan = materials.plan
@@ -34,7 +34,8 @@ def replay_range(
     if report is None:
         report = {}
     report.update(status="failed", execution_status="failed", validation_status="incomplete",
-                  incomplete_step=False, mappings=mappings, steps=[], statistics=stats.data)
+                  validation_mode=validation_mode, incomplete_step=False,
+                  mappings=mappings, steps=[], statistics=stats.data)
 
     def stop(reason):
         completed = len(mappings) == len(materials.steps) + 1
@@ -60,7 +61,7 @@ def replay_range(
                 raise RuntimeError("Replay tool result is not definitive")
             if not compared["equal"]:
                 _difference(report, compared, "tool-result")
-                if not last and not continue_on_difference:
+                if not last and validation_mode == "strict":
                     raise PartialDifference(compared)
 
         try:
@@ -72,7 +73,7 @@ def replay_range(
         mappings.append({**location, "node_id": node.node_id, "index": node.index})
         entry["node_id"] = node.node_id
         report["incomplete_step"] = False
-        if any(not c["equal"] for c in tool_comparisons) and not continue_on_difference:
+        if any(not c["equal"] for c in tool_comparisons) and validation_mode == "strict":
             return stop("tool-result")
         if compare_files is None:
             raise ValueError("Replay requires incremental file comparison")
@@ -81,7 +82,7 @@ def replay_range(
         if not files["equal"]:
             _difference(report, files, "file-state")
         stats.files(files)
-        if not files["equal"] and not continue_on_difference:
+        if not files["equal"] and validation_mode == "strict":
             return stop("file-state")
     validation = "difference" if "first_difference" in report else "match"
     report.update(status=validation, execution_status="completed", validation_status=validation)

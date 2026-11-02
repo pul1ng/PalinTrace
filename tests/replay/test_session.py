@@ -31,6 +31,7 @@ def test_preflight_failure_retains_report_without_starting_docker(tmp_path, monk
     assert report["status"] == "failed" and report["phase"] == "preflight"
     assert report["execution_status"] == "failed"
     assert report["validation_status"] == "incomplete"
+    assert report["validation_mode"] == "lenient"
     assert "version" in report["error"]
     assert report["cleanup_confirmed"]
     assert json.loads((output / "report.json").read_text()) == report
@@ -157,35 +158,74 @@ def replay_session(tmp_path, monkeypatch):
     return state
 
 
-@pytest.mark.parametrize("continue_on_difference", [False, True])
-def test_session_option_reaches_recording_and_loop(tmp_path, replay_session, continue_on_difference):
+@pytest.mark.parametrize("validation_mode", [None, "strict", "lenient"])
+def test_session_mode_reaches_report_recording_and_loop(tmp_path, replay_session, validation_mode):
     state = replay_session
     state.different_call = 1
-    report = run_replay(state.source, "C0", "C3", output=tmp_path / "output",
-                        continue_on_difference=continue_on_difference)
-    assert report["execution_status"] == ("completed" if continue_on_difference else "stopped")
-    assert report["validation_status"] == "difference"
-    assert len(state.sandbox.calls) == (4 if continue_on_difference else 1)
-    with RecordStore.open(tmp_path / "output" / "record") as store:
-        assert store.read_json(state.recorder.run.config)["replay"]["continue_on_difference"] is continue_on_difference
-        assert len(store.list(Node)) == (4 if continue_on_difference else 1)
+    options = {} if validation_mode is None else {"validation_mode": validation_mode}
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C0", "C3", output=output, **options)
+    strict = validation_mode == "strict"
+    assert report["validation_mode"] == (validation_mode or "lenient")
+    assert "continue_on_difference" not in report
+    assert report["execution_status"] == ("stopped" if strict else "completed")
+    assert report["validation_status"] == report["status"] == "difference"
+    assert len(state.sandbox.calls) == (1 if strict else 4)
+    with RecordStore.open(output / "record") as store:
+        config = store.read_json(state.recorder.run.config)["replay"]
+        assert config["validation_mode"] == report["validation_mode"]
+        assert "continue_on_difference" not in config
+        assert len(store.list(Node)) == (1 if strict else 4)
     assert report["cleanup_confirmed"] and state.closed == ["restore", "client"]
     assert state.recorder.phase == "closed"
+    assert json.loads((output / "report.json").read_text()) == report
+
+
+def test_invalid_validation_mode_is_rejected_before_creating_output(tmp_path, monkeypatch):
+    def forbidden(*args):
+        pytest.fail("an invalid validation mode must not connect to Docker")
+
+    monkeypatch.setattr(session, "connect_docker", forbidden)
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="validation_mode must be 'strict' or 'lenient'"):
+        run_replay(tmp_path / "source", "C0", output=output, validation_mode="unknown")
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("difference_kind", ["tool", "file"])
+def test_strict_final_complete_step_is_completed_with_difference(
+    tmp_path, replay_session, difference_kind,
+):
+    state = replay_session
+    state.different_call = 2 if difference_kind == "tool" else None
+    state.file_difference = difference_kind == "file"
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C0", "C1", output=output, validation_mode="strict")
+    assert report["validation_mode"] == "strict"
+    assert report["execution_status"] == "completed"
+    assert report["validation_status"] == report["status"] == "difference"
+    assert report["first_difference"]["source_index"] == 1
+    assert not report["incomplete_step"] and "stop_reason" not in report
+    assert len(state.sandbox.calls) == 2 and len(report["mappings"]) == 2
+    assert report["cleanup_confirmed"]
+    assert json.loads((output / "report.json").read_text()) == report
 
 
 @pytest.mark.parametrize("fault,expected_calls,expected_nodes", [
     ("snapshot-read", 0, 0), ("baseline", 0, 1), ("tool", 2, 1), ("unknown", 2, 1),
     ("compare", 2, 2), ("snapshot-capture", 3, 2),
 ])
-@pytest.mark.parametrize("prior_difference", [False, True])
-def test_continuation_stops_faults_and_preserves_boundaries(
-    tmp_path, replay_session, fault, expected_calls, expected_nodes, prior_difference,
+@pytest.mark.parametrize("validation_mode,prior_difference", [
+    ("strict", False), ("lenient", False), ("lenient", True),
+])
+def test_validation_modes_stop_faults_and_preserve_boundaries(
+    tmp_path, replay_session, fault, expected_calls, expected_nodes, validation_mode, prior_difference,
 ):
     state = replay_session
     state.fault = fault
     state.different_call = 1 if prior_difference else None
     output = tmp_path / "output"
-    report = run_replay(state.source, "C0", "C3", output=output, continue_on_difference=True)
+    report = run_replay(state.source, "C0", "C3", output=output, validation_mode=validation_mode)
     observed_difference = prior_difference and expected_calls > 0
     assert report["status"] == report["execution_status"] == "failed"
     assert report["validation_status"] == ("difference" if observed_difference else "incomplete")
@@ -214,7 +254,7 @@ def test_comparison_fault_keeps_prior_file_difference(tmp_path, replay_session):
     state.file_difference = True
     state.fault = "compare-after-file"
     report = run_replay(state.source, "C0", "C3", output=tmp_path / "output",
-                        continue_on_difference=True)
+                        validation_mode="lenient")
     assert report["execution_status"] == "failed" and report["validation_status"] == "difference"
     assert len(state.sandbox.calls) == 3 and len(report["mappings"]) == 3
     assert report["first_difference"] == report["steps"][0]["files"]
@@ -223,12 +263,15 @@ def test_comparison_fault_keeps_prior_file_difference(tmp_path, replay_session):
     assert report["cleanup_confirmed"]
 
 
+@pytest.mark.parametrize("validation_mode", ["strict", "lenient"])
 @pytest.mark.parametrize("cleanup_fault", [False, True])
-def test_restore_failure_retains_attached_cleanup_evidence(tmp_path, replay_session, cleanup_fault):
+def test_restore_failure_retains_attached_cleanup_evidence(
+    tmp_path, replay_session, validation_mode, cleanup_fault,
+):
     state = replay_session
     state.fault, state.cleanup_fault = "restore", cleanup_fault
     report = run_replay(state.source, "C0", "C3", output=tmp_path / "output",
-                        continue_on_difference=True)
+                        validation_mode=validation_mode)
     assert report["execution_status"] == "failed" and report["validation_status"] == "incomplete"
     assert report["error"] == "restore fault" and not state.sandbox.calls
     assert report["cleanup_confirmed"] is (not cleanup_fault)
@@ -238,15 +281,15 @@ def test_restore_failure_retains_attached_cleanup_evidence(tmp_path, replay_sess
 
 
 @pytest.mark.parametrize("difference", [False, True])
-@pytest.mark.parametrize("continue_on_difference", [False, True])
+@pytest.mark.parametrize("validation_mode", ["strict", "lenient"])
 def test_cleanup_failure_overrides_execution_without_erasing_validation(
-    tmp_path, replay_session, difference, continue_on_difference,
+    tmp_path, replay_session, difference, validation_mode,
 ):
     state = replay_session
     state.cleanup_fault = True
     state.file_difference = difference
     report = run_replay(state.source, "C0", "C3", output=tmp_path / "output",
-                        continue_on_difference=continue_on_difference)
+                        validation_mode=validation_mode)
     assert report["execution_status"] == report["status"] == "failed"
     assert report["validation_status"] == ("difference" if difference else "match")
     assert ("first_difference" in report) == difference
@@ -259,21 +302,22 @@ def test_termination_fault_preserves_primary_error_and_cleanup(tmp_path, replay_
     state = replay_session
     state.fault, state.different_call, state.termination_fault = "tool", 1, True
     report = run_replay(state.source, "C0", "C3", output=tmp_path / "output",
-                        continue_on_difference=True)
+                        validation_mode="lenient")
     assert report["error"] == "unknown execution fault"
     assert report["termination_error"] == "RuntimeError: termination fault"
     assert report["execution_status"] == "failed" and report["validation_status"] == "difference"
     assert report["cleanup_confirmed"] and state.closed == ["restore", "client"]
 
 
-def test_corrupt_material_stops_before_restore_in_continuation(tmp_path, replay_session):
+@pytest.mark.parametrize("validation_mode", ["strict", "lenient"])
+def test_corrupt_material_stops_before_restore(tmp_path, replay_session, validation_mode):
     state = replay_session
     with RecordStore.open(state.source) as store:
         path = store._artifacts._path(state.config)
     path.chmod(0o600)
     path.write_bytes(b"corrupt")
     report = run_replay(state.source, "C0", "C3", output=tmp_path / "output",
-                        continue_on_difference=True)
+                        validation_mode=validation_mode)
     assert report["execution_status"] == "failed" and report["validation_status"] == "incomplete"
     assert report["phase"] == "preflight" and not state.restored
     assert not state.sandbox.calls and not state.closed

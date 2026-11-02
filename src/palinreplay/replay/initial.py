@@ -11,7 +11,7 @@ from palinreplay.storage.rootfs import SCOPE
 
 
 def initial_recorder(
-    store, materials, executor, export_agent=None, *, stats=None, continue_on_difference=False,
+    store, materials, executor, export_agent=None, *, stats=None, validation_mode="lenient",
 ):
     if export_agent is None:
         initial = AgentSnapshot(Payload.json(materials.context), Payload.json(materials.input_position))
@@ -26,7 +26,7 @@ def initial_recorder(
             "source": materials.plan.provenance(),
             "used_history": [step.document() for step in materials.steps],
             "comparison_policy": "rootfs-files-v1-strict-mtime-seconds",
-            "continue_on_difference": continue_on_difference,
+            "validation_mode": validation_mode,
         },
     }
     recorder = Recorder(store, task_id=materials.plan.run.task_id,

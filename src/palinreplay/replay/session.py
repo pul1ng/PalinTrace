@@ -19,8 +19,10 @@ from palinreplay.storage.store import RecordStore
 
 
 def run_replay(
-    source, start, end=None, *, run_id=None, output, client=None, continue_on_difference=False,
+    source, start, end=None, *, run_id=None, output, client=None, validation_mode="lenient",
 ):
+    if validation_mode not in ("strict", "lenient"):
+        raise ValueError("validation_mode must be 'strict' or 'lenient'")
     source, output = Path(source).absolute(), Path(output).absolute()
     outside_store(source, output)
     if source.resolve().is_relative_to(output.resolve()):
@@ -28,7 +30,7 @@ def run_replay(
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     report = {"schema_version": "palinreplay.replay-report.v1", "status": "failed",
               "execution_status": "failed", "validation_status": "incomplete",
-              "continue_on_difference": continue_on_difference,
+              "validation_mode": validation_mode,
               "phase": "preflight", "source_store": str(source), "output": str(output),
               "cleanup_confirmed": False, "cleanup_errors": []}
     stats = ReplayStats()
@@ -71,12 +73,12 @@ def run_replay(
         store = RecordStore.create(output / "record")
         report["phase"] = "initial-boundary"
         recorder = initial_recorder(store, materials, executor, context.export, stats=stats,
-                                    continue_on_difference=continue_on_difference)
+                                    validation_mode=validation_mode)
         report["run_id"] = recorder.run.run_id
         report["phase"] = "execute"
         replay_range(recorder, context, executor, materials,
                      btrfs_comparison(store, executor, snapshots), report=report, stats=stats,
-                     continue_on_difference=continue_on_difference)
+                     validation_mode=validation_mode)
         if recorder.phase == "ready":
             recorder.finish("Replay " + report["status"], details={"replay": report})
         report["phase"] = "finished"

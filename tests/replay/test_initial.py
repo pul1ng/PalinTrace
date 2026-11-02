@@ -11,7 +11,7 @@ from palinreplay.storage.store import RecordStore
 from tests.storage.test_btrfs_storage import C0LaunchConfig
 
 
-@pytest.mark.parametrize("option", [None, False, True])
+@pytest.mark.parametrize("option", [None, "strict", "lenient"])
 def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch, option):
     identity = uuid4()
     location = PoolLocation(volume="palinreplay-btrfs-" + identity.hex, uuid=identity,
@@ -41,9 +41,11 @@ def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch
                                                                          agent_version="v"),
                                                      provenance=lambda: {"source_node": "C20"}))
     with RecordStore.create(tmp_path / "record") as store:
-        options = {} if option is None else {"continue_on_difference": option}
+        options = {} if option is None else {"validation_mode": option}
         rec = initial_recorder(store, materials, executor, **options)
-        assert store.read_json(rec.run.config)["replay"]["continue_on_difference"] is (option is True)
+        config = store.read_json(rec.run.config)["replay"]
+        assert config["validation_mode"] == (option or "lenient")
+        assert "continue_on_difference" not in config
         assert rec.run.source_node_id is None
         node = rec.current_node
         assert node.index == 0 and node.parent_node_id is None

@@ -94,7 +94,9 @@ def test_early_and_final_tool_differences_keep_correct_boundary(
         sandbox.execute = execute
         with RecordStore.create(tmp_path / "replay") as store:
             with Recorder(store, task_id="task", agent_name="mini", agent_version="v", config=Payload.json({}), boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                report = replay_range(rec, context, sandbox, materials, compare_files=lambda *args: {"equal": True})
+                report = replay_range(rec, context, sandbox, materials,
+                                      compare_files=lambda *args: {"equal": True},
+                                      validation_mode="strict")
                 assert report["status"] == "difference"
                 completed = end == "C1" and different_tool == 1
                 assert report["execution_status"] == ("completed" if completed else "stopped")
@@ -129,7 +131,8 @@ def test_file_difference_distinguishes_completed_range(tmp_path, end):
                           boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
                 report = replay_range(rec, context, sandbox, materials,
                                       compare_files=lambda *args: {"equal": False,
-                                                                   "different_paths": ["file"]})
+                                                                   "different_paths": ["file"]},
+                                      validation_mode="strict")
                 assert report["execution_status"] == ("completed" if end == "C1" else "stopped")
                 assert report["validation_status"] == "difference"
                 assert ("stop_reason" in report) == (end != "C1")
@@ -196,11 +199,11 @@ def test_execution_fault_preserves_first_observed_difference(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("file_difference", [False, True])
-@pytest.mark.parametrize("continue_on_difference", [False, True])
+@pytest.mark.parametrize("validation_mode", ["strict", "lenient"])
 @pytest.mark.parametrize("different_tools", [(0,), (1,), (0, 1, 2)])
 @pytest.mark.parametrize("kind", ["output", "exit-code"])
-def test_continue_tool_differences_retains_actual_results(
-    tmp_path, continue_on_difference, different_tools, kind, file_difference,
+def test_validation_mode_retains_actual_tool_results(
+    tmp_path, validation_mode, different_tools, kind, file_difference,
 ):
     source, _, _, _, original = integrated(
         tmp_path, [response("read", "read"), response("read"), response("submit")]
@@ -209,6 +212,7 @@ def test_continue_tool_differences_retains_actual_results(
         original.run(AgentTask("task", "Task"))
         materials = load_replay_materials(source, pin_replay(source, "C0", "C2"))
         context, sandbox = ReplayContext(materials), Sandbox()
+        strict = validation_mode == "strict"
 
         def execute(req):
             result = sandbox.exec(req["action"]["command"])
@@ -230,9 +234,10 @@ def test_continue_tool_differences_retains_actual_results(
                             "different_paths": ["file"] if file_difference and index == 0 else []}
 
                 report = replay_range(rec, context, sandbox, materials, compare_files=compare,
-                                      continue_on_difference=continue_on_difference)
-                assert comparisons == ([(0, 0, 1), (1, 1, 2)] if continue_on_difference else [])
-                assert report["execution_status"] == ("completed" if continue_on_difference else "stopped")
+                                      validation_mode=validation_mode)
+                assert comparisons == ([] if strict else [(0, 0, 1), (1, 1, 2)])
+                assert report["execution_status"] == ("stopped" if strict else "completed")
+                assert report["validation_mode"] == validation_mode
                 assert report["validation_status"] == report["status"] == "difference"
                 first = report["steps"][0]["tools"][different_tools[0]]
                 assert report["first_difference"] == first
@@ -241,11 +246,11 @@ def test_continue_tool_differences_retains_actual_results(
                 assert store.read_bytes(actual.events[1].payload) == (b"actual" if kind == "output" else b"ok\n")
                 details = store.read_json(actual.events[1].details)
                 assert details["backend"]["decoded"]["returncode"] == (1 if kind == "exit-code" else 0)
-                expected_calls = 3 if continue_on_difference else different_tools[0] + 1
+                expected_calls = different_tools[0] + 1 if strict else 3
                 assert len(sandbox.calls) == expected_calls
-                expected_nodes = 3 if continue_on_difference else (1 if different_tools[0] == 0 else 2)
+                expected_nodes = (1 if different_tools[0] == 0 else 2) if strict else 3
                 assert len(store.list(Node)) == expected_nodes
-                if continue_on_difference:
+                if not strict:
                     assert not report["incomplete_step"] and "stop_reason" not in report
                     node = store.list(Node)[1]
                     messages = store.read_json(node.context)["messages"]
@@ -261,8 +266,8 @@ def test_continue_tool_differences_retains_actual_results(
         source.close()
 
 
-@pytest.mark.parametrize("continue_on_difference", [False, True])
-def test_file_difference_continues_using_actual_workspace(tmp_path, continue_on_difference):
+@pytest.mark.parametrize("validation_mode", [None, "strict", "lenient"])
+def test_file_difference_continues_using_actual_workspace(tmp_path, validation_mode):
     source, source_sandbox, _, _, original = integrated(
         tmp_path, [response("write"), response("read-file"), response("read"), response("submit")]
     )
@@ -271,6 +276,7 @@ def test_file_difference_continues_using_actual_workspace(tmp_path, continue_on_
         materials = load_replay_materials(source, pin_replay(source, "C0", "C3"))
         context, sandbox = ReplayContext(materials), Sandbox()
         reads, comparisons = [], []
+        strict = validation_mode == "strict"
 
         def execute(req):
             command = req["action"]["command"]
@@ -294,17 +300,19 @@ def test_file_difference_continues_using_actual_workspace(tmp_path, continue_on_
                     # Later unchanged endpoints have no new incremental candidates.
                     return {"equal": index != 0, "different_paths": ["file"] if index == 0 else []}
 
+                options = {} if validation_mode is None else {"validation_mode": validation_mode}
                 report = replay_range(rec, context, sandbox, materials, compare_files=compare,
-                                      continue_on_difference=continue_on_difference)
-                assert report["execution_status"] == ("completed" if continue_on_difference else "stopped")
+                                      **options)
+                assert report["validation_mode"] == (validation_mode or "lenient")
+                assert report["execution_status"] == ("stopped" if strict else "completed")
                 assert report["validation_status"] == report["status"] == "difference"
                 assert report["first_difference"] == report["steps"][0]["files"]
                 assert report["first_difference"]["difference_reason"] == "file-state"
                 assert source_sandbox.files["file"] == "changed"
-                assert len(store.list(Node)) == (4 if continue_on_difference else 2)
-                assert comparisons == ([0, 1, 2] if continue_on_difference else [0])
-                assert reads == (["actual contents"] if continue_on_difference else [])
-                if continue_on_difference:
+                assert len(store.list(Node)) == (2 if strict else 4)
+                assert comparisons == ([0] if strict else [0, 1, 2])
+                assert reads == ([] if strict else ["actual contents"])
+                if not strict:
                     assert [s["starting_divergent"] for s in report["steps"]] == [False, True, True]
                     assert not report["steps"][1]["tools"][0]["equal"]
                     assert report["steps"][2]["tools"][0]["equal"]

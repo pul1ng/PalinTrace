@@ -15,8 +15,9 @@ def add_commands(commands):
     replay.add_argument("--to", dest="end", help="inclusive end (default: fixed last committed node)")
     replay.add_argument("--run", dest="run_id", help="source Run ID")
     replay.add_argument("--output", type=Path, help="new directory (default: outputs/replay/DATE_TASK)")
-    replay.add_argument("--continue-on-difference", action="store_true",
-                        help="retain confirmed differences and continue historical execution")
+    replay.add_argument("--validation", dest="validation_mode", choices=("strict", "lenient"),
+                        default="lenient",
+                        help="stop on differences (strict) or retain them and continue (default: lenient)")
 
 
 def execute(args):
@@ -27,9 +28,10 @@ def execute(args):
         output = args.output or default_output("replay", record_name(source))
         with cancellation_signals():
             report = run_replay(source, args.start, args.end, run_id=args.run_id, output=output,
-                                continue_on_difference=args.continue_on_difference)
+                                validation_mode=args.validation_mode)
         execution, validation = report["execution_status"], report["validation_status"]
         print(f"Replay {execution.upper()} -> {output}")
+        print(f"  Validation mode: {report['validation_mode']}")
         print(f"  Validation: {validation.upper()}")
         for mapping in report.get("mappings", []):
             print(f"  Source C{mapping['source_index']} -> C{mapping['index']}")
