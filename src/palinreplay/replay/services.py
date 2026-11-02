@@ -77,6 +77,16 @@ def start_service(executor, service: ServiceSpec, journal: PreparationJournal) -
         raise
 
 
+def prepare_services(executor, config: ServicesConfig, journal: PreparationJournal):
+    """Prepare only the declared services, in list order, without taking ownership."""
+    for service in config.services:
+        started = start_service(executor, service, journal)
+        wait_ready(executor, started, journal)
+    journal.data["status"] = "ready"
+    journal.save()
+    return journal.data
+
+
 def wait_ready(executor, started: StartedService, journal: PreparationJournal):
     """Poll only the supplied readiness command within the startup deadline."""
     service, entry = started.spec, started.entry

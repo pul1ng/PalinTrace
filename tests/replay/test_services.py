@@ -9,6 +9,7 @@ from palinreplay.replay.service_config import ServicesConfig, ServiceSpec
 from palinreplay.replay.services import (
     PreparationError,
     PreparationJournal,
+    prepare_services,
     start_service,
     wait_ready,
 )
@@ -117,3 +118,31 @@ def test_readiness_has_separate_attempts_and_shares_startup_deadline(tmp_path, c
     assert saved["startup"]["output_base64"] != saved["readiness"][0].get("output_base64")
     if failure == "timeout":
         assert len(saved["readiness"]) == 1
+
+
+@pytest.mark.parametrize("failed_b", [False, True])
+def test_ordered_services_preserve_partial_evidence_and_do_not_start_c(tmp_path, failed_b):
+    config = ServicesConfig(services=tuple(ServiceSpec(
+        name=name, start_command="start " + name, readiness_command="ready " + name,
+        timeout_sec=10,
+    ) for name in ("A", "B")))
+    journal = PreparationJournal(tmp_path / "preparation.json", config)
+    calls = []
+
+    def execute(command, **kwargs):
+        calls.append(command)
+        if command == "start B":
+            assert journal.data["services"][0]["status"] == "ready"
+        return ExecResult(command, command.encode(), 17 if failed_b and command == "start B" else 0, 0.1)
+
+    executor = SimpleNamespace(exec=execute, runtime=SimpleNamespace(launch=SimpleNamespace(workdir="/")))
+    if failed_b:
+        with pytest.raises(PreparationError):
+            prepare_services(executor, config, journal)
+    else:
+        prepare_services(executor, config, journal)
+    saved = json.loads(journal.path.read_text())
+    assert calls == ["start A", "ready A", "start B"] + ([] if failed_b else ["ready B"])
+    assert saved["status"] == ("failed" if failed_b else "ready")
+    assert [entry["status"] for entry in saved["services"]] == ["ready", "failed" if failed_b else "ready"]
+    assert base64.b64decode(saved["services"][0]["startup"]["output_base64"]) == b"start A"
