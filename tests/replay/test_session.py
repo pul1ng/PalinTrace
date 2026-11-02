@@ -204,7 +204,7 @@ def test_services_prepare_after_r1_before_c0_and_leave_history_unchanged(tmp_pat
     events = []
     report = run_replay(state.source, "C0", "C3", output=output,
                         services_config=config, progress=events.append)
-    assert commands == ["start A", "ready A"]
+    assert commands == ["start A", "ready A", "ready A"]
     assert report["r1"]["status"] == "passed" and report["preparation"]["status"] == "ready"
     assert report["execution_status"] == "completed"
     assert report["validation_status"] == ("difference" if difference else "match")
@@ -226,6 +226,49 @@ def test_services_prepare_after_r1_before_c0_and_leave_history_unchanged(tmp_pat
     assert state.executor.runtime.launch.workdir == "/testbed"
     assert state.executor.runtime.launch.environment == {"PATH": "/bin"}
     assert report["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("fault", ["exit", "timeout", "cancel"])
+def test_final_readiness_failure_blocks_c0_after_all_initial_checks_pass(tmp_path, replay_session, fault):
+    state = replay_session
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [
+        {"name": name, "start_command": "start " + name, "readiness_command": "ready " + name,
+         "timeout_sec": 10} for name in ("A", "B")
+    ]}))
+    commands = []
+
+    def execute(command, **kwargs):
+        commands.append(command)
+        if command == "ready A" and commands.count(command) == 2:
+            if fault == "timeout":
+                raise SandboxTimeout("A final check timed out")
+            if fault == "cancel":
+                raise KeyboardInterrupt("cancelled during final readiness")
+            return ExecResult(command, b"A exited while B started", 1, 0.1)
+        return ExecResult(command, b"initially ready", 0, 0.1)
+
+    state.executor.exec = execute
+    output = tmp_path / "output"
+    if fault == "cancel":
+        with pytest.raises(KeyboardInterrupt):
+            run_replay(state.source, "C0", "C3", output=output, services_config=config)
+        report = json.loads((output / "report.json").read_text())
+    else:
+        report = run_replay(state.source, "C0", "C3", output=output, services_config=config)
+    assert commands == ["start A", "ready A", "start B", "ready B", "ready A"]
+    assert report["execution_status"] == "failed" and report["phase"] == "service-preparation"
+    assert report["preparation"]["status"] == "failed"
+    saved = json.loads((output / "preparation.json").read_text())
+    assert saved == report["preparation"]
+    a, b = saved["services"]
+    assert a["readiness"][0]["exit_code"] == b["readiness"][0]["exit_code"] == 0
+    assert a["status"] == "failed" and b["status"] == "ready"
+    assert a["final_readiness"]["status"] == ("returned" if fault == "exit" else "unknown")
+    assert not (output / "record").exists() and state.captures == 0
+    assert not state.sandbox.calls and state.recorder is None
+    assert report["statistics"]["actual_tool_executions"] == 0
+    assert report["cleanup_confirmed"] and state.closed == ["restore", "client"]
 
 
 @pytest.mark.parametrize("cleanup_fault", [False, True])

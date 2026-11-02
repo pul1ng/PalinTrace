@@ -142,7 +142,7 @@ def main(source, output):
         assert report["preparation"]["status"] == "ready"
         assert [service["name"] for service in services] == ["A", "B"]
         assert all(service["status"] == "ready" and service["startup"]["exit_code"] == 0
-                   and service["readiness"][-1]["exit_code"] == 0 for service in services)
+                   and service["readiness"][-1]["exit_code"] == service["final_readiness"]["exit_code"] == 0 for service in services)
         assert report["first_difference"]["difference_reason"] == "service-preparation"
         assert [mapping["source_index"] for mapping in report["mappings"]] == list(range(20, 41))
         assert all(step["starting_divergent"] for step in report["steps"])

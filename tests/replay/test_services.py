@@ -142,7 +142,60 @@ def test_ordered_services_preserve_partial_evidence_and_do_not_start_c(tmp_path,
     else:
         prepare_services(executor, config, journal)
     saved = json.loads(journal.path.read_text())
-    assert calls == ["start A", "ready A", "start B"] + ([] if failed_b else ["ready B"])
+    assert calls == ["start A", "ready A", "start B"] + (
+        [] if failed_b else ["ready B", "ready A", "ready B"]
+    )
     assert saved["status"] == ("failed" if failed_b else "ready")
     assert [entry["status"] for entry in saved["services"]] == ["ready", "failed" if failed_b else "ready"]
     assert base64.b64decode(saved["services"][0]["startup"]["output_base64"]) == b"start A"
+
+
+@pytest.mark.parametrize("outcome", ["ready", "exited", "timeout", "late-success"])
+def test_final_readiness_rechecks_earlier_service_after_slow_b(tmp_path, clock, outcome):
+    config = ServicesConfig(services=tuple(ServiceSpec(
+        name=name, start_command="start " + name, readiness_command="ready " + name,
+        timeout_sec=1 if name == "A" else 10,
+    ) for name in ("A", "B")))
+    journal = PreparationJournal(tmp_path / "preparation.json", config)
+    calls = []
+
+    def execute(command, **kwargs):
+        calls.append(command)
+        assert journal.data["status"] == "preparing"
+        if command == "start B":
+            clock[0] += 2  # A's original deadline has expired by final confirmation.
+        if command == "ready A" and calls.count(command) == 2:
+            assert 0 < kwargs["timeout_sec"] <= 1
+            if outcome == "timeout":
+                raise SandboxTimeout("final readiness timed out")
+            if outcome == "late-success":
+                clock[0] += 2
+            return ExecResult(command, b"\xfffinal response", 1 if outcome == "exited" else 0, 0.1)
+        return ExecResult(command, b"initial response", 0, 0.1)
+
+    executor = SimpleNamespace(exec=execute, runtime=SimpleNamespace(launch=SimpleNamespace(workdir="/")))
+    if outcome == "ready":
+        prepare_services(executor, config, journal)
+    else:
+        with pytest.raises(SandboxTimeout if outcome == "timeout" else PreparationError):
+            prepare_services(executor, config, journal)
+    saved = json.loads(journal.path.read_text())
+    a, b = saved["services"]
+    assert saved["status"] == ("ready" if outcome == "ready" else "failed")
+    assert calls == ["start A", "ready A", "start B", "ready B", "ready A"] + (
+        ["ready B"] if outcome == "ready" else []
+    )
+    assert a["startup"]["exit_code"] == b["startup"]["exit_code"] == 0
+    assert len(a["readiness"]) == len(b["readiness"]) == 1
+    assert a["readiness"][0]["exit_code"] == b["readiness"][0]["exit_code"] == 0
+    assert a["status"] == ("ready" if outcome == "ready" else "failed")
+    if outcome == "timeout":
+        assert a["final_readiness"]["status"] == "unknown"
+        assert "exit_code" not in a["final_readiness"]
+    else:
+        assert base64.b64decode(a["final_readiness"]["output_base64"]) == b"\xfffinal response"
+        assert a["final_readiness"]["exit_code"] == (1 if outcome == "exited" else 0)
+    if outcome == "ready":
+        assert b["final_readiness"]["exit_code"] == 0
+    else:
+        assert "final_readiness" not in b

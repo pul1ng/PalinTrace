@@ -78,13 +78,36 @@ def start_service(executor, service: ServiceSpec, journal: PreparationJournal) -
 
 
 def prepare_services(executor, config: ServicesConfig, journal: PreparationJournal):
-    """Prepare only the declared services, in list order, without taking ownership."""
+    """Prepare declared services in order, then confirm each before publishing ready."""
+    started_services = []
     for service in config.services:
         started = start_service(executor, service, journal)
         wait_ready(executor, started, journal)
+        started_services.append(started)
+    for started in started_services:
+        _confirm_ready(executor, started, journal)
     journal.data["status"] = "ready"
     journal.save()
     return journal.data
+
+
+def _confirm_ready(executor, started: StartedService, journal: PreparationJournal):
+    """Recheck once with a fresh per-command budget, retaining the initial probes."""
+    service, entry = started.spec, started.entry
+    entry.update(status="confirming", final_readiness={})
+    deadline = time.monotonic() + service.timeout_sec
+    try:
+        result = _command(executor, service, service.readiness_command, deadline,
+                          entry["final_readiness"], journal)
+        if result.exit_code != 0:
+            raise PreparationError(f"{service.name}: final readiness exited with code {result.exit_code}")
+        if time.monotonic() > deadline:
+            raise PreparationError(f"{service.name}: final readiness deadline exceeded")
+        entry["status"] = "ready"
+        journal.save()
+    except BaseException as error:
+        journal.fail(entry, error)
+        raise
 
 
 def wait_ready(executor, started: StartedService, journal: PreparationJournal):

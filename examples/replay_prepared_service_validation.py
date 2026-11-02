@@ -57,7 +57,7 @@ def main(source, output):
         journal = report["preparation"]
         assert journal["status"] == journal["services"][0]["status"] == "ready"
         service = journal["services"][0]
-        assert service["startup"]["exit_code"] == 0
+        assert service["startup"]["exit_code"] == service["final_readiness"]["exit_code"] == 0
         assert base64.b64decode(service["startup"]["output_base64"]) == b"PALIN_SERVICE_READY\n"
         probe = service["readiness"][-1]
         assert probe["exit_code"] == 0
