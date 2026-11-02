@@ -9,7 +9,7 @@ from unittest.mock import patch
 import replay_service_fixture as fixture
 
 from palinreplay.cli import main as cli_main
-from palinreplay.core.models import ArtifactRef, Node, Operation, Step
+from palinreplay.core.models import Node, Operation, Step
 from palinreplay.record.restore import load_restore_materials
 from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.sandbox.client import connect_docker
@@ -78,7 +78,8 @@ def main(source, output):
             assert c0.context["messages"] == c2.context["messages"]
             assert len(c0.context["messages"]) < len(load_restore_materials(origin, "C3").context["messages"])
             assert c0.config["replay"]["source"] == report["source"]
-            assert current.read_json(ArtifactRef.model_validate(c0.config["replay"]["preparation"]["evidence"])) == journal
+            assert c0.config["replay"]["preparation"]["config"] == journal["config"]
+            assert c0.config["replay"]["preparation"]["evidence"] == journal
             assert c0.runtime.source_container_id != c2.runtime.source_container_id
             assert len(current.list(Node)) == 3 and len(current.list(Step)) == 2
             assert len(current.list(Operation)) == 4

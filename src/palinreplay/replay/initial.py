@@ -67,8 +67,8 @@ def initial_recorder(
     }
     if preparation is not None:
         config["replay"]["preparation"] = {
-            "config": store.put_json(preparation["config"]).model_dump(mode="json"),
-            "evidence": store.put_json(preparation).model_dump(mode="json"),
+            "config": preparation["config"],
+            "evidence": preparation,
         }
     recorder = Recorder(store, task_id=materials.plan.run.task_id,
                         agent_name=materials.plan.run.agent_name,

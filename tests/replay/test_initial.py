@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import pytest
 
-from palinreplay.core.models import ArtifactRef, Node, Operation, Run, State, Step
+from palinreplay.core.models import Node, Operation, Run, State, Step
 from palinreplay.replay.initial import initial_recorder
 from palinreplay.replay.services import PreparationError
 from palinreplay.storage.btrfs import pool as pools
@@ -51,8 +51,8 @@ def test_independent_c0_captures_actual_restored_workspace(tmp_path, monkeypatch
         assert config["validation_mode"] == ("lenient" if option == "prepared" else option or "lenient")
         if option == "prepared":
             linked = config["preparation"]
-            assert store.read_json(ArtifactRef.model_validate(linked["config"])) == preparation["config"]
-            assert store.read_json(ArtifactRef.model_validate(linked["evidence"])) == preparation
+            assert linked["config"] == preparation["config"]
+            assert linked["evidence"] == preparation
         else:
             assert "preparation" not in config
         assert config["source"] == materials.plan.provenance()

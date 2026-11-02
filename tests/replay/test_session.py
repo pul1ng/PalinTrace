@@ -6,7 +6,8 @@ import pytest
 
 import palinreplay.replay.session as session
 from palinreplay.agents import AgentTask
-from palinreplay.core.models import Node, State
+from palinreplay.core.errors import IntegrityError
+from palinreplay.core.models import Node, Run, State
 from palinreplay.record.calls import read_call
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
@@ -226,6 +227,46 @@ def test_services_prepare_after_r1_before_c0_and_leave_history_unchanged(tmp_pat
     assert state.executor.runtime.launch.workdir == "/testbed"
     assert state.executor.runtime.launch.environment == {"PATH": "/bin"}
     assert report["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("damage", ["missing-artifact", "missing-config", "missing-evidence", "changed-output"])
+def test_preparation_material_is_inline_and_covered_by_record_integrity(tmp_path, replay_session, damage):
+    state = replay_session
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [
+        {"name": "A", "start_command": "start A", "readiness_command": "ready A", "timeout_sec": 10},
+    ]}))
+    state.executor.exec = lambda command, **kwargs: ExecResult(command, b"\xff\x00ready\n", 0, 0.1)
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C0", "C3", output=output, services_config=config)
+    assert report["execution_status"] == "completed" and report["preparation"]["status"] == "ready"
+    # The recorded materials must survive without the original input or external journal.
+    config.unlink()
+    (output / "preparation.json").unlink()
+    with RecordStore.open(output / "record") as store:
+        run = store.get(Run, report["run_id"])
+        recorded = store.read_json(run.config)
+        preparation = recorded["replay"]["preparation"]
+        assert preparation["config"] == report["preparation"]["config"]
+        assert preparation["evidence"] == report["preparation"]
+        assert store.check_integrity().ok
+        path = store._artifacts._path(run.config)
+    if damage == "missing-artifact":
+        path.unlink()
+    else:
+        if damage == "changed-output":
+            preparation["evidence"]["services"][0]["startup"]["output_base64"] = "dGFtcGVyZWQ="
+        else:
+            del preparation[damage.removeprefix("missing-")]
+        path.chmod(0o600)
+        path.write_text(json.dumps(recorded))
+    with RecordStore.open(output / "record") as store:
+        audit = store.check_integrity()
+        assert not audit.ok
+        assert any(issue.record == "run/" + run.run_id and run.config.sha256 in issue.message
+                   for issue in audit.issues)
+        with pytest.raises(IntegrityError, match=run.config.sha256):
+            store.read_json(run.config)
 
 
 @pytest.mark.parametrize("fault", ["exit", "timeout", "cancel"])
