@@ -146,6 +146,33 @@ def test_file_difference_distinguishes_completed_range(tmp_path, end):
         source.close()
 
 
+@pytest.mark.parametrize("mode", ["strict", "lenient"])
+@pytest.mark.parametrize("end", ["C0", "C2"])
+def test_preparation_difference_survives_matching_history_and_empty_range(tmp_path, mode, end):
+    source, _, _, _, original = integrated(tmp_path, [response("read"), response("read"), response("submit")])
+    try:
+        original.run(AgentTask("task", "Task"))
+        materials = load_replay_materials(source, pin_replay(source, "C0", end))
+        context, sandbox = ReplayContext(materials), Sandbox()
+        sandbox.execute = lambda req: sandbox.exec(req["action"]["command"])
+        first = {"source_index": 0, "difference_reason": "service-preparation", "equal": False}
+        report = {"first_difference": first, "validation_status": "difference"}
+        with RecordStore.create(tmp_path / "replay") as store:
+            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
+                          config=Payload.json({}), boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
+                replay_range(rec, context, sandbox, materials, report=report, validation_mode=mode,
+                             compare_files=lambda *args: {"equal": True})
+                assert report["execution_status"] == "completed"
+                assert report["validation_status"] == "difference"
+                assert report["first_difference"] is first
+                assert all(step["starting_divergent"] for step in report["steps"])
+                assert all(tool["equal"] for step in report["steps"] for tool in step["tools"])
+                assert len(sandbox.calls) == (0 if end == "C0" else 2)
+                rec.finish()
+    finally:
+        source.close()
+
+
 def test_empty_range_is_completed_and_matched(tmp_path):
     source, _, _, _, original = integrated(tmp_path, [response("submit")])
     try:
