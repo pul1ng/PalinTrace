@@ -396,7 +396,7 @@ def replay_once(source, output, client):
     with no_model_calls(), patch.object(RestoredExecutor, "execute", observe):
         report = run_replay(source / "record", "C2", "C4",
                             run_id=identity["selection"]["run"]["run_id"],
-                            output=output, client=client)
+                            output=output, client=client, validation_mode="strict")
     write_json(output / "execution-check.json", {
         "source_selection_sha256": identity["selection"]["selection_sha256"],
         "executed_requests": executed, "actual_model_calls": 0,
