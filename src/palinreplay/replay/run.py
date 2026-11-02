@@ -1,4 +1,4 @@
-"""Execute a pinned range in one evolving workspace, stopping on differences."""
+"""Execute a pinned history, retaining comparisons and optionally continuing differences."""
 
 from palinreplay.core.models import State
 from palinreplay.replay.compare import compare_tool
@@ -47,7 +47,8 @@ def replay_range(
         previous = recorder.current_node
         tool_comparisons = []
         location = {"source_node_id": history.node.node_id, "source_index": history.node.index}
-        entry = {**location, "tools": tool_comparisons}
+        entry = {**location, "tools": tool_comparisons,
+                 "starting_divergent": report["validation_status"] == "difference"}
         report["steps"].append(entry)
         report["incomplete_step"] = True
 
@@ -71,17 +72,16 @@ def replay_range(
         mappings.append({**location, "node_id": node.node_id, "index": node.index})
         entry["node_id"] = node.node_id
         report["incomplete_step"] = False
-        if any(not c["equal"] for c in tool_comparisons):
-            if not continue_on_difference:
-                return stop("tool-result")
-            continue
+        if any(not c["equal"] for c in tool_comparisons) and not continue_on_difference:
+            return stop("tool-result")
         if compare_files is None:
             raise ValueError("Replay requires incremental file comparison")
         files = {**compare_files(index, previous, node), **location}
         entry["files"] = files
-        stats.files(files)
         if not files["equal"]:
             _difference(report, files, "file-state")
+        stats.files(files)
+        if not files["equal"] and not continue_on_difference:
             return stop("file-state")
     validation = "difference" if "first_difference" in report else "match"
     report.update(status=validation, execution_status="completed", validation_status=validation)

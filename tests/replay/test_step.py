@@ -2,7 +2,7 @@ import pytest
 
 from palinreplay.agents import AgentTask
 from palinreplay.core.interfaces import BoundaryAdapter, Payload
-from palinreplay.core.models import Node
+from palinreplay.core.models import Node, State
 from palinreplay.record.calls import read_call
 from palinreplay.record.recorder import Recorder
 from palinreplay.replay.context import ReplayContext
@@ -195,11 +195,12 @@ def test_execution_fault_preserves_first_observed_difference(tmp_path, monkeypat
         source.close()
 
 
+@pytest.mark.parametrize("file_difference", [False, True])
 @pytest.mark.parametrize("continue_on_difference", [False, True])
 @pytest.mark.parametrize("different_tools", [(0,), (1,), (0, 1, 2)])
 @pytest.mark.parametrize("kind", ["output", "exit-code"])
 def test_continue_tool_differences_retains_actual_results(
-    tmp_path, continue_on_difference, different_tools, kind,
+    tmp_path, continue_on_difference, different_tools, kind, file_difference,
 ):
     source, _, _, _, original = integrated(
         tmp_path, [response("read", "read"), response("read"), response("submit")]
@@ -221,9 +222,16 @@ def test_continue_tool_differences_retains_actual_results(
             with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
                           config=Payload.json({}),
                           boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                report = replay_range(rec, context, sandbox, materials,
-                                      compare_files=lambda *args: {"equal": True},
+                comparisons = []
+
+                def compare(index, previous, node):
+                    comparisons.append((index, previous.index, node.index))
+                    return {"equal": not (file_difference and index == 0),
+                            "different_paths": ["file"] if file_difference and index == 0 else []}
+
+                report = replay_range(rec, context, sandbox, materials, compare_files=compare,
                                       continue_on_difference=continue_on_difference)
+                assert comparisons == ([(0, 0, 1), (1, 1, 2)] if continue_on_difference else [])
                 assert report["execution_status"] == ("completed" if continue_on_difference else "stopped")
                 assert report["validation_status"] == report["status"] == "difference"
                 first = report["steps"][0]["tools"][different_tools[0]]
@@ -244,8 +252,67 @@ def test_continue_tool_differences_retains_actual_results(
                     actual_text = "actual" if kind == "output" else "ok\n"
                     assert messages[-2:][different_tools[0]]["extra"]["raw_output"] == actual_text
                     assert len(report["steps"]) == 2
+                    assert [s["starting_divergent"] for s in report["steps"]] == [False, True]
+                    assert report["steps"][0]["files"]["equal"] is (not file_difference)
                 assert store.check_integrity().ok
                 if rec.phase == "ready":
                     rec.finish("Replay difference")
+    finally:
+        source.close()
+
+
+@pytest.mark.parametrize("continue_on_difference", [False, True])
+def test_file_difference_continues_using_actual_workspace(tmp_path, continue_on_difference):
+    source, source_sandbox, _, _, original = integrated(
+        tmp_path, [response("write"), response("read-file"), response("read"), response("submit")]
+    )
+    try:
+        original.run(AgentTask("task", "Task"))
+        materials = load_replay_materials(source, pin_replay(source, "C0", "C3"))
+        context, sandbox = ReplayContext(materials), Sandbox()
+        reads, comparisons = [], []
+
+        def execute(req):
+            command = req["action"]["command"]
+            result = sandbox.exec(command)
+            if command == "write":
+                sandbox.files["file"] = "actual contents"
+            if command == "read-file":
+                reads.append(sandbox.files["file"])
+                return ExecResult(command, reads[-1].encode(), 0, 1)
+            return result
+
+        sandbox.execute = execute
+        with RecordStore.create(tmp_path / "replay") as store:
+            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
+                          config=Payload.json({}),
+                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
+                def compare(index, previous, node):
+                    comparisons.append(index)
+                    actual = store.read_json(store.get(State, node.state_id).manifest)
+                    assert actual["file"] == "actual contents"
+                    # Later unchanged endpoints have no new incremental candidates.
+                    return {"equal": index != 0, "different_paths": ["file"] if index == 0 else []}
+
+                report = replay_range(rec, context, sandbox, materials, compare_files=compare,
+                                      continue_on_difference=continue_on_difference)
+                assert report["execution_status"] == ("completed" if continue_on_difference else "stopped")
+                assert report["validation_status"] == report["status"] == "difference"
+                assert report["first_difference"] == report["steps"][0]["files"]
+                assert report["first_difference"]["difference_reason"] == "file-state"
+                assert source_sandbox.files["file"] == "changed"
+                assert len(store.list(Node)) == (4 if continue_on_difference else 2)
+                assert comparisons == ([0, 1, 2] if continue_on_difference else [0])
+                assert reads == (["actual contents"] if continue_on_difference else [])
+                if continue_on_difference:
+                    assert [s["starting_divergent"] for s in report["steps"]] == [False, True, True]
+                    assert not report["steps"][1]["tools"][0]["equal"]
+                    assert report["steps"][2]["tools"][0]["equal"]
+                    assert report["steps"][2]["files"]["equal"]
+                    saved = store.read_json(store.list(Node)[2].context)
+                    assert saved["messages"][-1]["extra"]["raw_output"] == "actual contents"
+                    assert "stop_reason" not in report
+                assert store.check_integrity().ok
+                rec.finish("Replay difference")
     finally:
         source.close()
