@@ -75,3 +75,27 @@ def start_service(executor, service: ServiceSpec, journal: PreparationJournal) -
     except BaseException as error:
         journal.fail(entry, error)
         raise
+
+
+def wait_ready(executor, started: StartedService, journal: PreparationJournal):
+    """Poll only the supplied readiness command within the startup deadline."""
+    service, entry = started.spec, started.entry
+    entry.update(status="checking", readiness=[])
+    journal.save()
+    try:
+        while time.monotonic() < started.deadline:
+            attempt = {}
+            entry["readiness"].append(attempt)
+            result = _command(executor, service, service.readiness_command, started.deadline,
+                              attempt, journal)
+            if result.exit_code == 0 and time.monotonic() <= started.deadline:
+                entry["status"] = "ready"
+                journal.save()
+                return entry
+            remaining = started.deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.1, remaining))
+        raise PreparationError(f"{service.name}: readiness deadline exceeded")
+    except BaseException as error:
+        journal.fail(entry, error)
+        raise
