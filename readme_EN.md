@@ -56,6 +56,8 @@ Restore a committed baseline and execute subsequent historical tools without cal
 
 The baseline becomes the new C0. `--to` is inclusive and defaults to the last committed node at startup; `--run` selects the source Run. `--output` selects a fresh directory, otherwise `outputs/replay/DATE_TASK/` contains `report.json` and an independent `record/`. The source trace remains unchanged.
 
+Terminal progress shows the current phase, source-to-replay node mapping, completed steps and elapsed time. Redirected output uses plain text; `--progress off` disables progress. The restored baseline does not count as an executed step, and completion does not imply a validation match.
+
 `--validation {strict,lenient}` defaults to `lenient`. Lenient mode retains confirmed tool exit-code, raw-output and file differences while continuing remaining calls and historical steps using the actual workspace and context. Every completed step still receives the existing incremental file comparison. Strict mode stops on the first difference, preserving the actual completed node or unfinished tool group. The report saves `validation_mode`, and the new recording configuration saves `replay.validation_mode`. The Python API also defaults to `run_replay(..., validation_mode="lenient")`.
 
 Execution is reported as `completed / stopped / failed`, separately from validation `match / difference / incomplete`. A fully matching run exits `0`; any difference exits `2`, including a completed final step or a completed continuation. Operational faults take precedence and exit `1`, preserving earlier differences. The first difference remains recorded, and later steps carry `starting_divergent`. A later local incremental match cannot establish that the whole filesystem has converged.

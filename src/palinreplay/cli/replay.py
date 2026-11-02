@@ -6,6 +6,7 @@ from pathlib import Path
 from palinreplay.cli.common import cancellation_signals
 from palinreplay.cli.outputs import default_output, record_name
 from palinreplay.cli.record import store_path
+from palinreplay.cli.replay_progress import ReplayProgressDisplay
 
 
 def add_commands(commands):
@@ -18,6 +19,8 @@ def add_commands(commands):
     replay.add_argument("--validation", dest="validation_mode", choices=("strict", "lenient"),
                         default="lenient",
                         help="stop on differences (strict) or retain them and continue (default: lenient)")
+    replay.add_argument("--progress", choices=("auto", "plain", "off"), default="auto",
+                        help="auto: live progress on a terminal, plain logs when redirected; off: no progress")
 
 
 def execute(args):
@@ -26,9 +29,9 @@ def execute(args):
     try:
         source = store_path(args.source)
         output = args.output or default_output("replay", record_name(source))
-        with cancellation_signals():
+        with cancellation_signals(), ReplayProgressDisplay(args.progress) as progress:
             report = run_replay(source, args.start, args.end, run_id=args.run_id, output=output,
-                                validation_mode=args.validation_mode)
+                                validation_mode=args.validation_mode, progress=progress)
         execution, validation = report["execution_status"], report["validation_status"]
         print(f"Replay {execution.upper()} -> {output}")
         print(f"  Validation mode: {report['validation_mode']}")

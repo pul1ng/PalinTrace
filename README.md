@@ -54,6 +54,8 @@ bash scripts/quickstart_record.sh
 .venv/bin/palin replay "$PALIN_RUN" --from C20 --to C23
 ```
 
+终端默认显示当前阶段、节点对应关系、完成步数与耗时；重定向到日志时显示普通文本。可用 `--progress off` 关闭进度显示。
+
 源 C20 成为新 C0，源 C21–C23 成为新 C1–C3。省略 `--to` 时固定启动时的末尾节点；`--run` 选择来源 Run，`--output` 指定新目录，默认写入 `outputs/replay/时间戳_任务ID/` 的 `report.json` 和独立 `record/`。工具原始输出、退出码及增量文件状态按固定规则比较，文件 mtime 严格按 `rootfs-files-v1` 的秒值比较。
 
 默认使用 `--validation lenient`：保存确定的工具退出码、原始输出及文件状态差异，继续当前工具组和后续历史步骤。可显式选择 lenient，或使用 strict 在首次差异后停止并保留真实节点或未完成的工具组：

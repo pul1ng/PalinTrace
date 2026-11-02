@@ -164,7 +164,8 @@ def test_session_mode_reaches_report_recording_and_loop(tmp_path, replay_session
     state.different_call = 1
     options = {} if validation_mode is None else {"validation_mode": validation_mode}
     output = tmp_path / "output"
-    report = run_replay(state.source, "C0", "C3", output=output, **options)
+    events = []
+    report = run_replay(state.source, "C0", "C3", output=output, progress=events.append, **options)
     strict = validation_mode == "strict"
     assert report["validation_mode"] == (validation_mode or "lenient")
     assert "continue_on_difference" not in report
@@ -179,6 +180,42 @@ def test_session_mode_reaches_report_recording_and_loop(tmp_path, replay_session
     assert report["cleanup_confirmed"] and state.closed == ["restore", "client"]
     assert state.recorder.phase == "closed"
     assert json.loads((output / "report.json").read_text()) == report
+    assert [event.total_steps for event in events if event.total_steps is not None] == [3, 3]
+    committed = [event.step for event in events if event.phase == "committed"]
+    assert committed == ([0] if strict else [0, 1, 2, 3])
+    assert events[0].phase == "preparing" and events[-2].phase == "cleanup"
+    assert events[-1].status == report["execution_status"]
+    assert events[-1].label == f"{report['execution_status'].upper()} / DIFFERENCE"
+
+
+@pytest.mark.parametrize("start,end,expected", [("C1", "C3", [(1, 0), (2, 1), (3, 2)]),
+                                              ("C2", "C2", [(2, 0)])])
+def test_progress_counts_exclude_restored_baseline(tmp_path, replay_session, start, end, expected):
+    events = []
+    report = run_replay(replay_session.source, start, end, output=tmp_path / "output",
+                        progress=events.append)
+    assert report["execution_status"] == "completed" and report["validation_status"] == "match"
+    assert [(event.source_step, event.step) for event in events if event.phase == "committed"] == expected
+    assert all(event.total_steps == len(expected) - 1
+               for event in events if event.total_steps is not None)
+    assert [event.phase for event in events if event.step == 1] == (
+        ["replaying", "verifying", "committed"] if len(expected) > 1 else []
+    )
+    if len(expected) == 1:
+        assert not any(event.phase == "replaying" for event in events)
+
+
+def test_progress_observer_error_does_not_change_execution(tmp_path, replay_session):
+    observed = []
+
+    def broken(event):
+        observed.append(event)
+        raise OSError("terminal disconnected")
+
+    report = run_replay(replay_session.source, "C0", "C3", output=tmp_path / "output", progress=broken)
+    assert len(observed) == 1
+    assert report["execution_status"] == "completed" and report["validation_status"] == "match"
+    assert len(replay_session.sandbox.calls) == 4 and report["cleanup_confirmed"]
 
 
 def test_invalid_validation_mode_is_rejected_before_creating_output(tmp_path, monkeypatch):
@@ -225,7 +262,9 @@ def test_validation_modes_stop_faults_and_preserve_boundaries(
     state.fault = fault
     state.different_call = 1 if prior_difference else None
     output = tmp_path / "output"
-    report = run_replay(state.source, "C0", "C3", output=output, validation_mode=validation_mode)
+    events = []
+    report = run_replay(state.source, "C0", "C3", output=output, validation_mode=validation_mode,
+                        progress=events.append)
     observed_difference = prior_difference and expected_calls > 0
     assert report["status"] == report["execution_status"] == "failed"
     assert report["validation_status"] == ("difference" if observed_difference else "incomplete")
@@ -247,6 +286,9 @@ def test_validation_modes_stop_faults_and_preserve_boundaries(
     if fault == "snapshot-capture":
         assert report["incomplete_step"] and "node_id" not in report["steps"][1]
     assert json.loads((output / "report.json").read_text()) == report
+    assert events[-1].status == "failed"
+    assert events[-2].phase == "cleanup"
+    assert max((event.step for event in events if event.phase == "committed"), default=0) < 3
 
 
 def test_comparison_fault_keeps_prior_file_difference(tmp_path, replay_session):

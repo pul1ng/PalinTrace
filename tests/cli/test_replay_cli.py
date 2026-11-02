@@ -30,6 +30,7 @@ def test_minimal_cli_paths_and_status(tmp_path, monkeypatch, capsys, status, cod
     assert seen[0][0] == (tmp_path / "record", "C20", None)
     assert seen[0][1]["output"] == default_output("replay", "task")
     assert seen[0][1]["validation_mode"] == "lenient"
+    assert callable(seen[0][1]["progress"])
     output = capsys.readouterr().out
     assert "Validation mode: lenient" in output
     assert f"Validation: {'INCOMPLETE' if status == 'failed' else status.upper()}" in output
@@ -110,3 +111,28 @@ def test_replay_cancellation_keeps_exit_code_130(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(session, "run_replay", cancel)
     assert main(["replay", str(tmp_path), "--from", "C2", "--output", "custom"]) == 130
     assert "Replay cancelled" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", [None, "plain", "off"])
+def test_cli_progress_stream_does_not_change_report_output(tmp_path, monkeypatch, capsys, mode):
+    import palinreplay.cli.replay as cli
+    import palinreplay.replay.session as session
+    from palinreplay.core.progress import ProgressEvent
+
+    def replay(*args, **kwargs):
+        progress = kwargs["progress"]
+        progress(ProgressEvent("preparing", total_steps=1))
+        progress(ProgressEvent("committed", source_step=21, step=1))
+        progress(ProgressEvent("finished", status="completed", label="COMPLETED / DIFFERENCE"))
+        return {"validation_mode": "lenient", "execution_status": "completed",
+                "validation_status": "difference"}
+
+    monkeypatch.setattr(cli, "store_path", lambda path: path)
+    monkeypatch.setattr(session, "run_replay", replay)
+    options = [] if mode is None else ["--progress", mode]
+    assert main(["replay", str(tmp_path), "--from", "C20", "--output", "custom", *options]) == 2
+    output = capsys.readouterr()
+    assert "Replay COMPLETED -> custom" in output.out and "Validation: DIFFERENCE" in output.out
+    assert "[replay" not in output.out
+    assert ("1/1" in output.err) is (mode != "off")
+    assert "\x1b" not in output.err

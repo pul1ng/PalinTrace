@@ -1,6 +1,7 @@
 """Execute a pinned history, retaining comparisons and optionally continuing differences."""
 
 from palinreplay.core.models import State
+from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressReporter
 from palinreplay.replay.compare import compare_tool
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.replay.step import execute_step
@@ -26,8 +27,10 @@ def _difference(report, comparison, reason):
 def replay_range(
     recorder, context, executor, materials, compare_files=None, *, report=None, stats=None,
     validation_mode="lenient",
+    progress: ProgressCallback | None = None,
 ):
     stats = stats or ReplayStats()
+    notify = ProgressReporter(progress)
     plan = materials.plan
     mappings = [{"source_node_id": plan.start.node_id, "source_index": plan.start.index,
                  "node_id": recorder.current_node.node_id, "index": 0}]
@@ -36,6 +39,8 @@ def replay_range(
     report.update(status="failed", execution_status="failed", validation_status="incomplete",
                   validation_mode=validation_mode, incomplete_step=False,
                   mappings=mappings, steps=[], statistics=stats.data)
+    notify(ProgressEvent("committed", step=0, source_step=plan.start.index,
+                         total_steps=len(materials.steps)))
 
     def stop(reason):
         completed = len(mappings) == len(materials.steps) + 1
@@ -52,6 +57,7 @@ def replay_range(
                  "starting_divergent": report["validation_status"] == "difference"}
         report["steps"].append(entry)
         report["incomplete_step"] = True
+        notify(ProgressEvent("replaying", source_step=history.node.index, step=index + 1))
 
         def on_result(i, tool, call, result, last):
             compared = {**compare_tool(tool, result), **location,
@@ -74,14 +80,17 @@ def replay_range(
         entry["node_id"] = node.node_id
         report["incomplete_step"] = False
         if any(not c["equal"] for c in tool_comparisons) and validation_mode == "strict":
+            notify(ProgressEvent("committed", source_step=history.node.index, step=node.index))
             return stop("tool-result")
         if compare_files is None:
             raise ValueError("Replay requires incremental file comparison")
+        notify(ProgressEvent("verifying", source_step=history.node.index, step=node.index))
         files = {**compare_files(index, previous, node), **location}
         entry["files"] = files
         if not files["equal"]:
             _difference(report, files, "file-state")
         stats.files(files)
+        notify(ProgressEvent("committed", source_step=history.node.index, step=node.index))
         if not files["equal"] and validation_mode == "strict":
             return stop("file-state")
     validation = "difference" if "first_difference" in report else "match"
