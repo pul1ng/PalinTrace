@@ -108,16 +108,15 @@ def main(preload, output):
         source.mkdir()
         original = record_source(preload, source, client)
         hashes = store_hashes(source / "record")
-        report = run_replay(source / "record", "C1", "C3", output=output / "match", client=client,
-                            validation_mode="strict")
+        report = run_replay(source / "record", "C1", "C3", output=output / "completed", client=client)
         write_json(output / "summary.json", {"source_container_removed": absent(client, original),
                                              "replay": report})
-        assert report["status"] == "match", report
-        assert [m["index"] for m in report["mappings"]] == [0, 1, 2]
+        assert report["execution_status"] == "completed", report
+        assert [m["index"] for m in report["mappings"]] == [2, 3]
         assert report["statistics"]["actual_model_calls"] == 0
         assert report["cleanup_confirmed"]
         comparisons = []
-        with RecordStore.open(output / "match" / "record") as store:
+        with RecordStore.open(output / "completed" / "record") as store:
             for node in store.list(Node):
                 materials = load_restore_materials(store, node.node_id)
                 assert absent(client, materials.runtime.source_container_id)
@@ -127,22 +126,8 @@ def main(preload, output):
                         workspace=restored.workspace.name, scope=SCOPE,
                         oracle_sha256=materials.runtime.c0_oracle_sha256)
                     comparisons.append(compared)
-        full_pairs = []
-        with RecordStore.open(source / "record") as origin:
-            with RecordStore.open(output / "match" / "record") as current:
-                for mapping in report["mappings"][1:]:
-                    expected = load_restore_materials(origin, mapping["source_node_id"])
-                    actual = load_restore_materials(current, mapping["node_id"])
-                    with BtrfsPool(client, actual.snapshot.location) as pool:
-                        result = pool.command("verify", source=expected.snapshot.name,
-                            workspace=actual.snapshot.name, scope=SCOPE,
-                            oracle_sha256=expected.runtime.c0_oracle_sha256)
-                        assert result["equal"]
-                        full_pairs.append(result)
-
-        # Inject only into this new execution's workspace; source facts and saved
-        # commands remain immutable. A matching tool return with a changed file
-        # must still stop after preserving the completed real node.
+        # Inject only into this new execution's workspace. Equal exit codes must
+        # still complete the selected range and preserve the actual file change.
         execute = RestoredExecutor.execute
         injected = []
         def inject(executor, request):
@@ -154,16 +139,23 @@ def main(preload, output):
             return result
 
         with patch.object(RestoredExecutor, "execute", inject):
-            difference = run_replay(source / "record", "C1", "C3", output=output / "difference", client=client,
-                                    validation_mode="strict")
-        assert difference["status"] == "difference" and difference["stop_reason"] == "file-state"
-        assert len(difference["steps"]) == 1 and len(difference["mappings"]) == 2
+            difference = run_replay(source / "record", "C1", "C3", output=output / "changed-files", client=client)
+        assert difference["execution_status"] == "completed" and "exit_mismatch" not in difference
+        assert len(difference["steps"]) == len(difference["mappings"]) == 2
         assert difference["cleanup_confirmed"]
-        assert any(path.endswith('/injected') for path in difference["first_difference"]["different_paths"])
+        with RecordStore.open(output / "changed-files" / "record") as current:
+            first = load_restore_materials(current, "C2")
+            with BtrfsPool(client, first.snapshot.location) as pool:
+                result = pool.container.exec_run([
+                    "python3", "-I", "-c", "from pathlib import Path; import sys; "
+                    "assert Path(sys.argv[1]).read_text() == 'different'",
+                    "/pool/" + first.snapshot.name + MARKER + "/injected",
+                ])
+                assert result.exit_code == 0, result.output
         assert store_hashes(source / "record") == hashes
         summary = {"status": "passed", "source_container_removed": True,
                    "source_unchanged": True, "new_trajectory_restores": comparisons,
-                   "full_pair_comparisons": full_pairs, "difference": difference,
+                   "consistency_verification": "not-performed", "changed_files_execution": difference,
                    "replay": report, "duration_sec": time.monotonic() - started}
         write_json(output / "summary.json", summary, replace=True)
         print(json.dumps({"status": "passed", "output": str(output),

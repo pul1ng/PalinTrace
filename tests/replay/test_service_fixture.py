@@ -22,9 +22,9 @@ def evidence(fixture_module):
     actual = {"exit_code": 1, "output": json.dumps({"error": "ConnectionRefusedError", "errno": 111}),
               "definitive": True}
     report = {
-        "status": "difference", "stop_reason": "tool-result", "incomplete_step": False,
-        "steps": [{"source_index": 3, "tools": [{"definitive": True}]}],
-        "mappings": [{"source_index": 2, "index": 0}, {"source_index": 3, "index": 1}],
+        "execution_status": "stopped", "stop_reason": "exit-code", "incomplete_step": False,
+        "steps": [{"source_index": 3, "tools": [{"actual_exit_code": 1}]}],
+        "mappings": [{"source_index": 3, "index": 3}],
         "statistics": {"actual_tool_executions": 1, "historical_answer_supplies": 1,
                        "actual_model_calls": 0, "actual_model_cost": 0},
         "cleanup_confirmed": True, "cleanup_errors": [],
@@ -69,7 +69,7 @@ def test_unexpected_success_does_not_pass(fixture_module, evidence):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("status", "failed"), ("status", "match"), ("stop_reason", "file-state"),
+    ("execution_status", "failed"), ("execution_status", "completed"), ("stop_reason", "file-state"),
     ("incomplete_step", True), ("cleanup_confirmed", False),
     ("cleanup_errors", ["pool cleanup failed"]),
 ])
@@ -78,7 +78,7 @@ def test_replay_failures_and_incomplete_groups_do_not_pass(fixture_module, evide
     assert fixture_module.classify_result(**evidence)["status"] == "failed"
 
 
-@pytest.mark.parametrize("field", ["status", "files", "root_attributes", "context_checks"])
+@pytest.mark.parametrize("field", ["status", "files", "context_checks"])
 def test_r1_failures_cannot_be_reported_as_expected_divergence(fixture_module, evidence, field):
     evidence["r1"][field] = {
         "status": "failed", "files": {"equal": False}, "root_attributes": {"equal": False},

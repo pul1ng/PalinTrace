@@ -7,7 +7,7 @@
 PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文和任务环境状态关联保存。项目目标是让使用者能够定位到轨迹中的任意已保存节点，恢复该节点对应的环境，并从该位置回放历史执行过程，使回放内容与环境状态始终对应同一个历史位置。
 
 - **Record · 轨迹录制（已实现 MVP）**：记录 Agent 的模型交互、工具调用与结果，关联当时的上下文、任务文件和运行配置，为历史查看、环境恢复与后续回放提供依据。
-- **Replay · 历史重执行（已实现 MVP）**：从已提交节点恢复环境，按固定历史真实执行后续工具，不调用模型；保存原始返回与文件状态差异，关键结果不一致时停止，默认宽松模式仅放行普通文件 mtime 差异。
+- **Replay · 历史重执行（已实现 MVP）**：从已提交的来源节点恢复环境，按固定历史真实执行后续工具，不调用模型、不需要模型凭据；保存真实结果与快照，确定的退出码不符或框架故障会停止执行。完整一致性校验另列为后续 Verify 工作。
 - **Resume · 分叉续跑（计划中）**：从任意已保存节点恢复 Agent 上下文与任务环境，可补充新的指令并继续运行，生成独立的新轨迹，保留原始历史。
 
 ## 演示视频
@@ -52,26 +52,23 @@ bash scripts/quickstart_record.sh
 
 ### 3. Replay
 
-从已提交节点恢复，并沿固定历史真实执行后续工具，不调用模型：
+从已提交的来源节点恢复，通过 R1 文件、上下文与配置检查后，沿固定历史真实执行后续工具，不调用模型，也不需要模型配置或 API Key：
 
 ```bash
-.venv/bin/palin replay "$PALIN_RUN" --from C20 --to C23
+.venv/bin/palin replay "$PALIN_RUN" --from C20 --to C40
 ```
 
-终端默认显示当前阶段、节点对应关系、完成步数与耗时；重定向到日志时显示普通文本。可用 `--progress off` 关闭进度显示。
+源 C20 保留为外部来源引用，本次不创建 C20、C0、初始 State 或起点 checkpoint；只保存实际完成的 C21–C40，节点 ID 独立、序号沿用来源。`--to` 包含终点，省略时固定启动时最后一个已提交节点；`--run` 选择来源 Run。`--output` 必须是与来源目录分离、尚不存在的新目录，默认写入 `outputs/replay/YYMMDD_HHMMSS_任务名/`，保存 `report.json` 和本次 `record/`。来源轨迹保持不变。
 
-源 C20 成为新 C0，源 C21–C23 成为新 C1–C3。省略 `--to` 时固定启动时的末尾节点；`--run` 选择来源 Run，`--output` 指定新目录，默认写入 `outputs/replay/时间戳_任务ID/` 的 `report.json` 和独立 `record/`。工具原始输出、退出码及增量文件状态按固定规则比较，文件 mtime 严格按 `rootfs-files-v1` 的秒值比较。
+终端显示阶段、来源引用、实际节点、完成步数与耗时：源 C20（引用）为 `0/20`，完成本次 C21 后为 `1/20`，完成 C40 后为 `20/20`。重定向时使用普通文本，`--progress plain` 固定使用文本，`--progress off` 关闭进度显示；恢复、R1 检查、准备、工具执行及实际快照提交的计时仍始终保存。
 
-默认使用 `--validation lenient`：保存真实工具结果和差异，退出码或原始输出与录制不一致时停止后续调用。仅确认普通文件除 `mtime_sec` 外完全相同、硬链接关系不变时允许继续；文件内容、增删、权限等其他差异仍停止。退出码按录制值比较，相同的非零退出码可通过。strict 在首次历史步骤差异后停止，包括 mtime 差异，并保留真实节点或未完成的工具组：
+历史执行期间仅检查工具两边确定的整数退出码是否相同，相同的非零退出码也继续；原始输出和文件状态不做运行时比较。退出码不符时停止后续调用，保存已执行结果：组内非末尾工具不符时留下未完成尾部，末个工具不符时可保存完整实际节点，但即使是范围最后一步也仍报告 `stopped`。无法确定退出码、材料损坏、恢复、准备、执行、快照、录制或清理故障属于失败。
 
-```bash
-.venv/bin/palin replay "$PALIN_RUN" --from C2 --to C4 --validation lenient
-.venv/bin/palin replay "$PALIN_RUN" --from C2 --to C4 --validation strict
-```
+需要恢复服务时，用 `--services-config services.json` 明确指定。Replay 只准备配置中的服务，启动、首次就绪检查与最终就绪复核全部通过后才执行历史。准备不产生独立文件状态或 checkpoint，`preparation_state_captured` 为 `false`；首个实际快照包含准备与首步的文件净效果，不能单独恢复准备结束时的文件状态。
 
-终端和报告分别给出执行状态 `completed / stopped / failed` 与校验结果 `match / difference / incomplete`。全部匹配返回 `0`；存在差异返回 `2`，包括执行完成但存在差异；执行、材料、恢复或清理故障返回 `1`，故障前的差异仍保留。最后一步完成但有差异也报告 `completed + difference`。首次差异不会被后续局部匹配清除，后续步骤以 `starting_divergent` 标记开始时已存在差异。增量比较在后续步骤没有发现新差异，不表示整个文件系统已恢复一致。
+报告的 `execution_status` 为 `completed / stopped / failed / cancelled`，对应退出码 `0 / 2 / 1 / 130`；框架故障返回 `1`，同时保留已有停止证据。`completed` 仅表示所选范围执行完成，CLI 明确显示“完整一致性校验未执行”。完整一致性校验是后续独立 Verify 工作，当前没有已实现的 Verify 命令。`--validation` 和 Python API 的 `validation_mode` 已移除，也没有继续执行开关。
 
-lenient 放行 mtime 差异时继续使用本次真实工作区与上下文，总体校验仍为 `difference`。工具匹配的完整步骤执行现有增量文件比较；工具组中途不一致时保存已执行调用，末个工具不一致时保存实际完整节点，然后停止后续执行。两种模式使用相同的原始比较规则，包括 `rootfs-files-v1` 的文件 mtime 秒值和 `.pyc` 比较；不修改历史命令、不自动重试、不修复文件。材料、恢复、快照读取、校验及不确定工具结果等故障仍停止。来源轨迹保持不变，`report.json` 保存 `validation_mode`，本次录制配置保存 `replay.validation_mode`。Python API `run_replay(..., validation_mode="lenient")` 同样默认使用 lenient。完整参数和状态说明见[命令参考](docs/命令参考.md#replay)。
+本次配置使用 `palinreplay.replay.v2`，报告使用 `palinreplay.replay-report.v2`，声明 `source-reference-v1`、`source-index-v1` 和 `historical-exit-code-v1`。`record inspect` 单列源 C20 引用；它不是本次 `--node C20` 可选的节点。本次完整性检查和导出仍依赖来源 Record Store、材料及保留的文件快照，仅复制 Replay 输出不能得到自包含记录，也不支持此类运行的便携 bundle。不修改历史命令、不自动重试历史工具、不修复文件、不用来源快照覆盖实际结果。完整参数和状态说明见[命令参考](docs/命令参考.md#replay)。
 
 ### 4. Resume（待实现）
 
@@ -174,7 +171,7 @@ PALIN_RUN="outputs/record/${PALIN_STAMP}_astropy__astropy-12907"
 .venv/bin/palin record export "$PALIN_RUN"
 ```
 
-导出不包含 Btrfs 存储池。请保留录制目录、基座及其关联的存储池，供恢复校验和后续 Replay、Resume 使用。完整参数见[命令参考](docs/命令参考.md)。
+导出不包含 Btrfs 存储池。请保留录制目录、基座及其关联的存储池，供恢复校验和后续 Replay、Resume 使用。若导出的是 Replay 结果，还须保留它引用的原始来源 Store、材料及快照；导出会声明外部依赖，不会将它们打包进来。完整参数见[命令参考](docs/命令参考.md)。
 
 ### 7. record visualize：生成可视化
 
@@ -201,7 +198,8 @@ outputs/             按类型和时间戳分类的本地产物（Git 忽略）
 
 ## TODO
 
-- [x] Replay MVP：从已提交节点恢复，沿固定历史真实执行工具且不调用模型；保存真实结果并在关键差异后停止，lenient 仅放行普通文件 mtime 差异，strict 在全部历史差异后停止。
+- [x] Replay MVP：从已提交的来源节点恢复，通过 R1 与显式服务准备后沿固定历史真实执行工具，不调用模型；引用源起点，只保存实际完成步骤，按确定的历史退出码控制继续或停止并保留真实证据。
+- [ ] Verify：独立检查 Replay 实际结果与固定来源的一致性；当前尚无已实现的 Verify 命令。
 - [ ] Resume：恢复 Agent 上下文与可运行环境，从历史节点产生独立分支，保留原轨迹。
 - [ ] 增量整理：合并、拆分存储增量并保留历史节点。
 - [ ] 便携备份与跨机器迁移。
