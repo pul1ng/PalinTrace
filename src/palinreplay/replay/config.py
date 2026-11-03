@@ -18,6 +18,7 @@ def replay_config(materials, *, r1=None, preparation=None):
         "initial_state_mode": "source-reference-v1",
         "node_numbering": "source-index-v1",
         "execution_policy": "historical-exit-code-v1",
+        "finalization_protocol": "store-receipt-v1",
         "source_start_index": plan.start.index,
         "source_end_index": plan.end.index,
         "source": plan.provenance(),

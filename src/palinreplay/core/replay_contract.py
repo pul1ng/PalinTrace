@@ -18,6 +18,7 @@ class SourceReference:
     run: Run
     nodes: tuple[Node, ...]
     states: tuple[State, ...]
+    finalization_protocol: str | None = None
 
     @property
     def start(self):
@@ -77,6 +78,9 @@ def source_reference(config) -> SourceReference | None:
                 raise ValueError("source prefix requires a supported JSON media type")
             if json_bytes(json.loads(decode(data, ref.media_type))) != json_bytes(start[key]):
                 raise ValueError("source prefix differs from its decoded material")
-        return SourceReference(source["source_store"], run, nodes, states)
+        protocol = replay.get("finalization_protocol")
+        if protocol not in (None, "store-receipt-v1"):
+            raise ValueError("unsupported Replay finalization protocol")
+        return SourceReference(source["source_store"], run, nodes, states, protocol)
     except (KeyError, TypeError, ValueError) as error:
         raise IntegrityError(f"invalid Replay source reference: {error}") from error

@@ -123,7 +123,9 @@ def _summary(view):
                   f"{replay['completed_steps']}/{replay['selected_steps']}")
             usage = replay["history_usage"]
             print(f"  Historical answer supplies: {usage['historical_answer_supplies']}; "
-                  f"actual tool executions: {usage['actual_tool_executions']}")
+                  f"dispatched tool calls: {usage['dispatched_tool_calls']}; "
+                  f"unknown results: {len(usage['unknown_result_execution_ids'])}")
+            print(f"  Replay finalization: {replay['finalization']['status']}")
         if run.get("source_start"):
             source = run["source_start"]
             print(f"  Source C{source['index']} (reference)  node={source['node_id']}"

@@ -93,6 +93,8 @@ class RecordStore:
         self._artifacts = ArtifactStore(root / "artifacts")
         self.read_only = read_only
         self._closed = False
+        self._source_cache = None
+        self._receipt_cache = None
 
     @classmethod
     def create(cls, path: str | Path) -> RecordStore:
@@ -174,6 +176,9 @@ class RecordStore:
     @contextmanager
     def _transaction(self):
         self._ensure_open(writing=True)
+        if self._source_cache is not None:
+            self._source_cache.clear()
+            self._receipt_cache.clear()
         with span("catalog.begin"):
             self._db.execute("BEGIN IMMEDIATE")
         try:
@@ -190,13 +195,20 @@ class RecordStore:
     def _snapshot(self):
         self._ensure_open()
         nested = self._db.in_transaction
-        if not nested:
-            self._db.execute("BEGIN")
+        owner = self._source_cache is None
+        if owner:
+            self._source_cache, self._receipt_cache = {}, {}
         try:
-            yield
-        finally:
             if not nested:
-                self._db.execute("ROLLBACK")
+                self._db.execute("BEGIN")
+            try:
+                yield
+            finally:
+                if not nested:
+                    self._db.execute("ROLLBACK")
+        finally:
+            if owner:
+                self._source_cache = self._receipt_cache = None
 
     @contextmanager
     def snapshot(self):
@@ -433,15 +445,68 @@ class RecordStore:
         """Read the protected declaration, without treating external IDs as local relations."""
         from palinreplay.storage.codec import JSON_TYPES, decode
 
-        run = self.get(Run, run_id)
-        if run.config.media_type not in JSON_TYPES:
-            return None
-        data = decode(self.read_bytes(run.config), run.config.media_type)
-        try:
-            config = json.loads(data)
-        except (ValueError, UnicodeError):
-            return None  # Ordinary Record configurations may be opaque payloads.
-        return source_reference(config)
+        with self._snapshot():
+            run = self.get(Run, run_id)
+            key = (run_id, run.config.sha256, run.config.size, run.config.media_type)
+            if key not in self._source_cache:
+                source = None
+                if run.config.media_type in JSON_TYPES:
+                    data = decode(self.read_bytes(run.config), run.config.media_type)
+                    try:
+                        config = json.loads(data)
+                    except (ValueError, UnicodeError):
+                        pass  # Ordinary Record configurations may be opaque payloads.
+                    else:
+                        source = source_reference(config)
+                self._source_cache[key] = source
+            return self._source_cache[key]
+
+    def replay_finalization(self, run_id: str):
+        """Freeze sidecar presence/bytes alongside one catalog read operation."""
+        from palinreplay.storage.replay_finalization import read_receipt
+
+        with self._snapshot():
+            source = self.replay_source(run_id)
+            if source is None:
+                return None
+            if source.finalization_protocol is None:
+                return {"protocol": None, "status": "legacy", "receipt": None}
+            if run_id not in self._receipt_cache:
+                attempts = self.list(Attempt, run_id=run_id)
+                receipt = None
+                if attempts:
+                    attempt = attempts[-1]
+                    ends = [e for e in self.list(RunEnd, run_id=run_id)
+                            if e.attempt_id == attempt.attempt_id]
+                    failures = [f for f in self.list(Failure, run_id=run_id)
+                                if f.attempt_id == attempt.attempt_id]
+                    receipt = read_receipt(self.root, self.get(Run, run_id), attempt,
+                                           ends[-1] if ends else None, failures)
+                    if receipt is not None:
+                        from palinreplay.core.replay_outcome import (
+                            execution_status,
+                            failure_evidence,
+                        )
+
+                        status = ends[-1].status if ends else "unfinalized"
+                        if ends:
+                            saved = self.read_json(ends[-1].details).get("replay", {})
+                            status = saved.get("execution_status", status)
+                        for failure in failures:
+                            status = execution_status(status, **failure_evidence(
+                                failure.category, self.read_json(failure.details)))
+                        if ((status == "failed" and receipt["execution_status"] != "failed")
+                                or (status == "stopped" and receipt["execution_status"] == "completed")
+                                or (status == "cancelled" and receipt["execution_status"] not in ("cancelled", "failed"))
+                                or (receipt["execution_status"] == "completed"
+                                    and len(self.list(Node, run_id=run_id)) != source.end.index - source.start.index)):
+                            raise IntegrityError("Replay receipt suppresses persisted execution evidence")
+                self._receipt_cache[run_id] = {
+                    "protocol": source.finalization_protocol,
+                    "status": "confirmed" if receipt is not None else "unconfirmed",
+                    "receipt": receipt,
+                }
+            return self._receipt_cache[run_id]
 
     def _relations(self, record: Fact) -> None:
         """Validate durable relations, also usable when inspecting old history."""
@@ -960,6 +1025,8 @@ class RecordStore:
                         self._node_records(record, seen)
                     elif isinstance(record, Execution):
                         self._execution_events(record)
+                    elif isinstance(record, Run):
+                        self.replay_finalization(record.run_id)
                     elif isinstance(record, State):
                         self._verify_refs(self._state_records(record, require_complete=False), seen)
                 except (StoreError, OSError, sqlite3.DatabaseError) as exc:

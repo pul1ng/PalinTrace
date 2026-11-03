@@ -807,7 +807,7 @@ def test_selected_history_is_not_counted_as_supplied_history(
     usage = replay["history_usage"]
     assert usage["historical_answer_supplies"] == 1
     assert [s["index"] for s in usage["supplies"]] == [1]
-    assert usage["actual_tool_executions"] == different_call
+    assert usage["dispatched_tool_calls"] == different_call
     assert report["history_usage"] == usage
     assert run["source_dependency"]["checked"]
     assert run["source_dependency"] == view["external_dependencies"][0]
