@@ -517,10 +517,16 @@ class RecordStore:
                 if node.attempt_id != attempt.attempt_id:
                     raise IntegrityError("end node belongs to another attempt")
             if record.status in ("completed", "paused"):
-                committed = {n.step_id for n in self.list(Node, run_id=record.run_id)}
-                if record.last_node_id is None or any(
-                    s.attempt_id == attempt.attempt_id and s.step_id not in committed
-                    for s in self.list(Step, run_id=record.run_id)
+                nodes = self.list(Node, run_id=record.run_id)
+                steps = self.list(Step, run_id=record.run_id)
+                committed = {n.step_id for n in nodes}
+                zero_step = False
+                if record.last_node_id is None:
+                    source = self.replay_source(record.run_id)
+                    zero_step = (source is not None and source.start == source.end
+                                 and not nodes and not steps)
+                if (record.last_node_id is None and not zero_step) or any(
+                    s.attempt_id == attempt.attempt_id and s.step_id not in committed for s in steps
                 ):
                     raise IncompleteRecordError("clean termination requires a complete boundary")
         elif isinstance(record, StateCapture):

@@ -5,7 +5,7 @@ import pytest
 
 from palinreplay.core.errors import IncompleteRecordError, IntegrityError
 from palinreplay.core.interfaces import BoundaryAdapter, Payload
-from palinreplay.core.models import Attempt, Node, Run, State, StateCapture, Step
+from palinreplay.core.models import Attempt, Node, Run, RunEnd, State, StateCapture, Step
 from palinreplay.record.recorder import Recorder
 from palinreplay.replay.config import replay_config
 from palinreplay.replay.plan import pin_replay
@@ -44,6 +44,42 @@ def test_source_initialization_creates_only_run_attempt_and_config(tmp_path):
         assert backend.captures == []
         assert store.replay_source(rec.run.run_id).start.index == 20
         assert rec.run.source_node_id is None
+        rec.cancel()
+        rec.close()
+        assert store.check_integrity().ok
+
+
+@pytest.mark.parametrize("ending", ["finish", "pause"])
+def test_empty_selected_range_ends_without_local_boundary(tmp_path, ending):
+    config = configuration(tmp_path, end=20)
+    backend = fake.FakeStateBackend()
+    with RecordStore.create(tmp_path / "actual") as store:
+        rec = recorder(store, config, backend=backend)
+        rec.start_from_source()
+        end = getattr(rec, ending)()
+        rec.close()
+        assert end.last_node_id is None
+        assert end.status == ("completed" if ending == "finish" else "paused")
+        assert not backend.captures
+        assert store.list(Node) == store.list(State) == store.list(StateCapture) == store.list(Step) == ()
+        assert store.check_integrity().ok
+
+
+@pytest.mark.parametrize("case", ["ordinary", "nonempty-range", "unfinished-step"])
+def test_missing_boundary_cannot_masquerade_as_empty_completion(tmp_path, case):
+    config = {} if case == "ordinary" else configuration(
+        tmp_path, end=20 if case == "unfinished-step" else 22,
+    )
+    with RecordStore.create(tmp_path / "actual") as store:
+        rec = recorder(store, config)
+        if case != "ordinary":
+            rec.start_from_source()
+        if case == "unfinished-step":
+            rec.begin_step()
+        with pytest.raises(IncompleteRecordError, match="complete boundary"):
+            store.save(RunEnd(run_id=rec.run.run_id, attempt_id=rec.attempt.attempt_id,
+                              status="completed", last_node_id=None,
+                              details=store.put_json({})))
         rec.cancel()
         rec.close()
         assert store.check_integrity().ok

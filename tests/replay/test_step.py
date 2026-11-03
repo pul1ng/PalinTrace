@@ -4,7 +4,7 @@ import pytest
 
 from palinreplay.agents import AgentTask
 from palinreplay.core.interfaces import BoundaryAdapter, Payload
-from palinreplay.core.models import Node, State
+from palinreplay.core.models import Node, RunEnd, State
 from palinreplay.record.calls import read_call
 from palinreplay.record.recorder import Recorder
 from palinreplay.replay.config import replay_config
@@ -36,10 +36,7 @@ def recording(store, materials, context, sandbox):
         raise
     else:
         if rec.phase == "ready":
-            if rec.current_node is not None:
-                rec.finish()
-            else:
-                rec.cancel()  # Successful zero-node termination is enabled in task 7.
+            rec.finish()
     finally:
         rec.close()
 
@@ -107,6 +104,10 @@ def test_exit_mismatch_saves_actual_boundary_and_stops_even_at_endpoint(tmp_path
                 assert requests == [t.request for t in materials.steps[0].tools[:different_tool + 1]]
                 assert len(store.list(Node)) == different_tool
                 assert len(report["mappings"]) == different_tool
+                if not different_tool:
+                    end_record, = store.list(RunEnd)
+                    assert end_record.status == "incomplete" and end_record.last_node_id is None
+                    assert store.check_integrity().incomplete_steps
                 if different_tool:
                     assert store.list(Node)[0].index == 1
                     assert store.read_json(rec.current_node.context)["messages"][-1]["extra"]["raw_output"] == "actual"

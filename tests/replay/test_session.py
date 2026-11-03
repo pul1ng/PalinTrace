@@ -7,7 +7,7 @@ import pytest
 import palinreplay.replay.session as session
 from palinreplay.agents import AgentTask
 from palinreplay.core.errors import IntegrityError
-from palinreplay.core.models import Node, Run, State
+from palinreplay.core.models import Node, Run, RunEnd, State, StateCapture, Step
 from palinreplay.record.calls import read_call
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
@@ -177,6 +177,37 @@ def replay_session(tmp_path, monkeypatch):
     monkeypatch.setattr(session, "RestoredExecutor", lambda *args: executor)
     monkeypatch.setattr(session, "initial_recorder", initial_recorder)
     return state
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_empty_range_restores_and_prepares_without_calls_or_snapshots(tmp_path, replay_session, prepared):
+    state = replay_session
+    services = None
+    commands = []
+    if prepared:
+        services = tmp_path / "services.json"
+        services.write_text(json.dumps({"services": [{
+            "name": "A", "start_command": "start A", "readiness_command": "ready A", "timeout_sec": 10,
+        }]}))
+        def execute(command, **kwargs):
+            assert state.executor.restored.report["checks"]["full_filesystem"]
+            commands.append(command)
+            return ExecResult(command, b"ready", 0, 0.1)
+        state.executor.exec = execute
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C2", "C2", output=output, services_config=services)
+    assert report["execution_status"] == "completed" and report["r1"]["status"] == "passed"
+    assert not state.sandbox.calls and state.captures == 0
+    assert commands == (["start A", "ready A", "ready A"] if prepared else [])
+    assert report["mappings"] == report["steps"] == [] and not report["incomplete_step"]
+    assert report["statistics"]["actual_tool_executions"] == 0
+    with RecordStore.open(output / "record") as store:
+        assert store.list(Node) == store.list(State) == store.list(StateCapture) == store.list(Step) == ()
+        end, = store.list(RunEnd)
+        assert end.status == "completed" and end.last_node_id is None
+        assert store.replay_source(end.run_id).start.index == 2
+        assert store.check_integrity().ok
+    assert report["cleanup_confirmed"]
 
 
 @pytest.mark.parametrize("difference", [False, True])
