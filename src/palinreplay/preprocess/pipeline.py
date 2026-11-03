@@ -7,6 +7,7 @@ from palinreplay.llm import OpenAIChatClient
 from palinreplay.preprocess.candidates import (
     CANDIDATE_PROMPT_VERSION,
     candidate_template,
+    evidence_candidates,
     recognize_candidates,
 )
 from palinreplay.preprocess.chunks import TokenCounter, make_token_counter, plan_chunks
@@ -63,9 +64,10 @@ def analyze(
     candidates = recognize_candidates(
         timeline, chunks, candidate_prompt, client, concurrency=settings.concurrency,
     )
+    evidence_selection = evidence_candidates(candidates.candidates)
     evidence = analyze_evidence(
         timeline,
-        candidates.candidates,
+        evidence_selection,
         counter,
         EvidenceTemplate(
             request_token_budget=settings.request_token_budget,
@@ -108,6 +110,8 @@ def analyze(
             "diagnostics": [
                 diagnostic.model_dump(mode="json") for diagnostic in candidates.diagnostics
             ],
+            "evidence_requested": len(evidence_selection),
+            "evidence_skipped": len(candidates.candidates) - len(evidence_selection),
         },
         "evidence": {
             "services": [service.document() for service in evidence.services],

@@ -14,7 +14,7 @@ from palinreplay.preprocess.candidates import Candidate
 from palinreplay.preprocess.chunks import TokenCounter
 from palinreplay.preprocess.timeline import Timeline, TimelineCall
 
-EVIDENCE_PROMPT_VERSION = "palinreplay.preprocess-evidence.v1"
+EVIDENCE_PROMPT_VERSION = "palinreplay.preprocess-evidence.v2"
 
 EVIDENCE_SYSTEM_PROMPT = """You extract verifiable evidence for exactly one candidate service from one recorded tool call.
 Return exactly one JSON object and no prose or Markdown:
@@ -29,18 +29,27 @@ Return exactly one JSON object and no prose or Markdown:
              "reason": string}],
  "unknowns": [{"kind": string, "reason": string}]}
 
-service_name must equal the supplied candidate name. Every quote must be an exact,
-character-for-character substring of the selected field, with enough context to make
-it unique. For an action, request_quote is the smallest complete independently runnable
-command fragment that performs only that action for this service; it must not include
-requests for other services. Set executable true only when that fragment is complete;
-list unresolved dependencies. output_quote must quote the actual result that demonstrates
-the observed state. Use up only for demonstrated availability, down only for demonstrated
+service_name must equal the supplied candidate name. Every quote must be copied
+byte-for-byte from the selected field exactly as supplied, including backslashes and
+shell escape sequences. Never normalize, reformat, re-quote or reconstruct shell, Python
+or JSON syntax, and never quote a whole dictionary, expression or code snippet. Copy a
+short fragment instead: an absolute path, a bare port number, or a stable output token.
+For an action, request_quote is the smallest complete independently runnable command
+fragment that performs only that action for this service; it must not include requests
+for other services. Set executable true only when that fragment is complete; list
+unresolved dependencies. output_quote must quote the actual result that demonstrates the
+observed state. Use up only for demonstrated availability, down only for demonstrated
 unavailability or a confirmed stop, and unknown otherwise. A start attempt, a zero exit
 status, or an expected value written in the command is not proof of readiness. Ignore
 comments, echo text and expected values; use only the recorded command and actual result.
-Identity clues must identify this service instance, not merely repeat a common directory.
-The empty arrays are valid when the call supplies no evidence; explain that in unknowns.
+Identity clues must identify this service instance across calls, not merely repeat a
+common directory or a shared status summary. When the call shows a service-specific
+listening port or a service-specific script path, return it as an endpoint or program
+clue even if it appears inside a shared status-check command. Return every applicable
+strong clue, so different calls for the same service share at least one. Do not use the
+shared interpreter path, the shared working directory, or the shared status summary
+itself as the only identity. The empty arrays are valid when the call supplies no
+evidence; explain that in unknowns.
 """
 
 EVIDENCE_USER_PREFIX = "Extract evidence only from this candidate and complete recorded call.\n\n"
@@ -483,22 +492,13 @@ def merge_services(items: tuple[CandidateEvidence, ...]) -> tuple[ServiceEvidenc
             if item.candidate.name not in names:
                 names.append(item.candidate.name)
         group_keys = sorted(set().union(*(keysets[index] for index in indices)))
-        identity_unknown = not group_keys or bool(ambiguous & set().union(
-            *(_strong_keys(item) for item in group_items)
-        ))
+        identity_unknown = not group_keys
         unknowns = [unknown for item in group_items for unknown in item.unknowns]
         if not group_keys:
             unknowns.append(
                 EvidenceUnknown(
                     kind="identity",
                     reason="no strong endpoint/program/config/instance evidence links this service",
-                )
-            )
-        elif identity_unknown:
-            unknowns.append(
-                EvidenceUnknown(
-                    kind="identity",
-                    reason="strong identity clues conflict within the same tool call",
                 )
             )
         services.append(

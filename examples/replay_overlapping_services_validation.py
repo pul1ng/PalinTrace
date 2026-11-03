@@ -19,6 +19,7 @@ from palinreplay.record.calls import read_call
 from palinreplay.record.restore import load_restore_materials
 from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.plan import pin_replay
+from palinreplay.replay.service_config import load_service_input, resolve_services
 from palinreplay.sandbox.client import connect_docker
 from palinreplay.storage.btrfs.pool import BtrfsPool
 from palinreplay.storage.io import outside_store, write_json
@@ -209,7 +210,10 @@ def main(source, output, services_config=None):
                  "readiness_command": scenario["services"][name]["request_command"], "timeout_sec": 30}
                 for name in ("A", "B")
             ]})
-        assert [s["name"] for s in json.loads(config.read_text())["services"]] == ["A", "B"]
+        with RecordStore.open(source) as origin:
+            plan = pin_replay(origin, "C20", "C40")
+            selected = resolve_services(load_service_input(config), origin, plan)
+        assert [service.name for service in selected.services] == ["A", "B"]
         client = connect_docker(600)
         containers = {c.id: c.status for c in client.containers.list(all=True)}
         for name, services in (("with-services", config), ("without-services", None)):

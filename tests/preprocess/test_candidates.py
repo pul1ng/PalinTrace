@@ -265,3 +265,37 @@ def test_candidate_model_is_strict_about_fields_and_actions():
             {"name": "A", "node_index": 1, "execution_id": "e", "actions": ["bad"],
              "candidate_state": "up"}
         )
+
+
+def test_evidence_filter_keeps_boundaries_and_bounds_repeated_probes():
+    from palinreplay.preprocess.candidates import evidence_candidates
+
+    def item(node, name, actions, state):
+        return Candidate(
+            name=name, node_index=node, execution_id=f"e{node}",
+            actions=tuple(actions), candidate_state=state,
+        )
+
+    values = (
+        item(1, "A", ["start"], "unknown"),
+        item(2, "A", ["probe"], "up"),
+        item(3, "A", ["probe"], "up"),
+        item(4, "A", ["probe"], "up"),
+        item(5, "A", ["probe"], "down"),
+        item(6, "A", ["probe"], "down"),
+        item(7, "A", ["start"], "up"),
+        item(8, "A", ["probe"], "up"),
+        item(9, "A", ["stop"], "down"),
+        item(10, "A", ["probe"], "down"),
+        item(11, "B", ["probe"], "down"),
+    )
+    kept = evidence_candidates(values)
+    assert [(x.node_index, x.name, x.actions) for x in kept] == [
+        (1, "A", ("start",)),
+        (2, "A", ("probe",)),
+        (3, "A", ("probe",)),
+        (5, "A", ("probe",)),
+        (7, "A", ("start",)),
+        (8, "A", ("probe",)),
+        (9, "A", ("stop",)),
+    ]

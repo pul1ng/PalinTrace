@@ -275,3 +275,17 @@ def test_raw_evidence_requires_state_quotes_and_executable_request():
             {"action": "start", "observed_state": "unknown", "request_quote": None,
              "output_quote": None, "executable": True, "dependencies": [], "reason": "start"}
         ])))
+
+
+def test_shared_weak_key_does_not_invalidate_unique_identity_keys():
+    shared = merge_services((
+        evidence_item("A", "e1", 19, "/srv/shared"),
+        evidence_item("B", "e1", 19, "/srv/shared"),
+        evidence_item("A", "e2", 20, "/srv/A"),
+        evidence_item("B", "e2", 21, "/srv/B"),
+    ))
+    by_name = {service.name: service for service in shared}
+    assert set(by_name) == {"A", "B"}
+    assert all(not service.identity_unknown for service in by_name.values())
+    assert by_name["A"].identity_keys == ("program:/srv/A",)
+    assert by_name["B"].identity_keys == ("program:/srv/B",)

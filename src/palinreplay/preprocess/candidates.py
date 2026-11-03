@@ -12,7 +12,7 @@ from palinreplay.core.schema import Spec
 from palinreplay.preprocess.chunks import CallChunk, PromptTemplate
 from palinreplay.preprocess.timeline import Timeline, TimelineCall
 
-CANDIDATE_PROMPT_VERSION = "palinreplay.preprocess-candidates.v1"
+CANDIDATE_PROMPT_VERSION = "palinreplay.preprocess-candidates.v2"
 
 CANDIDATE_SYSTEM_PROMPT = """You analyze a recorded coding-agent trajectory and identify background services.
 Return exactly one JSON object with one key, "candidates", and no prose or Markdown.
@@ -24,8 +24,12 @@ candidate per service per call. List actions in the order observed within the ca
 attempt alone means "unknown": a zero exit status does not prove the service became ready.
 Use "up" only when the actual result demonstrates availability, and "down" only when it
 demonstrates unavailability or a completed stop. Ignore comments, echo text and expectations
-inside commands; judge from the actual recorded command and result. Do not infer services that
-the calls do not support. {"candidates":[]} is a valid complete answer when no service is shown.
+inside commands; judge from the actual recorded command and result. Return a candidate only
+when that call contains a service-specific control, request or observation for the service.
+A multi-service status summary embedded in another command is not by itself a candidate; do
+not emit one candidate per service name merely because a summary mentions it. Do not infer
+services that the calls do not support. {"candidates":[]} is a valid complete answer when no
+service is shown.
 """
 
 CANDIDATE_USER_PREFIX = (
@@ -227,3 +231,40 @@ def recognize_candidates(
         candidates=ordered,
         diagnostics=tuple(diagnostics[index] for index in range(len(chunks))),
     )
+
+
+def evidence_candidates(candidates: tuple[Candidate, ...]) -> tuple[Candidate, ...]:
+    """Retain lifecycle boundaries and a bounded sample of state observations.
+
+    Every start/stop candidate is kept. For each service, keep at most two ``up``
+    probes per uninterrupted live run and the first ``down`` probe after a live
+    observation. Repeated per-step state summaries do not justify a second model
+    request; the candidate itself remains in the analysis report.
+    """
+    kept = []
+    live_probes: dict[str, int] = {}
+    seen_up: dict[str, bool] = {}
+    seen_down: dict[str, bool] = {}
+    for candidate in candidates:
+        name = candidate.name
+        if "start" in candidate.actions or "stop" in candidate.actions:
+            kept.append(candidate)
+            live_probes[name] = 0
+            seen_up[name] = False
+            seen_down[name] = False
+            continue
+        if "probe" not in candidate.actions:
+            continue
+        if candidate.candidate_state == "up":
+            if live_probes.get(name, 0) < 2:
+                kept.append(candidate)
+                live_probes[name] = live_probes.get(name, 0) + 1
+            seen_up[name] = True
+            continue
+        if candidate.candidate_state == "down":
+            if seen_up.get(name, False) and not seen_down.get(name, False):
+                kept.append(candidate)
+                seen_down[name] = True
+            live_probes[name] = 0
+            seen_up[name] = False
+    return tuple(kept)

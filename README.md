@@ -7,6 +7,7 @@
 PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文和任务环境状态关联保存。项目目标是让使用者能够定位到轨迹中的任意已保存节点，恢复该节点对应的环境，并从该位置回放历史执行过程，使回放内容与环境状态始终对应同一个历史位置。
 
 - **Record · 轨迹录制（已实现 MVP）**：记录 Agent 的模型交互、工具调用与结果，关联当时的上下文、任务文件和运行配置，为历史查看、环境恢复与后续回放提供依据。
+- **Preprocess · 服务清单（已实现 MVP）**：分析一条完整 Record，按完整工具调用切块并并发识别服务，再回查真实证据生成可复用的 `services.json`；不启动任务容器。
 - **Replay · 历史重执行（已实现 MVP）**：从已提交的来源节点恢复环境，按固定历史真实执行后续工具，不调用模型、不需要模型凭据；保存真实结果与快照，确定的退出码不符或框架故障会停止执行。完整一致性校验另列为后续 Verify 工作。
 - **Resume · 分叉续跑（计划中）**：从任意已保存节点恢复 Agent 上下文与任务环境，可补充新的指令并继续运行，生成独立的新轨迹，保留原始历史。
 
@@ -64,13 +65,25 @@ bash scripts/quickstart_record.sh
 
 历史执行期间仅检查工具两边确定的整数退出码是否相同，相同的非零退出码也继续；原始输出和文件状态不做运行时比较。退出码不符时停止后续调用，保存已执行结果：组内非末尾工具不符时留下未完成尾部，末个工具不符时可保存完整实际节点，但即使是范围最后一步也仍报告 `stopped`。无法确定退出码、材料损坏、恢复、准备、执行、快照、录制或清理故障属于失败。
 
-需要恢复服务时，用 `--services-config services.json` 明确指定。Replay 只准备配置中的服务，启动、首次就绪检查与最终就绪复核全部通过后才执行历史。准备不产生独立文件状态或 checkpoint，`preparation_state_captured` 为 `false`；首个实际快照包含准备与首步的文件净效果，不能单独恢复准备结束时的文件状态。
+需要恢复服务时，用 `--services-config services.json` 明确指定；也可传入 `palin preprocess` 生成的版本化清单，Replay 会校验来源并按 `--from` 选择服务。旧的人工静态列表继续兼容。Replay 只准备配置中的服务，启动、首次就绪检查与最终就绪复核全部通过后才执行历史。准备不产生独立文件状态或 checkpoint，`preparation_state_captured` 为 `false`；首个实际快照包含准备与首步的文件净效果，不能单独恢复准备结束时的文件状态。
 
 报告的 `execution_status` 为 `completed / stopped / failed / cancelled`，对应退出码 `0 / 2 / 1 / 130`；框架或清理故障优先于取消，取消与故障证据均保留，最终报告、进度和 CLI 使用同一结果。新记录要求 Store 内 `store-receipt-v1` 收尾回执，绑定最终结论及报告发布、资源关闭结果；缺少回执时 inspect 显示收尾 `unconfirmed`，已有持久故障仍为 `failed`，旧记录标为 `legacy`。Store 的工具统计使用 `dispatched_tool_calls` 表示已派发数，未知结果单列调用身份；会话实际执行计数仍从执行器入口采集。`completed` 仅表示所选范围执行完成，CLI 明确显示“完整一致性校验未执行”。完整一致性校验是后续独立 Verify 工作，当前没有已实现的 Verify 命令。`--validation` 和 Python API 的 `validation_mode` 已移除，也没有继续执行开关。
 
 本次配置使用 `palinreplay.replay.v2`，报告使用 `palinreplay.replay-report.v2`，声明 `source-reference-v1`、`source-index-v1` 和 `historical-exit-code-v1`。`record inspect` 单列源 C20 引用；它不是本次 `--node C20` 可选的节点。本次完整性检查和导出仍依赖来源 Record Store、材料及保留的文件快照，仅复制 Replay 输出不能得到自包含记录，也不支持此类运行的便携 bundle。不修改历史命令、不自动重试历史工具、不修复文件、不用来源快照覆盖实际结果。完整参数和状态说明见[命令参考](docs/命令参考.md#replay)。
 
-### 4. Resume（待实现）
+### 4. Preprocess（生成服务清单）
+
+Preprocess 只需一条完整 Record 和一份独立的模型配置，不指定 Replay 起止节点：
+
+```bash
+cp -n config/llm/preprocess_llm.toml.example config/llm/preprocess_llm.toml
+# 在 preprocess_llm.toml 中填写 model、base_url 和 api_key
+.venv/bin/palin preprocess "$PALIN_RUN" --run "$PALIN_RUN_ID"
+```
+
+默认写入 `outputs/preprocess/YYMMDD_HHMMSS_任务名/`，包含 `services.json` 和分析报告。清单绑定完整来源摘要，记录每个已确认运行区间、启动/就绪配方和原证据。Replay 的 `--services-config` 可直接读取它，按 `--from` 选择需要准备的服务；来源不一致、起点落在未知区间或缺少配方时会在连接 Docker 前报错。模板见 [`preprocess_llm.toml.example`](config/llm/preprocess_llm.toml.example)，实际配置文件不进入 Git。
+
+### 5. Resume（待实现）
 
 ## Getting Started
 
