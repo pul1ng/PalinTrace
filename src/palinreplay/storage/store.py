@@ -41,6 +41,7 @@ from palinreplay.core.models import (
     StepCalls,
     ToolGroup,
 )
+from palinreplay.core.replay_contract import SourceReference, source_reference
 from palinreplay.core.serialization import json_bytes
 from palinreplay.diagnostics.metrics import CountingReader, timed
 from palinreplay.diagnostics.timing import span
@@ -92,6 +93,8 @@ class RecordStore:
         self._artifacts = ArtifactStore(root / "artifacts")
         self.read_only = read_only
         self._closed = False
+        self._source_cache = None
+        self._receipt_cache = None
 
     @classmethod
     def create(cls, path: str | Path) -> RecordStore:
@@ -173,6 +176,9 @@ class RecordStore:
     @contextmanager
     def _transaction(self):
         self._ensure_open(writing=True)
+        if self._source_cache is not None:
+            self._source_cache.clear()
+            self._receipt_cache.clear()
         with span("catalog.begin"):
             self._db.execute("BEGIN IMMEDIATE")
         try:
@@ -189,13 +195,20 @@ class RecordStore:
     def _snapshot(self):
         self._ensure_open()
         nested = self._db.in_transaction
-        if not nested:
-            self._db.execute("BEGIN")
+        owner = self._source_cache is None
+        if owner:
+            self._source_cache, self._receipt_cache = {}, {}
         try:
-            yield
-        finally:
             if not nested:
-                self._db.execute("ROLLBACK")
+                self._db.execute("BEGIN")
+            try:
+                yield
+            finally:
+                if not nested:
+                    self._db.execute("ROLLBACK")
+        finally:
+            if owner:
+                self._source_cache = self._receipt_cache = None
 
     @contextmanager
     def snapshot(self):
@@ -428,6 +441,73 @@ class RecordStore:
     def _tip(self, run_id: str) -> Node | None:
         return max(self.list(Node, run_id=run_id), key=lambda n: n.index, default=None)
 
+    def replay_source(self, run_id: str) -> SourceReference | None:
+        """Read the protected declaration, without treating external IDs as local relations."""
+        from palinreplay.storage.codec import JSON_TYPES, decode
+
+        with self._snapshot():
+            run = self.get(Run, run_id)
+            key = (run_id, run.config.sha256, run.config.size, run.config.media_type)
+            if key not in self._source_cache:
+                source = None
+                if run.config.media_type in JSON_TYPES:
+                    data = decode(self.read_bytes(run.config), run.config.media_type)
+                    try:
+                        config = json.loads(data)
+                    except (ValueError, UnicodeError):
+                        pass  # Ordinary Record configurations may be opaque payloads.
+                    else:
+                        source = source_reference(config)
+                self._source_cache[key] = source
+            return self._source_cache[key]
+
+    def replay_finalization(self, run_id: str):
+        """Freeze sidecar presence/bytes alongside one catalog read operation."""
+        from palinreplay.storage.replay_finalization import read_receipt
+
+        with self._snapshot():
+            source = self.replay_source(run_id)
+            if source is None:
+                return None
+            if source.finalization_protocol is None:
+                return {"protocol": None, "status": "legacy", "receipt": None}
+            if run_id not in self._receipt_cache:
+                attempts = self.list(Attempt, run_id=run_id)
+                receipt = None
+                if attempts:
+                    attempt = attempts[-1]
+                    ends = [e for e in self.list(RunEnd, run_id=run_id)
+                            if e.attempt_id == attempt.attempt_id]
+                    failures = [f for f in self.list(Failure, run_id=run_id)
+                                if f.attempt_id == attempt.attempt_id]
+                    receipt = read_receipt(self.root, self.get(Run, run_id), attempt,
+                                           ends[-1] if ends else None, failures)
+                    if receipt is not None:
+                        from palinreplay.core.replay_outcome import (
+                            execution_status,
+                            failure_evidence,
+                        )
+
+                        status = ends[-1].status if ends else "unfinalized"
+                        if ends:
+                            saved = self.read_json(ends[-1].details).get("replay", {})
+                            status = saved.get("execution_status", status)
+                        for failure in failures:
+                            status = execution_status(status, **failure_evidence(
+                                failure.category, self.read_json(failure.details)))
+                        if ((status == "failed" and receipt["execution_status"] != "failed")
+                                or (status == "stopped" and receipt["execution_status"] == "completed")
+                                or (status == "cancelled" and receipt["execution_status"] not in ("cancelled", "failed"))
+                                or (receipt["execution_status"] == "completed"
+                                    and len(self.list(Node, run_id=run_id)) != source.end.index - source.start.index)):
+                            raise IntegrityError("Replay receipt suppresses persisted execution evidence")
+                self._receipt_cache[run_id] = {
+                    "protocol": source.finalization_protocol,
+                    "status": "confirmed" if receipt is not None else "unconfirmed",
+                    "receipt": receipt,
+                }
+            return self._receipt_cache[run_id]
+
     def _relations(self, record: Fact) -> None:
         """Validate durable relations, also usable when inspecting old history."""
         if not isinstance(record, State):
@@ -445,10 +525,18 @@ class RecordStore:
                     raise IntegrityError("attempt cannot precede itself")
         elif isinstance(record, Step):
             attempt = self.get(Attempt, record.attempt_id)
-            parent = self.get(Node, record.parent_node_id)
-            self._same_run(record.run_id, attempt, parent)
-            if record.index != parent.index + 1:
-                raise IntegrityError("step index must follow its parent node")
+            self._same_run(record.run_id, attempt)
+            source = self.replay_source(record.run_id)
+            if source is not None and not source.start.index < record.index <= source.end.index:
+                raise IntegrityError("step index is outside the pinned Replay range")
+            if record.parent_node_id is None:
+                if source is None or record.index != source.start.index + 1:
+                    raise IntegrityError("parentless step requires the first Replay source index")
+            else:
+                parent = self.get(Node, record.parent_node_id)
+                self._same_run(record.run_id, parent)
+                if record.index != parent.index + 1:
+                    raise IntegrityError("step index must follow its parent node")
         elif isinstance(record, Operation):
             step = self.get(Step, record.step_id)
             self._same_run(record.run_id, step)
@@ -496,10 +584,16 @@ class RecordStore:
                 if node.attempt_id != attempt.attempt_id:
                     raise IntegrityError("end node belongs to another attempt")
             if record.status in ("completed", "paused"):
-                committed = {n.step_id for n in self.list(Node, run_id=record.run_id)}
-                if record.last_node_id is None or any(
-                    s.attempt_id == attempt.attempt_id and s.step_id not in committed
-                    for s in self.list(Step, run_id=record.run_id)
+                nodes = self.list(Node, run_id=record.run_id)
+                steps = self.list(Step, run_id=record.run_id)
+                committed = {n.step_id for n in nodes}
+                zero_step = False
+                if record.last_node_id is None:
+                    source = self.replay_source(record.run_id)
+                    zero_step = (source is not None and source.start == source.end
+                                 and not nodes and not steps)
+                if (record.last_node_id is None and not zero_step) or any(
+                    s.attempt_id == attempt.attempt_id and s.step_id not in committed for s in steps
                 ):
                     raise IncompleteRecordError("clean termination requires a complete boundary")
         elif isinstance(record, StateCapture):
@@ -551,7 +645,7 @@ class RecordStore:
             if isinstance(record, Step):
                 self._attempt_open(record.attempt_id)
                 tip = self._tip(record.run_id)
-                if tip is None or tip.node_id != record.parent_node_id:
+                if (tip.node_id if tip else None) != record.parent_node_id:
                     raise ConflictError("step parent is not the current node")
                 if any(
                     s.attempt_id == record.attempt_id and s.index == record.index
@@ -849,6 +943,8 @@ class RecordStore:
         if len(captures) > 1:
             raise IntegrityError("multiple captures for one boundary")
         records.extend(captures)
+        if node.index == 0 and self.replay_source(node.run_id) is not None:
+            raise IntegrityError("source-reference Replay cannot contain a local C0")
         if node.index:
             step = self.get(Step, node.step_id)
             self._relations(step)
@@ -879,7 +975,9 @@ class RecordStore:
             if node.index == 0:
                 if tip is not None or self.list(Event, run_id=node.run_id):
                     raise ConflictError("C0 must precede execution history")
-            elif tip is None or tip.node_id != node.parent_node_id or node.index != tip.index + 1:
+            elif (tip.node_id if tip else None) != node.parent_node_id or (
+                tip is not None and node.index != tip.index + 1
+            ):
                 raise ConflictError("node does not extend the current history")
             cursor = max((e.sequence for e in self.list(Event, run_id=node.run_id)), default=0)
             if node.accepted_event_sequence != cursor:
@@ -927,6 +1025,8 @@ class RecordStore:
                         self._node_records(record, seen)
                     elif isinstance(record, Execution):
                         self._execution_events(record)
+                    elif isinstance(record, Run):
+                        self.replay_finalization(record.run_id)
                     elif isinstance(record, State):
                         self._verify_refs(self._state_records(record, require_complete=False), seen)
                 except (StoreError, OSError, sqlite3.DatabaseError) as exc:

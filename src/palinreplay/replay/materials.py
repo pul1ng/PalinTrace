@@ -57,6 +57,8 @@ class ReplayMaterials:
     context: dict
     input_position: dict
     steps: tuple[HistoricalStep, ...]
+    context_bytes: bytes
+    input_position_bytes: bytes
 
 
 def _call(store, node, execution_id, kind):
@@ -170,4 +172,6 @@ def load_replay_materials(store, plan: ReplayPlan) -> ReplayMaterials:
                     raise IntegrityError("historical message adoption is not a contiguous prefix")
                 next_message = call.source["stop"]
             steps.append(HistoricalStep(node, model, tools, ids))
-        return ReplayMaterials(plan, config, context, position, tuple(steps))
+        return ReplayMaterials(plan, config, context, position, tuple(steps),
+                               store.read_bytes(plan.start.context),
+                               store.read_bytes(plan.start.input_position))

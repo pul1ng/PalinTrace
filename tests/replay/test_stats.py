@@ -1,14 +1,18 @@
 from palinreplay.replay.stats import ReplayStats
 
 
-def test_stats_persist_without_debug_and_keep_cost_separate():
+def test_stats_persist_without_display_and_keep_usage_separate():
     stats = ReplayStats()
-    stats.inherit({"counters": {"cost": 12, "n_calls": 20}})
-    with stats.timed("execution"):
-        stats.data["actual_tool_executions"] += 1
-    stats.files({"discovery_sec": 2, "comparison_sec": 3, "candidate_path_count": 4, "read_bytes": 5})
+    context = {"counters": {"cost": 12, "n_calls": 20}}
+    stats.inherit(context)
+    context["counters"]["cost"] = 99
+    for name in ("restore", "r1_validation", "preparation", "execution", "snapshot_commit"):
+        with stats.timed(name):
+            pass
+        assert stats.data["seconds"][name] > 0
     assert stats.data["actual_model_calls"] == stats.data["actual_model_cost"] == 0
     assert stats.data["inherited_usage"]["counters"]["cost"] == 12
-    assert stats.data["seconds"]["execution"] > 0
-    assert stats.data["seconds"]["change_discovery"] == 2
-    assert stats.data["candidate_path_count"] == 4 and stats.data["read_bytes"] == 5
+    assert stats.data["completed_steps"] == stats.data["historical_steps"] == 0
+    assert "content_compare" not in stats.data["seconds"]
+    assert "change_discovery" not in stats.data["seconds"]
+    assert "candidate_path_count" not in stats.data and "read_bytes" not in stats.data

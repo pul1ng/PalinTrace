@@ -25,12 +25,21 @@ class BtrfsStateBackend:
             pool.verify(snapshot)
         else:
             container.pause()
+            primary = None
             try:
                 name = "checkpoints/" + boundary.node_id
                 saved = pool.snapshot(sandbox.workspace, name)
                 snapshot = Snapshot(location=pool.location, name=name, uuid=saved["uuid"])
+            except BaseException as error:
+                primary = error
+                raise
             finally:
-                container.unpause()
+                try:
+                    container.unpause()
+                except BaseException as error:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"container unpause also failed: {error!r}")
         container.reload()
         actual = _environment(container.attrs["Config"])
         if self.public_env_keys - actual.keys():

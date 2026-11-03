@@ -1,4 +1,4 @@
-"""Validate Astropy C2→C4 through the CLI with default, lenient, and strict validation."""
+"""Run existing Astropy C2-C4 through auto/plain/off progress, checking execution facts."""
 
 import argparse
 import hashlib
@@ -21,22 +21,21 @@ from palinreplay.storage.io import write_json
 from palinreplay.storage.store import RecordStore
 
 
-def check_record(output, report, validation_mode):
+def check_record(output, report):
     evidence, snapshots = [], []
     with RecordStore.open(output / "record") as store:
         run = store.get(Run, report["run_id"])
         config = store.read_json(run.config)["replay"]
-        assert config["validation_mode"] == validation_mode
-        assert "continue_on_difference" not in config
+        assert config["execution_policy"] == "historical-exit-code-v1"
+        assert config["initial_state_mode"] == "source-reference-v1"
         nodes = sorted(store.list(Node, run_id=run.run_id), key=lambda node: node.index)
         assert len(nodes) == len(report["mappings"])
         for mapping, node in zip(report["mappings"], nodes, strict=True):
             assert mapping["node_id"] == node.node_id and mapping["index"] == node.index
             snapshot = Snapshot.model_validate(store.read_json(store.get(State, node.state_id).manifest))
             snapshots.append(snapshot)
-            if node.index == 0:
-                continue
-            entry = report["steps"][node.index - 1]
+            assert node.index > config["source_start_index"]
+            entry = next(step for step in report["steps"] if step["node_id"] == node.node_id)
             assert entry["node_id"] == node.node_id
             assert [tool["execution_id"] for tool in entry["tools"]] == list(node.tool_execution_ids)
             model = read_call(store, node.model_execution_id)
@@ -47,21 +46,19 @@ def check_record(output, report, validation_mode):
             assert context["replay"]["actual_model_calls"] == context["replay"]["actual_model_cost"] == 0
             for compared in entry["tools"]:
                 actual = read_call(store, compared["execution_id"])
-                assert actual.phase == "accepted" and compared["definitive"]
+                assert actual.phase == "accepted" and type(compared["actual_exit_code"]) is int
                 assert actual.execution.execution_id != compared["source_execution_id"]
                 raw = store.read_bytes(actual.events[1].payload)
                 result = store.read_json(actual.events[1].details)["backend"]["decoded"]
-                assert hashlib.sha256(raw).hexdigest() == compared["actual_output_sha256"]
+                assert hashlib.sha256(raw).hexdigest() == compared["result_ref"]["sha256"]
                 assert result["returncode"] == compared["actual_exit_code"]
                 accepted = store.read_json(actual.events[-1].payload)["messages"]
                 assert all(message in context["messages"] for message in accepted)
                 assert compared["execution_id"] in [item["execution_id"] for item in position["adoptions"]]
-            assert "files" in entry
+            assert "files" not in entry
             evidence.append({"source_index": mapping["source_index"], "actual_index": node.index,
                              "actual_tools": len(entry["tools"]),
-                             "tool_differences": sum(not tool["equal"] for tool in entry["tools"]),
-                             "file_differences": len(entry["files"]["different_paths"]),
-                             "starting_divergent": entry["starting_divergent"],
+                             "exit_mismatches": sum(not tool["equal"] for tool in entry["tools"]),
                              "actual_context_and_results_verified": True,
                              "local_history_without_model_requests": True})
     return evidence, snapshots
@@ -88,47 +85,31 @@ def main(source, output):
         helper = None
         # The source-pool helper name is shared, so each case must finish cleanup
         # before the next one starts. Each case writes to a fresh directory.
-        cases = (("default", None, [2, 3, 4]),
-                 ("lenient", "lenient", [2, 3, 4]),
-                 ("strict", "strict", [2, 3]))
-        for name, requested_mode, indices in cases:
-            validation_mode = requested_mode or "lenient"
+        for name in ("auto", "plain", "off"):
             target = output / name
             command = [str(Path(sys.executable).with_name("palin")), "replay", str(source),
-                       "--from", "C2", "--to", "C4", "--output", str(target)]
-            if requested_mode is not None:
-                command.extend(["--validation", requested_mode])
+                       "--from", "C2", "--to", "C4", "--output", str(target), "--progress", name]
             result = subprocess.run(command, capture_output=True, text=True)
             (output / f"{name}.stdout.txt").write_text(result.stdout)
             (output / f"{name}.stderr.txt").write_text(result.stderr)
             report = json.loads((target / "report.json").read_text())
             row = {"name": name, "command": command, "exit_code": result.returncode,
-                   "validation_mode": report["validation_mode"],
-                   "execution_status": report["execution_status"],
-                   "validation_status": report["validation_status"],
+                   "progress": name, "execution_status": report["execution_status"],
                    "report": str(target / "report.json")}
             summary["runs"].append(row)
             print(json.dumps(row), flush=True)
-            assert result.returncode == 2 and "MATCH" not in result.stdout
-            assert report["validation_mode"] == validation_mode
-            assert "continue_on_difference" not in report
-            assert report["execution_status"] == ("stopped" if validation_mode == "strict" else "completed")
-            assert report["validation_status"] == report["status"] == "difference"
-            assert [mapping["source_index"] for mapping in report["mappings"]] == indices
-            assert [entry["source_index"] for entry in report["steps"]] == indices[1:]
-            assert report["first_difference"] == report["steps"][0]["files"]
-            assert report["first_difference"]["source_index"] == 3
-            assert report["first_difference"]["different_paths"]
-            assert not report["steps"][0]["starting_divergent"]
-            if validation_mode == "lenient":
-                assert report["steps"][1]["starting_divergent"]
-                assert "stop_reason" not in report and "Stopped" not in result.stdout
-            else:
-                assert report["stop_reason"] == "file-state"
+            assert result.returncode == 0 and "完整一致性校验未执行" in result.stdout
+            assert report["execution_status"] == "completed"
+            assert [mapping["source_index"] for mapping in report["mappings"]] == [3, 4]
+            assert [mapping["index"] for mapping in report["mappings"]] == [3, 4]
+            assert [entry["source_index"] for entry in report["steps"]] == [3, 4]
+            assert report["source_start"]["index"] == 2 and report["source_start"]["reference"]
+            assert "stop_reason" not in report and "exit_mismatch" not in report
             stats = report["statistics"]
             assert stats["actual_model_calls"] == stats["actual_model_cost"] == 0
-            assert stats["historical_answer_supplies"] == len(indices) - 1
-            row["steps"], actual_snapshots = check_record(target, report, validation_mode)
+            assert stats["historical_answer_supplies"] == stats["completed_steps"] == 2
+            assert all(stats["seconds"][key] > 0 for key in ("restore", "r1_validation", "execution", "snapshot_commit"))
+            row["steps"], actual_snapshots = check_record(target, report)
             snapshots.extend(actual_snapshots)
             assert stats["actual_tool_executions"] == sum(step["actual_tools"] for step in row["steps"])
             restored = json.loads((target / "restore.json").read_text())

@@ -14,6 +14,7 @@ class ProgressEvent:
         "starting",
         "restoring",
         "service-preparation",
+        "source-reference",
         "replaying",
         "capturing",
         "committing",
@@ -46,6 +47,7 @@ class ProgressEvent:
     inclusive_sec: float | None = None
     source_step: int | None = None
     total_steps: int | None = None
+    completed_steps: int | None = None
 
 
 ProgressCallback = Callable[[ProgressEvent], None]

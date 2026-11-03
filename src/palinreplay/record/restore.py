@@ -179,7 +179,11 @@ class RestoredNode(_SavedContext):
                 except Exception as error:
                     errors.append(f"{name}: {type(error).__name__}: {error}")
         self.report.update(cleanup_confirmed=not errors, cleanup_errors=errors)
-        self._write_report()
+        try:
+            self._write_report()
+        except Exception as error:
+            errors.append(f"restore-report: {type(error).__name__}: {error}")
+            self.report["cleanup_confirmed"] = False
         if errors:
             raise SandboxCleanupError("; ".join(errors))
         self._closed = True

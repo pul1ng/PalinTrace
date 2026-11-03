@@ -5,7 +5,7 @@ Execution trace recording, environment restoration, and historical replay for co
 PalinTrace links an agent's model interactions, tool calls, execution results, context, and task environment state. The goal is to let users select any saved node, restore its associated environment, and replay recorded interactions from that point, keeping playback and environment state aligned with the same position in history.
 
 - **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and future replay.
-- **Replay · Historical re-execution (MVP implemented)**: Restore a committed node and execute subsequent tools from a fixed history without model requests. Preserve actual results and differences, stopping on critical mismatches; the default lenient mode permits only regular-file mtime differences.
+- **Replay · Historical re-execution (MVP implemented)**: Restore a committed source node and execute subsequent tools from a fixed history without model requests or credentials. Save actual results and snapshots; stop on a definite exit-code mismatch or a framework failure. Full consistency checking is planned as separate Verify work.
 - **Resume · Fork and continue (planned)**: Restore the agent context and task environment at any saved node, optionally provide new instructions, and continue on an independent trajectory while preserving the original history.
 
 ## Demo (Chinese)
@@ -50,23 +50,23 @@ By default, it calls a real model and runs at most two steps. Outputs are groupe
 
 ### 3. Replay
 
-Restore a committed baseline and execute subsequent historical tools without calling a model:
+Restore a committed source node, pass the R1 file, context, and configuration checks, and execute subsequent historical tools without a model, model configuration, or API key:
 
 ```bash
-.venv/bin/palin replay "$PALIN_RUN" --from C20 --to C23
-.venv/bin/palin replay "$PALIN_RUN" --from C2 --to C4 --validation lenient
-.venv/bin/palin replay "$PALIN_RUN" --from C2 --to C4 --validation strict
+.venv/bin/palin replay "$PALIN_RUN" --from C20 --to C40
 ```
 
-The baseline becomes the new C0. `--to` is inclusive and defaults to the last committed node at startup; `--run` selects the source Run. `--output` selects a fresh directory, otherwise `outputs/replay/DATE_TASK/` contains `report.json` and an independent `record/`. The source trace remains unchanged.
+Source C20 remains an external reference. The new run creates no local C20, C0, initial State, or starting checkpoint; it saves only actually completed C21–C40, with independent node IDs and the source indices. `--to` is inclusive and defaults to the last committed node at startup; `--run` selects the source Run. `--output` must name a new directory separate from the source. The default is `outputs/replay/YYMMDD_HHMMSS_任务名/` (task name), containing `report.json` and this run's `record/`. The source trace remains unchanged.
 
-Terminal progress shows the current phase, source-to-replay node mapping, completed steps and elapsed time. Redirected output uses plain text; `--progress off` disables progress. The restored baseline does not count as an executed step, and completion does not imply a validation match.
+Progress shows phases, the source reference, actual nodes, completed steps, and elapsed time: source C20 (reference) is `0/20`, committed C21 is `1/20`, and committed C40 is `20/20`. Redirected output uses plain text; `--progress plain` always uses text and `--progress off` disables progress display. Timings for restoration, R1 checks, preparation, tool execution, and actual snapshot commits are always saved.
 
-`--validation {strict,lenient}` defaults to `lenient`. Both modes preserve actual tool results and stop further calls when exit codes or raw output differ from the recording. Matching nonzero exits pass. Lenient permits only regular files whose entries differ solely in `mtime_sec`, with unchanged hardlink relationships; content, additions/deletions, permissions and other differences stop execution. Permitted mtime differences remain recorded and keep validation at `difference`. Strict mode also stops on mtime differences. A mismatch inside a tool group preserves the incomplete group; a last-tool mismatch commits the actual node before stopping further history. Tool-matching completed steps receive the existing incremental file comparison. The report saves `validation_mode`, and the new recording configuration saves `replay.validation_mode`. The Python API also defaults to `run_replay(..., validation_mode="lenient")`.
+During historical execution, Replay checks only whether both tool exit codes are definite integers with equal values. Equal nonzero exits continue; raw output and filesystem state are not compared at runtime. A mismatch stops subsequent calls and retains actual results: a mismatch before the last tool leaves an incomplete tail, while a last-tool mismatch can commit the actual node but still reports `stopped`, even at the end of the selected range. Indefinite exit codes, corrupt materials, or restoration, preparation, execution, snapshot, recording, or cleanup faults are failures.
 
-Execution is reported as `completed / stopped / failed`, separately from validation `match / difference / incomplete`. A fully matching run exits `0`; any difference exits `2`, including a completed final step or a completed continuation. Operational faults take precedence and exit `1`, preserving earlier differences. The first difference remains recorded, and later steps carry `starting_divergent`. A later local incremental match cannot establish that the whole filesystem has converged.
+To restore services, explicitly supply `--services-config services.json`. Replay prepares only configured services and runs historical tools after startup, initial readiness checks, and final readiness rechecks all pass. Preparation creates no independent filesystem state or checkpoint; `preparation_state_captured` is `false`. The first actual snapshot contains the net filesystem effects of preparation and the first step together, so the files at the end of preparation cannot be restored separately.
 
-Both modes preserve the same comparison policy, including file mtime at integer-second precision and `.pyc` files. Corrupt materials, restore or snapshot failures, comparison exceptions, and uncertain tool results still stop execution. Replay does not rewrite commands, retry tools, repair files, or replace actual results with source snapshots. See the [command reference (Chinese)](docs/命令参考.md#replay).
+The report's `execution_status` is `completed / stopped / failed / cancelled`, with exit codes `0 / 2 / 1 / 130`. Framework or cleanup faults take precedence over cancellation, while retaining both cancellation and fault evidence; the final report, progress, and CLI use the same outcome. `completed` means only that the selected execution range finished; the CLI explicitly states `完整一致性校验未执行` (full consistency checking was not performed). Verify remains separate future work, with no implemented Verify command. `--validation` and the Python API's `validation_mode` argument have been removed; there is no continue switch.
+
+Run configuration uses `palinreplay.replay.v2` and reports use `palinreplay.replay-report.v2`, declaring `source-reference-v1`, `source-index-v1`, and `historical-exit-code-v1`. `record inspect` lists source C20 separately; it is not selectable as a local `--node C20`. Integrity checks and exports still require the source Record Store, artifacts, and retained filesystem snapshots. Copying only the Replay output is not self-contained, and portable bundles are unsupported for these runs. Replay does not rewrite historical commands, retry tools, repair files, or replace actual results with source snapshots. See the [command reference (Chinese)](docs/命令参考.md#replay).
 
 ### 4. Resume (not yet implemented)
 
@@ -169,7 +169,7 @@ Export a readable trace:
 .venv/bin/palin record export "$PALIN_RUN"
 ```
 
-The export does not include the Btrfs storage pool. Keep the recording directory, the base, and their associated storage pool for restoration verification and future Replay and Resume workflows. See the [command reference (Chinese)](docs/命令参考.md) for complete options.
+The export does not include the Btrfs storage pool. Keep the recording directory, the base, and their associated storage pool for restoration verification and future Replay and Resume workflows. When exporting Replay results, also retain the original source Store, artifacts, and snapshots; the export declares these external dependencies without packaging them. See the [command reference (Chinese)](docs/命令参考.md) for complete options.
 
 ### 7. record visualize: Generate a visualization
 
@@ -196,7 +196,8 @@ outputs/             Local outputs grouped by type and timestamp (Git-ignored)
 
 ## TODO
 
-- [x] Replay MVP: Restore committed nodes and execute fixed historical tools without model requests. Preserve actual results and stop on critical differences; lenient permits only regular-file mtime differences, while strict stops on every historical difference.
+- [x] Replay MVP: Restore a committed source node, pass R1 and explicitly configured service preparation, and execute fixed historical tools without model requests. Reference the source baseline, save only actually completed steps, and use definite historical exit codes to control continuation while retaining actual evidence.
+- [ ] Verify: Independently check actual Replay results against the pinned source; no Verify command is implemented yet.
 - [ ] Resume: Restore agent context and a runnable environment, then create an independent branch from a historical node while preserving the original trace.
 - [ ] Incremental storage management: Merge and split storage increments while retaining historical nodes.
 - [ ] Portable backups and migration across machines.

@@ -15,7 +15,7 @@ from replay_validation import fixed_response
 
 from palinreplay.agents import AgentTask
 from palinreplay.agents.mini import MiniSweAgent, load_native
-from palinreplay.core.models import Execution, Node, Operation, Step
+from palinreplay.core.models import Execution, Node, Operation, Run, Step
 from palinreplay.preload.base import open_preload
 from palinreplay.record.calls import read_call
 from palinreplay.record.restore import load_restore_materials
@@ -28,7 +28,6 @@ from palinreplay.sandbox.client import connect_docker
 from palinreplay.storage.btrfs.models import BtrfsRuntime
 from palinreplay.storage.btrfs.pool import BtrfsPool
 from palinreplay.storage.io import write_json
-from palinreplay.storage.rootfs import SCOPE
 from palinreplay.storage.store import RecordStore
 
 DIRECTORY = "/opt/palin-replay-service-fixture"
@@ -396,13 +395,14 @@ def replay_once(source, output, client):
     with no_model_calls(), patch.object(RestoredExecutor, "execute", observe):
         report = run_replay(source / "record", "C2", "C4",
                             run_id=identity["selection"]["run"]["run_id"],
-                            output=output, client=client, validation_mode="strict")
+                            output=output, client=client)
     write_json(output / "execution-check.json", {
         "source_selection_sha256": identity["selection"]["selection_sha256"],
         "executed_requests": executed, "actual_model_calls": 0,
     })
     assert report["source"]["selection_sha256"] == identity["selection"]["selection_sha256"]
-    assert report["mappings"][0]["source_index"] == 2
+    assert report["source_start"]["index"] == 2
+    assert report["mappings"][0]["source_index"] == report["mappings"][0]["index"] == 3
     assert len(executed) == 1 and executed[0]["action"]["command"] == REQUEST_COMMAND
     assert report["statistics"]["actual_tool_executions"] == 1
     assert report["statistics"]["actual_model_calls"] == 0
@@ -414,62 +414,29 @@ def check_r1(source, replay, client):
     source, replay = Path(source), Path(replay)
     result = {"status": "failed"}
     try:
+        report = json.loads((replay / "report.json").read_text())
         with RecordStore.open(source / "record") as origin, \
                 RecordStore.open(replay / "record") as current:
             expected = load_restore_materials(origin, "C2")
-            actual = load_restore_materials(current, "C0")
-            expected_context = origin.read_json(expected.node.context)
-            actual_context = current.read_json(actual.node.context)
-            historical_position = origin.read_json(expected.node.input_position)
-            config = current.read_json(actual.run.config)
-            inherited = {key: value for key, value in actual_context.items() if key != "replay"}
+            run = current.get(Run, report["run_id"])
+            config = current.read_json(run.config)
+            prefix = config["replay"]["source_start"]
             checks = {
-                "inherited_context": inherited == expected_context,
-                "messages": actual_context["messages"] == expected_context["messages"],
+                "context": prefix["context"] == expected.context,
+                "input_position": prefix["input_position"] == expected.input_position,
                 "inherited_config": {key: value for key, value in config.items() if key != "replay"}
                                     == origin.read_json(expected.run.config),
-                "counters": actual_context["counters"] == expected_context["counters"],
-                "historical_input_position": actual_context["replay"] == {
-                    "historical_input_position": historical_position,
-                    "historical_answer_supplies": 0, "actual_model_calls": 0,
-                    "actual_model_cost": 0,
-                },
-                "local_input_position": current.read_json(actual.node.input_position) == {
-                    "next_message": len(expected_context["messages"]), "adoptions": [],
-                },
-                "independent_run": actual.run.run_id != expected.run.run_id
-                                   and actual.run.source_node_id is None,
+                "independent_run": run.run_id != expected.run.run_id and run.source_node_id is None,
                 "source_identity": config["replay"]["source"]
                                    == json.loads((source / "identity.json").read_text())["selection"],
-                "starts_before_C3": len(actual_context["messages"])
-                                    < len(origin.read_json(load_restore_materials(origin, "C3")
-                                                           .node.context)["messages"]),
+                "no_local_start": all(node.index > 2 for node in current.list(Node)),
             }
-            result["context_checks"] = checks
             assert all(checks.values()), checks
-            assert expected.snapshot.location == actual.snapshot.location
-            with BtrfsPool(client, expected.snapshot.location) as pool:
-                pool.verify(expected.snapshot)
-                pool.verify(actual.snapshot)
-                compared = pool.command("verify", source=expected.snapshot.name,
-                                        workspace=actual.snapshot.name, scope=SCOPE,
-                                        oracle_sha256=expected.runtime.c0_oracle_sha256)
-                roots = pool.container.exec_run(["python3", "-B", "-c",
-                    "import json, os, stat; "
-                    f"paths = {[f'/pool/{s.name}' for s in (expected.snapshot, actual.snapshot)]!r}; "
-                    "print(json.dumps([{'type': stat.S_IFMT(os.stat(p).st_mode), "
-                    "'mode': stat.S_IMODE(os.stat(p).st_mode), 'uid': os.stat(p).st_uid, "
-                    "'gid': os.stat(p).st_gid} for p in paths]))"])
-                assert roots.exit_code == 0, roots.output
-                source_root, actual_root = json.loads(roots.output)
-                assert source_root == actual_root
-                result.update(files=compared, root_attributes={
-                    "source": source_root, "actual": actual_root, "equal": True,
-                })
-            result.update(status="passed", source_node_id=expected.node.node_id,
-                          node_id=actual.node.node_id,
+            assert report["r1"]["status"] == "passed" and report["r1"]["files"]["equal"]
+            result.update(report["r1"], context_checks=checks,
+                          source_node_id=expected.node.node_id,
                           source_snapshot=expected.snapshot.model_dump(mode="json"),
-                          actual_snapshot=actual.snapshot.model_dump(mode="json"))
+                          preparation_state_captured=False)
             return result
     except Exception as error:
         result.update(error_type=type(error).__name__, error=str(error))
@@ -494,7 +461,6 @@ def classify_result(source_tool, actual_tool, report, r1):
                                     and response(source_tool) == {"status": 200, "body": BODY},
         "r1_passed": r1.get("status") == "passed"
                      and r1.get("files", {}).get("equal") is True
-                     and r1.get("root_attributes", {}).get("equal") is True
                      and bool(r1.get("context_checks"))
                      and all(r1["context_checks"].values()),
         "connection_refused": actual_tool.get("definitive") is True
@@ -502,15 +468,15 @@ def classify_result(source_tool, actual_tool, report, r1):
                               and actual_tool["exit_code"] != 0
                               and observed.get("error") == "ConnectionRefusedError"
                               and observed.get("errno") == 111,
-        "expected_replay_difference": report.get("status") == "difference"
-                                      and report.get("stop_reason") == "tool-result"
-                                      and report.get("incomplete_step") is False,
+        "expected_replay_stop": report.get("execution_status") == "stopped"
+                                and report.get("stop_reason") == "exit-code"
+                                and report.get("incomplete_step") is False,
         "single_C3_step": len(report.get("steps", [])) == 1
                           and report["steps"][0]["source_index"] == 3
                           and len(report["steps"][0]["tools"]) == 1
-                          and report["steps"][0]["tools"][0]["definitive"] is True,
+                          and report["steps"][0]["tools"][0]["actual_exit_code"] == 1,
         "C4_not_executed": [(m["source_index"], m["index"]) for m in report.get("mappings", [])]
-                           == [(2, 0), (3, 1)],
+                           == [(3, 3)],
         "one_historical_tool": report.get("statistics", {}).get("actual_tool_executions") == 1
                                and report["statistics"]["historical_answer_supplies"] == 1,
         "no_model_calls_or_cost": report.get("statistics", {}).get("actual_model_calls") == 0
@@ -531,22 +497,22 @@ def check_difference(source, replay):
                 RecordStore.open(replay / "record") as current:
             c3 = load_restore_materials(origin, "C3")
             nodes = sorted(current.list(Node), key=lambda node: node.index)
-            assert [node.index for node in nodes] == [0, 1]
-            source_tool, actual_tool = tool_fact(origin, c3.node), tool_fact(current, nodes[1])
+            assert [node.index for node in nodes] == [3]
+            source_tool, actual_tool = tool_fact(origin, c3.node), tool_fact(current, nodes[0])
             result.update(classify_result(source_tool, actual_tool, report, r1),
                           source_tool=source_tool, actual_tool=actual_tool)
             assert actual_tool["request"] == source_tool["request"]
             assert actual_tool["request"]["action"]["command"] == REQUEST_COMMAND
             assert report["steps"][0]["source_node_id"] == c3.node.node_id
-            assert report["steps"][0]["node_id"] == nodes[1].node_id
-            assert report["first_difference"]["execution_id"] == actual_tool["execution_id"]
-            assert report["first_difference"]["source_execution_id"] == source_tool["execution_id"]
+            assert report["steps"][0]["node_id"] == nodes[0].node_id
+            assert report["exit_mismatch"]["execution_id"] == actual_tool["execution_id"]
+            assert report["exit_mismatch"]["source_execution_id"] == source_tool["execution_id"]
             tools = [operation for operation in current.list(Operation) if operation.kind == "tool"]
             assert len(tools) == 1
             assert len(current.list(Execution)) == 2
             assert len(current.list(Step)) == 1
             accepted = actual_tool["accepted"]
-            context = current.read_json(nodes[1].context)
+            context = current.read_json(nodes[0].context)
             assert context["messages"][accepted["start"]:accepted["stop"]] == accepted["messages"]
             assert len(accepted["messages"]) == 1
             observation = accepted["messages"][0]
@@ -649,7 +615,7 @@ def main(preload, output):
             summary["replays"].append({
                 "output": str(replay), "status": difference["status"], "run_id": report["run_id"],
                 "source_selection_sha256": report["source"]["selection_sha256"],
-                "replay_status": report["status"], "stop_reason": report["stop_reason"],
+                "execution_status": report["execution_status"], "stop_reason": report["stop_reason"],
                 "incomplete_step": report["incomplete_step"], "r1_paths": r1["files"]["paths"],
                 "source_result": {key: difference["source_tool"][key]
                                   for key in ("exit_code", "output")},

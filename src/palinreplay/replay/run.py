@@ -1,129 +1,86 @@
-"""Execute a pinned history, retaining comparisons and optionally continuing differences."""
+"""Execute pinned history, retaining actual evidence and checking exit codes only."""
 
-from palinreplay.core.models import State
+from palinreplay.core.models import Step
 from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressReporter
-from palinreplay.replay.compare import compare_tool, is_mtime_only_difference
+from palinreplay.record.calls import read_call
+from palinreplay.replay.compare import compare_exit_codes
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.replay.step import execute_step
-from palinreplay.storage.btrfs.models import Snapshot
-from palinreplay.storage.rootfs import SCOPE
 
 
 class PartialDifference(Exception):
     def __init__(self, comparison):
-        super().__init__("tool differs before the declared group is complete")
+        super().__init__("exit code differs before the declared group is complete")
         self.comparison = comparison
 
 
-def node_snapshot(store, node):
-    return Snapshot.model_validate(store.read_json(store.get(State, node.state_id).manifest))
-
-
-def _difference(report, comparison, reason):
-    comparison["difference_reason"] = reason
-    report["validation_status"] = "difference"
-    report.setdefault("first_difference", comparison)
-
-
-def preparation_comparison(store, executor, source, source_node, node, *, report):
-    """Compare the verified R1 baseline with the read-only, prepared C0."""
-    actual = node_snapshot(store, node)
-    delta = executor.pool.changes(source, actual)
-    files = {
-        **executor.pool._file_command(
-            "compare_candidates", source=source.name, actual=actual.name,
-            candidates=delta["candidates"], scope=SCOPE,
-        ),
-        "source_node_id": source_node.node_id, "source_index": source_node.index,
-        "node_id": node.node_id, "index": node.index,
-        "source_snapshot": source.model_dump(mode="json"),
-        "actual_snapshot": actual.model_dump(mode="json"), "actual_delta": delta,
-    }
-    report["preparation_files"] = files
-    if not files["equal"]:
-        _difference(report, files, "service-preparation")
-    return files
-
-
 def replay_range(
-    recorder, context, executor, materials, compare_files=None, *, report=None, stats=None,
-    validation_mode="lenient",
+    recorder, context, executor, materials, *, report=None, stats=None,
     progress: ProgressCallback | None = None,
 ):
     stats = stats or ReplayStats()
     notify = ProgressReporter(progress)
-    plan = materials.plan
-    mappings = [{"source_node_id": plan.start.node_id, "source_index": plan.start.index,
-                 "node_id": recorder.current_node.node_id, "index": 0}]
     if report is None:
         report = {}
-    report.update(status="failed", execution_status="failed",
-                  validation_status="difference" if "first_difference" in report else "incomplete",
-                  validation_mode=validation_mode, incomplete_step=False,
-                  mappings=mappings, steps=[], statistics=stats.data)
-    notify(ProgressEvent("committed", step=0, source_step=plan.start.index,
-                         total_steps=len(materials.steps)))
+    report.update(execution_status="failed", incomplete_step=False,
+                  mappings=[], steps=[], actual_node_count=0, completed_steps=0, statistics=stats.data)
 
-    def stop(reason):
-        completed = len(mappings) == len(materials.steps) + 1
-        report.update(status="difference", execution_status="completed" if completed else "stopped")
-        if not completed:
-            report["stop_reason"] = reason
+    def stop():
+        report.update(execution_status="stopped", stop_reason="exit-code")
         return report
 
     for index, history in enumerate(materials.steps):
-        previous = recorder.current_node
-        tool_comparisons = []
+        tools = []
         location = {"source_node_id": history.node.node_id, "source_index": history.node.index}
-        entry = {**location, "tools": tool_comparisons,
-                 "starting_divergent": report["validation_status"] == "difference"}
+        entry = {**location, "tools": tools}
         report["steps"].append(entry)
+        report["position"] = {**location, "index": history.node.index}
         report["incomplete_step"] = True
-        notify(ProgressEvent("replaying", source_step=history.node.index, step=index + 1))
+        notify(ProgressEvent("replaying", source_step=history.node.index, step=history.node.index,
+                             completed_steps=index, total_steps=len(materials.steps)))
 
         def on_result(i, tool, call, result, last):
-            compared = {**compare_tool(tool, result), **location,
-                        "tool_index": i, "execution_id": call.execution_id}
-            tool_comparisons.append(compared)
-            if not compared["definitive"]:
-                raise RuntimeError("Replay tool result is not definitive")
+            trace = read_call(recorder.store, call.execution_id)
+            actual_step = recorder.store.get(Step, trace.operation.step_id)
+            compared = {
+                **location, "actual_index": actual_step.index, "step_id": actual_step.step_id,
+                "tool_index": i, "tool_ordinal": i + 1, "tool_call_id": trace.operation.tool_call_id,
+                "operation_id": trace.operation.operation_id, "execution_id": call.execution_id,
+                "source_operation_id": tool.source["operation_id"],
+                "source_execution_id": tool.source["execution_id"],
+                "source_result_ref": tool.source["raw_ref"],
+                "request_ref": trace.execution.request.model_dump(mode="json"),
+                "result_ref": trace.events[1].payload.model_dump(mode="json"),
+                "result_details_ref": trace.events[1].details.model_dump(mode="json"),
+                "source_exit_code": tool.details["backend"]["decoded"]["returncode"],
+                "actual_exit_code": result.exit_code,
+            }
+            tools.append(compared)
+            report["position"] = {**location, "index": actual_step.index,
+                                  "step_id": actual_step.step_id, "tool_index": i}
+            compared.update(compare_exit_codes(compared["source_exit_code"], result.exit_code))
             if not compared["equal"]:
-                _difference(report, compared, "tool-result")
+                report.setdefault("exit_mismatch", compared)
+                report["stop_reason"] = "exit-code"
                 if not last:
                     raise PartialDifference(compared)
 
         try:
             node, _ = execute_step(recorder, context, executor, history, on_result=on_result, stats=stats)
         except PartialDifference:
-            stop("tool-result")
-            recorder.end_incomplete("Replay tool difference", details={"replay": report})
+            stop()
+            recorder.end_incomplete("Replay exit code differs", details={"replay": report})
             return report
-        mappings.append({**location, "node_id": node.node_id, "index": node.index})
+        report["mappings"].append({**location, "node_id": node.node_id, "index": node.index})
         entry["node_id"] = node.node_id
-        report["incomplete_step"] = False
-        if any(not c["equal"] for c in tool_comparisons):
-            notify(ProgressEvent("committed", source_step=history.node.index, step=node.index))
-            return stop("tool-result")
-        if compare_files is None:
-            raise ValueError("Replay requires incremental file comparison")
-        notify(ProgressEvent("verifying", source_step=history.node.index, step=node.index))
-        files = {**compare_files(index, previous, node), **location}
-        entry["files"] = files
-        if not files["equal"]:
-            _difference(report, files, "file-state")
-        stats.files(files)
-        notify(ProgressEvent("committed", source_step=history.node.index, step=node.index))
-        if not files["equal"] and (validation_mode == "strict" or not is_mtime_only_difference(files)):
-            return stop("file-state")
-    validation = "difference" if "first_difference" in report else "match"
-    report.update(status=validation, execution_status="completed", validation_status=validation)
+        for tool in tools:
+            tool["node_id"] = node.node_id
+        report.update(incomplete_step=False, actual_node_count=index + 1, completed_steps=index + 1)
+        report["position"]["node_id"] = node.node_id
+        stats.data["completed_steps"] += 1
+        notify(ProgressEvent("committed", source_step=history.node.index, step=node.index,
+                             completed_steps=index + 1, total_steps=len(materials.steps)))
+        if any(not tool["equal"] for tool in tools):
+            return stop()
+    report.update(execution_status="completed")
     return report
-
-
-def btrfs_comparison(store, executor, source_snapshots):
-    def compare(index, previous, node):
-        return executor.pool.compare_incremental(
-            source_snapshots[index], source_snapshots[index + 1],
-            node_snapshot(store, previous), node_snapshot(store, node),
-        )
-    return compare

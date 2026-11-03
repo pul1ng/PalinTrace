@@ -3,14 +3,17 @@
 from pathlib import Path
 
 from palinreplay.core.errors import IntegrityError
+from palinreplay.core.models import Failure, RunEnd
 from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressReporter
+from palinreplay.core.replay_outcome import failure_evidence
 from palinreplay.record.restore import load_restore_materials, restore_r1_node
 from palinreplay.replay.context import ReplayContext
 from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.initial import initial_recorder, validate_r1
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
-from palinreplay.replay.run import btrfs_comparison, preparation_comparison, replay_range
+from palinreplay.replay.report import exception_evidence, execution_facts, final_execution_status
+from palinreplay.replay.run import replay_range
 from palinreplay.replay.service_config import load_services
 from palinreplay.replay.services import PreparationJournal, prepare_services
 from palinreplay.replay.stats import ReplayStats
@@ -18,24 +21,25 @@ from palinreplay.sandbox.client import connect_docker, docker_endpoint
 from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, Snapshot
 from palinreplay.storage.btrfs.verification import capture_info
 from palinreplay.storage.io import outside_store, write_json
+from palinreplay.storage.replay_finalization import PROTOCOL, publish, receipt_path
 from palinreplay.storage.store import RecordStore
 
 
 def run_replay(
-    source, start, end=None, *, run_id=None, output, client=None, validation_mode="lenient",
+    source, start, end=None, *, run_id=None, output, client=None,
     progress: ProgressCallback | None = None, services_config: str | Path | None = None,
 ):
-    if validation_mode not in ("strict", "lenient"):
-        raise ValueError("validation_mode must be 'strict' or 'lenient'")
     services = load_services(services_config) if services_config is not None else None
     source, output = Path(source).absolute(), Path(output).absolute()
     outside_store(source, output)
     if source.resolve().is_relative_to(output.resolve()):
         raise ValueError("output cannot contain the source Record store")
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
-    report = {"schema_version": "palinreplay.replay-report.v1", "status": "failed",
-              "execution_status": "failed", "validation_status": "incomplete",
-              "validation_mode": validation_mode,
+    report = {"schema_version": "palinreplay.replay-report.v2", "execution_status": "failed",
+              "initial_state_mode": "source-reference-v1", "node_numbering": "source-index-v1",
+              "execution_policy": "historical-exit-code-v1", "preparation_state_captured": False,
+              "actual_node_count": 0, "completed_steps": 0, "mappings": [], "steps": [],
+              "incomplete_step": False, "incomplete_steps": [], "last_node": None,
               "phase": "preflight", "source_store": str(source), "output": str(output),
               "cleanup_confirmed": False, "cleanup_errors": []}
     stats = ReplayStats()
@@ -45,6 +49,65 @@ def run_replay(
     own_client = client is None
     primary = None
     notify = ProgressReporter(progress)
+    report["outcome_evidence"] = {"faults": [], "cancellations": []}
+    closes, publications = {}, {}
+    binding = None
+
+    def remember(error):
+        for key, values in exception_evidence(error).items():
+            report["outcome_evidence"][key].extend(values)
+
+    def persist_fault(phase, error, *, category="cleanup", resource=None):
+        remember(error)
+        # Cleanup and publication interrupts are also independent framework faults.
+        report["outcome_evidence"]["faults"].append({
+            "phase": phase, "resource": resource,
+            "error_type": type(error).__name__, "error": str(error),
+        })
+        if store is not None and recorder is not None and not store._closed:
+            try:
+                store.save(Failure(
+                    run_id=recorder.run.run_id, attempt_id=recorder.attempt.attempt_id,
+                    category=category, details=store.put_json({
+                        "phase": phase, "resource": resource,
+                        "error_type": type(error).__name__, "error": str(error),
+                    }),
+                ))
+            except BaseException as diagnostic:
+                remember(diagnostic)
+                report.setdefault("diagnostic_errors", []).append(
+                    f"{type(diagnostic).__name__}: {diagnostic}"
+                )
+
+    def write_report():
+        report["execution_status"] = final_execution_status(report)
+        try:
+            write_json(output / "report.json", report, replace=True)
+        except BaseException as error:
+            publications["report.json"] = False
+            report.setdefault("report_errors", []).append(f"report.json: {type(error).__name__}: {error}")
+            persist_fault("report-persistence", error, resource="report.json")
+            return False
+        else:
+            publications.setdefault("report.json", True)
+            return True
+
+    def cancelled_during_cleanup(error, *, persist=True):
+        nonlocal primary
+        remember(error)
+        detail = {"phase": "replay-cleanup", "error_type": type(error).__name__, "error": str(error)}
+        report.setdefault("cancellation", detail)
+        if primary is None:
+            primary = error
+            report.update(error_type=type(error).__name__, error=str(error))
+        if persist and store is not None and recorder is not None:
+            try:
+                store.save(Failure(run_id=recorder.run.run_id, attempt_id=recorder.attempt.attempt_id,
+                                   category="execution", details=store.put_json(detail)))
+            except BaseException as diagnostic:
+                remember(diagnostic)
+                report["termination_error"] = f"{type(diagnostic).__name__}: {diagnostic}"
+
     try:
         notify(ProgressEvent("preparing"))
         with RecordStore.open(source) as origin, origin.snapshot():
@@ -63,25 +126,30 @@ def run_replay(
                     origin.verify_artifact(ref)
         stats.inherit(materials.context)
         report["source"] = plan.provenance()
+        report["source_start"] = {
+            "source_store": str(source), "run_id": plan.run.run_id, "index": plan.start.index,
+            "node_id": plan.start.node_id, "state_id": plan.start.state_id, "reference": True,
+        }
+        report["source_start_index"], report["source_end_index"] = plan.start.index, plan.end.index
+        report["selected_steps"] = len(materials.steps)
         context = ReplayContext(materials)
         if client is None:
             notify(ProgressEvent("connecting"))
             client = connect_docker(600)
         report["phase"] = "restore"
-        notify(ProgressEvent("restoring", source_step=plan.start.index, step=0))
+        notify(ProgressEvent("restoring", source_step=plan.start.index, completed_steps=0))
         with stats.timed("restore"), RecordStore.open(source) as origin:
             restored = restore_r1_node(origin, plan.start.node_id, client=client,
                                        docker_host=docker_endpoint(),
                                        report_path=output / "restore.json")
         executor = RestoredExecutor(restored, baseline.runtime)
-        for snapshot in snapshots:
-            executor.pool.verify(snapshot)
+        executor.pool.verify(baseline.snapshot)
         for history in materials.steps:
             for tool in history.tools:
                 if tuple(tool.request["interpreter"]) != tuple(executor.runtime.launch.shell):
                     raise ValueError("historical interpreter differs from the restored launch shell")
         report["phase"] = "r1-validation"
-        notify(ProgressEvent("verifying", source_step=plan.start.index, step=0))
+        notify(ProgressEvent("verifying", source_step=plan.start.index, completed_steps=0))
         report["r1"] = validate_r1(materials, executor, stats=stats)
         preparation = None
         if services is not None:
@@ -89,34 +157,42 @@ def run_replay(
             journal = PreparationJournal(output / "preparation.json", services)
             report["preparation"] = journal.data
             notify(ProgressEvent("service-preparation"))
-            preparation = prepare_services(executor, services, journal)
+            with stats.timed("preparation"):
+                preparation = prepare_services(executor, services, journal)
         store = RecordStore.create(output / "record")
-        report["phase"] = "initial-boundary"
-        recorder = initial_recorder(store, materials, executor, context.export, stats=stats,
-                                    validation_mode=validation_mode, preparation=preparation)
+        report["phase"] = "source-initialization"
+        recorder = initial_recorder(store, materials, executor, context.export,
+                                    r1=report["r1"], preparation=preparation)
         report["run_id"] = recorder.run.run_id
-        if preparation is not None:
-            files = preparation_comparison(store, executor, snapshots[0], plan.start,
-                                           recorder.current_node, report=report)
-            stats.files(files)
-            write_json(output / "preparation-files.json", files)
+        report["finalization"] = {
+            "protocol": PROTOCOL, "confirmation": "receipt-required",
+            "receipt": "record/" + receipt_path(store.root, recorder.attempt).name,
+        }
+        notify(ProgressEvent("source-reference", source_step=plan.start.index,
+                             completed_steps=0, total_steps=len(materials.steps)))
         report["phase"] = "execute"
-        replay_range(recorder, context, executor, materials,
-                     btrfs_comparison(store, executor, snapshots), report=report, stats=stats,
-                     validation_mode=validation_mode, progress=notify)
+        replay_range(recorder, context, executor, materials, report=report, stats=stats,
+                     progress=notify)
         if recorder.phase == "ready":
-            recorder.finish("Replay " + report["status"], details={"replay": report})
+            recorder.finish("Replay " + report["execution_status"], details={"replay": report})
         report["phase"] = "finished"
     except BaseException as error:
         primary = error
-        report.update(status="failed", execution_status="failed",
+        remember(error)
+        report.update(execution_status="cancelled" if isinstance(error, KeyboardInterrupt) else "failed",
                       error_type=type(error).__name__, error=str(error))
-        report.pop("stop_reason", None)
+        if isinstance(error, KeyboardInterrupt):
+            report["cancellation"] = {"phase": report["phase"], "error_type": type(error).__name__,
+                                      "error": str(error)}
+        if error.__cause__ is not None:
+            report["cause"] = {"error_type": type(error.__cause__).__name__,
+                               "error": str(error.__cause__)}
         if journal is not None and journal.data["status"] == "preparing":
             journal.data.update(status="failed", error_type=type(error).__name__, error=str(error))
             try:
                 journal.save()
             except BaseException as diagnostic:
+                remember(diagnostic)
                 report["preparation_error"] = f"{type(diagnostic).__name__}: {diagnostic}"
                 error.add_note(f"preparation evidence could not be saved: {diagnostic!r}")
         if hasattr(error, "r1_report"):
@@ -130,31 +206,133 @@ def run_replay(
             try:
                 recorder.__exit__(type(error), error, error.__traceback__)
             except BaseException as diagnostic:
+                remember(diagnostic)
                 report["termination_error"] = f"{type(diagnostic).__name__}: {diagnostic}"
                 error.add_note(f"record termination also failed: {diagnostic!r}")
     finally:
         try:
             notify(ProgressEvent("cleanup"))
+        except KeyboardInterrupt as error:
+            cancelled_during_cleanup(error)
         finally:
-            for name, resource in (("recorder", recorder), ("restore", restored), ("store", store),
+            for name, resource in (("recorder", recorder), ("restore", restored),
                                    ("client", client if own_client else None)):
-                if resource is not None:
-                    try:
-                        resource.close()
-                    except BaseException as error:
-                        report["cleanup_errors"].append(f"{name}: {type(error).__name__}: {error}")
+                if resource is None:
+                    continue
+                try:
+                    resource.close()
+                    closes[name] = True
+                except BaseException as error:
+                    closes[name] = False
+                    report["cleanup_errors"].append(f"{name}: {type(error).__name__}: {error}")
+                    if isinstance(error, KeyboardInterrupt):
+                        cancelled_during_cleanup(error)
+                    persist_fault("replay-cleanup", error, resource=name)
+            if recorder is not None:
+                try:
+                    facts = execution_facts(recorder)
+                    for key, values in facts.pop("outcome_evidence").items():
+                        report["outcome_evidence"][key].extend(values)
+                    report.update(facts)
+                    stats.data["historical_answer_supplies"] = report["history_usage"]["historical_answer_supplies"]
+                except BaseException as error:
+                    report["record_report_error"] = f"{type(error).__name__}: {error}"
+                    persist_fault("record-report", error)
+            if primary is not None:
+                notes = [*getattr(primary, "__notes__", ()),
+                         *getattr(primary.__cause__, "__notes__", ())]
+                if notes:
+                    report["error_notes"] = notes
             report["cleanup_confirmed"] = not report["cleanup_errors"]
-            if report["cleanup_errors"]:
-                report.update(status="failed", execution_status="failed")
-                report.setdefault("error", "resource cleanup failed")
-                report.pop("stop_reason", None)
             if "r1" in report:
-                write_json(output / "r1-validation.json", report["r1"])
-            write_json(output / "report.json", report, replace=True)
+                try:
+                    write_json(output / "r1-validation.json", report["r1"])
+                    publications["r1-validation.json"] = True
+                except BaseException as error:
+                    publications["r1-validation.json"] = False
+                    report.setdefault("report_errors", []).append(
+                        f"r1-validation.json: {type(error).__name__}: {error}"
+                    )
+                    persist_fault("report-persistence", error, resource="r1-validation.json")
+            write_report()
+            if recorder is not None:
+                try:
+                    ends = store.list(RunEnd, run_id=recorder.run.run_id)
+                    binding = {
+                        "schema_version": "palinreplay.replay-finalization.v1",
+                        "run_id": recorder.run.run_id, "config": recorder.run.config,
+                        "attempt": recorder.attempt, "run_end": ends[-1] if ends else None,
+                        "failure_ids": [f.failure_id for f in store.list(Failure, run_id=recorder.run.run_id)],
+                    }
+                except BaseException as error:
+                    persist_fault("finalization-binding", error)
+            if store is not None:
+                try:
+                    store.close()
+                    closes["store"] = True
+                except BaseException as error:
+                    closes["store"] = False
+                    report["cleanup_errors"].append(f"store: {type(error).__name__}: {error}")
+                    if isinstance(error, KeyboardInterrupt):
+                        cancelled_during_cleanup(error, persist=False)
+                    persist_fault("replay-cleanup", error, resource="store")
+                    if not store._closed:
+                        try:
+                            if binding is not None:
+                                binding["failure_ids"] = [f.failure_id for f in store.list(
+                                    Failure, run_id=recorder.run.run_id)]
+                        except BaseException as diagnostic:
+                            remember(diagnostic)
+                        try:
+                            # One final close of the existing connection, no new SQLite writer.
+                            store._db.close()
+                            store._closed = True
+                        except BaseException as diagnostic:
+                            remember(diagnostic)
+            report["cleanup_confirmed"] = not report["cleanup_errors"]
+            if not write_report():
+                # One bounded update can expose a transient write fault in the
+                # external report; prior publication failures remain failures.
+                write_report()
+            report["execution_status"] = final_execution_status(report)
+            if binding is not None:
+                try:
+                    payload = {**binding, "execution_status": report["execution_status"],
+                               **report["outcome_evidence"], "resource_closes": closes,
+                               "publications": publications}
+                    publication = publish(store.root, payload)
+                except BaseException as error:
+                    remember(error)
+                    publication = {
+                        "status": "unconfirmed", "errors": [f"{type(error).__name__}: {error}"],
+                        "failure": {"phase": "receipt-publication",
+                                    "error_type": type(error).__name__, "error": str(error)},
+                    }
+                if publication["status"] != "confirmed":
+                    detail = publication.get("failure", {
+                        "phase": "receipt-publication", "error_type": "ReceiptPublicationError",
+                        "error": "required receipt publication was not confirmed",
+                    })
+                    evidence = failure_evidence("cleanup", detail)
+                    for key, values in evidence.items():
+                        report["outcome_evidence"][key].extend(values)
+                    if evidence["cancellations"]:
+                        report.setdefault("cancellation", detail)
+                    report["receipt_publication"] = publication
+                    report.setdefault("report_errors", []).extend(publication.get("errors", ()))
+                    report["execution_status"] = "failed"
+                    report["finalization"]["confirmation"] = "unconfirmed"
+                    # A failed publication has no confirmed terminal receipt.
+                    write_report()
+    report["execution_status"] = final_execution_status(report)
+    try:
+        notify(ProgressEvent("finished", status=report["execution_status"],
+                             label=report["execution_status"].upper()))
+    except KeyboardInterrupt:
+        # Resources and the final report are already closed/published. A terminal
+        # observer cannot replace the durable outcome after this boundary.
+        pass
     if primary is not None and not isinstance(primary, Exception):
-        notify(ProgressEvent("finished",
-                             status="cancelled" if isinstance(primary, KeyboardInterrupt) else "failed"))
-        raise primary
-    notify(ProgressEvent("finished", status=report["execution_status"],
-                         label=f"{report['execution_status'].upper()} / {report['validation_status'].upper()}"))
+        if not isinstance(primary, KeyboardInterrupt) or report["execution_status"] == "cancelled":
+            raise primary
     return report
