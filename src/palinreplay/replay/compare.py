@@ -3,6 +3,18 @@
 import hashlib
 
 
+def compare_exit_codes(expected, actual):
+    """Decide continuation from definite integer statuses, without inspecting outputs."""
+    if type(expected) is not int or type(actual) is not int:
+        raise RuntimeError("Replay requires a definitive integer exit code")
+    return {
+        "policy": "historical-exit-code-v1",
+        "equal": expected == actual,
+        "source_exit_code": expected,
+        "actual_exit_code": actual,
+    }
+
+
 def compare_tool(historical, actual):
     expected_code = historical.details["backend"]["decoded"]["returncode"]
     definite = type(actual.exit_code) is int and isinstance(actual.output, bytes)

@@ -4,11 +4,26 @@ from types import SimpleNamespace
 
 import pytest
 
-from palinreplay.replay.compare import compare_tool, is_mtime_only_difference
+from palinreplay.replay.compare import compare_exit_codes, compare_tool, is_mtime_only_difference
 from palinreplay.sandbox.base import ExecResult
 from palinreplay.storage.btrfs.incremental import compare_candidates
 from palinreplay.storage.rootfs import SCOPE
 from tests.helpers.replay import mtime_difference
+
+
+@pytest.mark.parametrize("expected,actual,equal", [(0, 0, True), (1, 1, True), (0, 1, False),
+                                                   (1, 0, False), (1, 2, False)])
+def test_exit_only_policy(expected, actual, equal):
+    result = compare_exit_codes(expected, actual)
+    assert result == {"policy": "historical-exit-code-v1", "equal": equal,
+                      "source_exit_code": expected, "actual_exit_code": actual}
+
+
+@pytest.mark.parametrize("code", [None, True, False, "0", 0.0])
+@pytest.mark.parametrize("side", ["expected", "actual"])
+def test_exit_only_policy_rejects_unknown_or_noninteger_status(code, side):
+    with pytest.raises(RuntimeError, match="definitive integer"):
+        compare_exit_codes(code if side == "expected" else 0, code if side == "actual" else 0)
 
 
 @pytest.mark.parametrize("old,new,expected", [(0, 1, False), (1, 0, False), (1, 2, False), (3, 3, True)])
