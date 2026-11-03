@@ -237,7 +237,10 @@ def tool_fact(store, node):
     }
 
 
-def record_source(preload, output, client):
+def record_source(preload, output, client, *, decisions=None, files=None):
+    """Record real tools/snapshots; optional decisions/files support independent fixtures."""
+    decisions = commands() if decisions is None else list(decisions)
+    files = fixture_files() if files is None else files
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     report = {"status": "failed", "fixed_response_supplies": 0,
@@ -272,7 +275,7 @@ def record_source(preload, output, client):
                 )
                 backend = BtrfsStateBackend(sandbox, public_env_keys=launch.environment,
                                             runtime=runtime)
-                replies = iter(fixed_response(cmd, i) for i, cmd in enumerate(commands(), 1))
+                replies = iter(fixed_response(cmd, i) for i, cmd in enumerate(decisions, 1))
 
                 def completion(**request):
                     report["fixed_response_supplies"] += 1
@@ -285,25 +288,28 @@ def record_source(preload, output, client):
                                       "cost_tracking": "ignore_errors",
                                       "model_kwargs": {"num_retries": 0}},
                         agent_config={"system_template": "Fixed HTTP service fixture",
-                                      "instance_template": "{{task}}", "step_limit": 5,
+                                      "instance_template": "{{task}}",
+                                      "step_limit": len(decisions) + 1,
                                       "cost_limit": 0},
                         completion=completion, retry_attempts=1,
                     )
                     with no_model_calls():
                         agent.run(AgentTask("astropy-service-fixture", "Execute the fixed decisions."))
                     nodes = sorted(store.list(Node), key=lambda node: node.index)
-                    assert [node.index for node in nodes] == list(range(5))
-                    assert report["fixed_response_supplies"] == 4
+                    assert [node.index for node in nodes] == list(range(len(decisions) + 1))
+                    assert report["fixed_response_supplies"] == len(decisions)
                     facts = [tool_fact(store, node) for node in nodes[1:]]
-                    assert all(fact["exit_code"] == 0 for fact in facts), facts
-                    assert json.loads(facts[2]["output"]) == {"status": 200, "body": BODY}
-                    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in facts[3]["output"]
+                    assert all(fact["definitive"] and fact["exit_code"] == 0 for fact in facts), facts
+                    request = next(fact for fact in facts
+                                   if fact["request"]["action"]["command"] == REQUEST_COMMAND)
+                    assert json.loads(request["output"]) == {"status": 200, "body": BODY}
+                    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in facts[-1]["output"]
                     c2 = load_restore_materials(store, nodes[2].node_id)
                     check = pool.container.exec_run(["python3", "-B", "-c",
                         "from pathlib import Path; "
                         f"root = Path('/pool/{c2.snapshot.name}{DIRECTORY}'); "
                         f"assert all((root/name).read_text() == body "
-                        f"for name, body in {fixture_files()!r}.items())"])
+                        f"for name, body in {files!r}.items())"])
                     assert check.exit_code == 0, check.output
                     report.update(status="recorded", run_id=nodes[0].run_id,
                                   node_ids=[node.node_id for node in nodes],
