@@ -295,6 +295,13 @@ class Recorder:
         self._require("new")
         return self._capture(None)
 
+    def start_from_source(self) -> None:
+        """Enter the restored Replay prefix without capturing a local initial boundary."""
+        self._require("new")
+        if self.store.replay_source(self.run.run_id) is None:
+            raise IncompleteRecordError("source initialization requires a valid Replay source reference")
+        self._phase = "ready"
+
     def begin_step(self) -> RecordStep:
         self._require("ready")
         try:

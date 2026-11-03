@@ -41,6 +41,7 @@ from palinreplay.core.models import (
     StepCalls,
     ToolGroup,
 )
+from palinreplay.core.replay_contract import SourceReference, source_reference
 from palinreplay.core.serialization import json_bytes
 from palinreplay.diagnostics.metrics import CountingReader, timed
 from palinreplay.diagnostics.timing import span
@@ -427,6 +428,13 @@ class RecordStore:
 
     def _tip(self, run_id: str) -> Node | None:
         return max(self.list(Node, run_id=run_id), key=lambda n: n.index, default=None)
+
+    def replay_source(self, run_id: str) -> SourceReference | None:
+        """Read the protected declaration, without treating external IDs as local relations."""
+        run = self.get(Run, run_id)
+        if run.config.media_type != "application/json":
+            return None
+        return source_reference(self.read_json(run.config))
 
     def _relations(self, record: Fact) -> None:
         """Validate durable relations, also usable when inspecting old history."""
