@@ -9,6 +9,9 @@ from pathlib import Path
 from palinreplay.core.errors import IntegrityError, RecordUsageError
 from palinreplay.core.serialization import json_bytes
 from palinreplay.storage.artifacts import sync_directory
+from palinreplay.storage.codec import MAX_JSON_BYTES
+
+MAX_RECEIPT_BYTES = MAX_JSON_BYTES
 
 
 def write_json(path: Path, value, *, replace: bool = False) -> None:
@@ -80,6 +83,11 @@ def publish_receipt_json(path, value):
     reported as published/unconfirmed to the caller.
     """
     data = json_bytes(value)
+    if len(data) > MAX_RECEIPT_BYTES:
+        raise ValueError(
+            f"Replay finalization receipt is {len(data)} bytes, "
+            f"exceeding the {MAX_RECEIPT_BYTES}-byte limit"
+        )
     stage = None
     published = synced = False
     identity = None
@@ -102,7 +110,7 @@ def publish_receipt_json(path, value):
     except BaseException as error:
         errors = [f"{type(error).__name__}: {error}"]
         try:
-            published = _read_metadata(path, missing_ok=True) == data
+            published = read_receipt_bytes(path, missing_ok=True) == data
             current = path.lstat() if published else None
             ours = current is not None and (current.st_dev, current.st_ino) == identity
             if published and ours and not synced:
@@ -123,23 +131,29 @@ def publish_receipt_json(path, value):
                 pass  # The publication result already describes this failure.
 
 
-def _read_metadata(path, *, missing_ok=False):
+def read_receipt_bytes(path, *, missing_ok=False):
+    """Use the publication byte budget, independently of frozen C0 metadata."""
+    return _read_metadata(path, missing_ok=missing_ok, max_bytes=MAX_RECEIPT_BYTES,
+                          label="Replay finalization receipt")
+
+
+def _read_metadata(path, *, missing_ok=False, max_bytes=2 * 1024**2, label="frozen C0"):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > 2 * 1024**2:
-                raise IntegrityError("invalid frozen C0 metadata file")
+            if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+                raise IntegrityError(f"invalid {label} metadata file")
             source = os.fdopen(fd, "rb")
         except BaseException:
             os.close(fd)
             raise
         with source:
-            data = source.read(2 * 1024**2 + 1)
-            if len(data) > 2 * 1024**2:
-                raise IntegrityError("oversized frozen C0 metadata")
+            data = source.read(info.st_size + 1)
+            if len(data) != info.st_size:
+                raise IntegrityError(f"{label} metadata size changed while reading")
             return data
     except OSError as error:
         if missing_ok and isinstance(error, FileNotFoundError):
             return None
-        raise IntegrityError("missing or unreadable frozen C0 metadata") from error
+        raise IntegrityError(f"missing or unreadable {label} metadata") from error

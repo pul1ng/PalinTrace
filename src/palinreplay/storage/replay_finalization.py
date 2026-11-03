@@ -14,7 +14,7 @@ from palinreplay.core.errors import IntegrityError
 from palinreplay.core.models import ArtifactRef, Attempt, Identity, RunEnd
 from palinreplay.core.replay_outcome import execution_status
 from palinreplay.core.serialization import json_bytes
-from palinreplay.storage.io import _read_metadata, publish_receipt_json
+from palinreplay.storage.io import publish_receipt_json, read_receipt_bytes
 
 PROTOCOL = "store-receipt-v1"
 
@@ -52,7 +52,7 @@ def publish(root, payload):
 def read_receipt(root, run, attempt, end, failures):
     path = receipt_path(root, attempt)
     try:
-        raw = _read_metadata(path, missing_ok=True)
+        raw = read_receipt_bytes(path, missing_ok=True)
     except IntegrityError as error:
         raise IntegrityError("unreadable Replay finalization receipt") from error
     if raw is None:
