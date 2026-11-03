@@ -6,7 +6,9 @@ from palinreplay.cli import main
 from palinreplay.cli.outputs import default_output
 
 
-@pytest.mark.parametrize("status,code", [("match", 0), ("difference", 2), ("failed", 1)])
+@pytest.mark.parametrize("status,code", [
+    ("completed", 0), ("stopped", 2), ("failed", 1), ("cancelled", 130),
+])
 def test_minimal_cli_paths_and_status(tmp_path, monkeypatch, capsys, status, code):
     import palinreplay.cli.replay as cli
     import palinreplay.replay.session as session
@@ -18,81 +20,46 @@ def test_minimal_cli_paths_and_status(tmp_path, monkeypatch, capsys, status, cod
 
     def replay(*args, **kwargs):
         seen.append((args, kwargs))
-        mode = kwargs["validation_mode"]
-        execution = "failed" if status == "failed" else "completed"
-        if status == "difference" and mode == "strict":
-            execution = "stopped"
-        return {"status": status, "execution_status": execution, "validation_mode": mode,
-                "validation_status": "incomplete" if status == "failed" else status}
+        return {"execution_status": status, "source_start": {"index": 20}, "actual_node_count": 0}
 
     monkeypatch.setattr(session, "run_replay", replay)
     assert main(["replay", str(tmp_path), "--from", "C20"]) == code
     assert seen[0][0] == (tmp_path / "record", "C20", None)
     assert seen[0][1]["output"] == default_output("replay", "task")
-    assert seen[0][1]["validation_mode"] == "lenient"
     assert seen[0][1]["services_config"] is None
     assert callable(seen[0][1]["progress"])
     output = capsys.readouterr().out
-    assert "Validation mode: lenient" in output
-    assert f"Validation: {'INCOMPLETE' if status == 'failed' else status.upper()}" in output
-    for index, mode in enumerate(("lenient", "strict"), start=1):
-        assert main(["replay", str(tmp_path), "--from", "C20", "--to", "C23",
-                     "--run", "run-id", "--output", "custom", "--validation", mode,
-                     "--services-config", "services.json"]) == code
-        assert seen[index][1]["services_config"] == Path("services.json")
-        assert seen[index][1]["output"] == Path("custom")
-        assert seen[index][1]["run_id"] == "run-id"
-        assert seen[index][1]["validation_mode"] == mode
-        assert f"Validation mode: {mode}" in capsys.readouterr().out
+    assert f"Replay {status.upper()}" in output and "完整一致性校验未执行" in output
+    assert "源 C20 (引用)" in output and "Validation:" not in output
+    assert main(["replay", str(tmp_path), "--from", "C20", "--to", "C23",
+                 "--run", "run-id", "--output", "custom",
+                 "--services-config", "services.json"]) == code
+    assert seen[1][1]["services_config"] == Path("services.json")
+    assert seen[1][1]["output"] == Path("custom") and seen[1][1]["run_id"] == "run-id"
 
 
-@pytest.mark.parametrize("mode", ["strict", "lenient"])
-@pytest.mark.parametrize("execution,validation,code", [
-    ("completed", "match", 0), ("completed", "difference", 2), ("stopped", "difference", 2),
-    ("failed", "incomplete", 1), ("failed", "difference", 1), ("failed", "match", 1),
-])
-def test_cli_reports_mode_execution_and_validation_independently(
-    tmp_path, monkeypatch, capsys, mode, execution, validation, code,
-):
+@pytest.mark.parametrize("failed", [False, True])
+def test_cli_retains_exit_mismatch_with_framework_failure(tmp_path, monkeypatch, capsys, failed):
     import palinreplay.cli.replay as cli
     import palinreplay.replay.session as session
 
-    report = {"status": "failed" if execution == "failed" else validation,
-              "validation_mode": mode,
-              "execution_status": execution, "validation_status": validation}
-    if validation == "difference":
-        report["first_difference"] = {"difference_reason": "file-state", "source_index": 3}
-    if execution == "failed":
+    report = {"execution_status": "failed" if failed else "stopped",
+              "exit_mismatch": {"source_index": 21, "tool_ordinal": 2,
+                                "source_exit_code": 0, "actual_exit_code": 1}}
+    if failed:
         report["error"] = "cleanup fault"
     monkeypatch.setattr(cli, "store_path", lambda path: path)
     monkeypatch.setattr(session, "run_replay", lambda *a, **kw: report)
-    assert main(["replay", str(tmp_path), "--from", "C2", "--to", "C4",
-                 "--output", "custom", "--validation", mode]) == code
+    assert main(["replay", str(tmp_path), "--from", "C20", "--to", "C21",
+                 "--output", "custom"]) == (1 if failed else 2)
     captured = capsys.readouterr()
-    assert f"Replay {execution.upper()}" in captured.out
-    assert f"Validation mode: {mode}" in captured.out
-    assert f"Validation: {validation.upper()}" in captured.out
-    assert "Stopped on difference" not in captured.out
-    assert ("First difference" in captured.out) == (validation == "difference")
-    if validation == "difference":
-        assert "MATCH" not in captured.out and "source C3" in captured.out
-    if execution == "failed":
+    assert "source C21, tool 2: 0 -> 1" in captured.out
+    assert "完整一致性校验未执行" in captured.out and "MATCH" not in captured.out
+    if failed:
         assert "cleanup fault" in captured.err
 
 
-def test_validation_modes_are_documented_in_help(capsys):
-    with pytest.raises(SystemExit) as exit:
-        main(["replay", "--help"])
-    assert exit.value.code == 0
-    output = capsys.readouterr().out
-    assert "--validation {strict,lenient}" in output and "default: lenient" in output
-    assert "lenient permits only file mtime differences" in " ".join(output.split())
-    assert "--continue-on-difference" not in output
-
-
-@pytest.mark.parametrize("options", [
-    ["--validation", "unknown"], ["--continue-on-difference"],
-])
+@pytest.mark.parametrize("options", [["--validation", "unknown"], ["--continue-on-difference"]])
 def test_invalid_or_removed_mode_option_is_rejected_before_execution(tmp_path, monkeypatch, options):
     import palinreplay.replay.session as session
 
@@ -128,16 +95,14 @@ def test_cli_progress_stream_does_not_change_report_output(tmp_path, monkeypatch
         progress = kwargs["progress"]
         progress(ProgressEvent("preparing", total_steps=1))
         progress(ProgressEvent("committed", source_step=21, step=1))
-        progress(ProgressEvent("finished", status="completed", label="COMPLETED / DIFFERENCE"))
-        return {"validation_mode": "lenient", "execution_status": "completed",
-                "validation_status": "difference"}
+        progress(ProgressEvent("finished", status="completed", label="COMPLETED"))
+        return {"execution_status": "completed"}
 
     monkeypatch.setattr(cli, "store_path", lambda path: path)
     monkeypatch.setattr(session, "run_replay", replay)
     options = [] if mode is None else ["--progress", mode]
-    assert main(["replay", str(tmp_path), "--from", "C20", "--output", "custom", *options]) == 2
+    assert main(["replay", str(tmp_path), "--from", "C20", "--output", "custom", *options]) == 0
     output = capsys.readouterr()
-    assert "Replay COMPLETED -> custom" in output.out and "Validation: DIFFERENCE" in output.out
-    assert "[replay" not in output.out
-    assert ("1/1" in output.err) is (mode != "off")
+    assert "Replay COMPLETED -> custom" in output.out and "完整一致性校验未执行" in output.out
+    assert "[replay" not in output.out and ("1/1" in output.err) is (mode != "off")
     assert "\x1b" not in output.err

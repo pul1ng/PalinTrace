@@ -32,10 +32,9 @@ def test_preflight_failure_retains_report_without_starting_docker(tmp_path, monk
     monkeypatch.setattr("palinreplay.replay.session.connect_docker", forbidden)
     output = tmp_path / "output"
     report = run_replay(source, "C0", output=output)
-    assert report["status"] == "failed" and report["phase"] == "preflight"
-    assert report["execution_status"] == "failed"
-    assert report["validation_status"] == "incomplete"
-    assert report["validation_mode"] == "lenient"
+    assert report["execution_status"] == "failed" and report["phase"] == "preflight"
+    assert report["schema_version"] == "palinreplay.replay-report.v2"
+    assert "validation_status" not in report and "validation_mode" not in report
     assert "version" in report["error"]
     assert report["cleanup_confirmed"]
     assert json.loads((output / "report.json").read_text()) == report
@@ -235,7 +234,10 @@ def test_services_prepare_after_r1_before_reference_initialization_and_leave_his
     assert commands == ["start A", "ready A", "ready A"]
     assert report["r1"]["status"] == "passed" and report["preparation"]["status"] == "ready"
     assert report["execution_status"] == "completed"
-    assert report["validation_status"] == "not-performed"
+    assert "validation_status" not in report and "status" not in report
+    assert report["actual_node_count"] == report["completed_steps"] == 3
+    assert report["source_start"]["index"] == 0 and report["source_start"]["reference"]
+    assert not report["preparation_state_captured"]
     assert state.captures == 3
     assert json.loads((output / "preparation.json").read_text()) == report["preparation"]
     assert not (output / "preparation-files.json").exists()
@@ -329,7 +331,8 @@ def test_final_readiness_failure_blocks_c0_after_all_initial_checks_pass(tmp_pat
     else:
         report = run_replay(state.source, "C0", "C3", output=output, services_config=config)
     assert commands == ["start A", "ready A", "start B", "ready B", "ready A"]
-    assert report["execution_status"] == "failed" and report["phase"] == "service-preparation"
+    assert report["execution_status"] == ("cancelled" if fault == "cancel" else "failed")
+    assert report["phase"] == "service-preparation"
     assert report["preparation"]["status"] == "failed"
     saved = json.loads((output / "preparation.json").read_text())
     assert saved == report["preparation"]
@@ -380,7 +383,10 @@ def test_preparation_failure_blocks_c0_and_history_and_keeps_primary_error(
     else:
         report = run_replay(state.source, "C0", "C3", output=output,
                             services_config=config, progress=progress)
-    assert report["execution_status"] == "failed" and report["phase"] == "service-preparation"
+    assert report["execution_status"] == (
+        "cancelled" if fault.startswith("cancel") and not cleanup_fault else "failed"
+    )
+    assert report["phase"] == "service-preparation"
     assert report["r1"]["status"] == "passed"
     assert report["error_type"] == ("KeyboardInterrupt" if fault.startswith("cancel") else
                                     "SandboxTimeout" if fault == "readiness" else "PreparationError")
@@ -450,9 +456,19 @@ def test_session_preserves_actual_results_and_stops_only_on_exit_codes(
         assert config["execution_policy"] == "historical-exit-code-v1"
         assert "validation_mode" not in config
         assert len(store.list(Node)) == (different_call - 1 if stopped else 3)
+        assert report["actual_node_count"] == report["completed_steps"] == len(store.list(Node))
+        assert report["incomplete_step"] is (stopped and different_call == 1)
         if stopped:
+            mismatch = report["exit_mismatch"]
+            assert mismatch["actual_index"] == mismatch["source_index"]
+            assert mismatch["tool_ordinal"] == mismatch["tool_index"] + 1
             assert report["stop_reason"] == "exit-code"
-            trace = read_call(store, report["first_difference"]["execution_id"])
+            trace = read_call(store, mismatch["execution_id"])
+            assert trace.execution.request.model_dump(mode="json") == mismatch["request_ref"]
+            assert trace.events[1].payload.model_dump(mode="json") == mismatch["result_ref"]
+            assert trace.events[1].details.model_dump(mode="json") == mismatch["result_details_ref"]
+            assert ("node_id" in mismatch) is (different_call != 1)
+            assert bool(report["incomplete_steps"]) is (different_call == 1)
             assert store.read_json(trace.events[1].details)["backend"]["decoded"]["returncode"] == 1
         else:
             tools = [tool for step in report["steps"] for tool in step["tools"]]
@@ -554,7 +570,7 @@ def test_cleanup_failure_retains_mismatch_and_durable_end(tmp_path, replay_sessi
     output = tmp_path / "output"
     report = run_replay(state.source, "C0", "C3", output=output)
     assert report["execution_status"] == "failed" and report["stop_reason"] == "exit-code"
-    assert report["first_difference"]["actual_exit_code"] == 1
+    assert report["exit_mismatch"]["actual_exit_code"] == 1
     assert len(state.sandbox.calls) == different_call and state.closed == ["restore", "client"]
     with RecordStore.open(output / "record") as store:
         end, = store.list(RunEnd)
@@ -598,10 +614,11 @@ def test_failures_and_cancellation_keep_real_tail_without_reexecution(
         report = json.loads((output / "report.json").read_text())
     else:
         report = run_replay(state.source, "C0", "C3", output=output)
-    assert report["execution_status"] == "failed" and report["incomplete_step"]
+    assert report["execution_status"] == ("cancelled" if fault.startswith("cancel") else "failed")
+    assert report["incomplete_step"]
     assert report["cleanup_confirmed"] and len(state.sandbox.calls) == calls
     if fault == "adoption":
-        assert report["stop_reason"] == "exit-code" and report["first_difference"]
+        assert report["stop_reason"] == "exit-code" and report["exit_mismatch"]
     with RecordStore.open(output / "record") as store:
         assert len(store.list(Node)) == nodes
         end, = store.list(RunEnd)

@@ -11,6 +11,7 @@ from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.initial import initial_recorder, validate_r1
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
+from palinreplay.replay.report import execution_facts
 from palinreplay.replay.run import replay_range
 from palinreplay.replay.service_config import load_services
 from palinreplay.replay.services import PreparationJournal, prepare_services
@@ -34,9 +35,11 @@ def run_replay(
     if source.resolve().is_relative_to(output.resolve()):
         raise ValueError("output cannot contain the source Record store")
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
-    report = {"schema_version": "palinreplay.replay-report.v1", "status": "failed",
-              "execution_status": "failed", "validation_status": "incomplete",
-              "validation_mode": validation_mode,
+    report = {"schema_version": "palinreplay.replay-report.v2", "execution_status": "failed",
+              "initial_state_mode": "source-reference-v1", "node_numbering": "source-index-v1",
+              "execution_policy": "historical-exit-code-v1", "preparation_state_captured": False,
+              "actual_node_count": 0, "completed_steps": 0, "mappings": [], "steps": [],
+              "incomplete_step": False, "incomplete_steps": [], "last_node": None,
               "phase": "preflight", "source_store": str(source), "output": str(output),
               "cleanup_confirmed": False, "cleanup_errors": []}
     stats = ReplayStats()
@@ -64,6 +67,12 @@ def run_replay(
                     origin.verify_artifact(ref)
         stats.inherit(materials.context)
         report["source"] = plan.provenance()
+        report["source_start"] = {
+            "source_store": str(source), "run_id": plan.run.run_id, "index": plan.start.index,
+            "node_id": plan.start.node_id, "state_id": plan.start.state_id, "reference": True,
+        }
+        report["source_start_index"], report["source_end_index"] = plan.start.index, plan.end.index
+        report["selected_steps"] = len(materials.steps)
         context = ReplayContext(materials)
         if client is None:
             notify(ProgressEvent("connecting"))
@@ -100,11 +109,11 @@ def run_replay(
         replay_range(recorder, context, executor, materials, report=report, stats=stats,
                      validation_mode=validation_mode, progress=notify)
         if recorder.phase == "ready":
-            recorder.finish("Replay " + report["status"], details={"replay": report})
+            recorder.finish("Replay " + report["execution_status"], details={"replay": report})
         report["phase"] = "finished"
     except BaseException as error:
         primary = error
-        report.update(status="failed", execution_status="failed",
+        report.update(execution_status="cancelled" if isinstance(error, KeyboardInterrupt) else "failed",
                       error_type=type(error).__name__, error=str(error))
         if error.__cause__ is not None:
             report["cause"] = {"error_type": type(error.__cause__).__name__,
@@ -136,6 +145,12 @@ def run_replay(
             for name, resource in (("recorder", recorder), ("restore", restored),
                                    ("client", client if own_client else None), ("store", store)):
                 if resource is not None:
+                    if name == "store" and recorder is not None:
+                        try:
+                            report.update(execution_facts(recorder))
+                        except BaseException as error:
+                            report["record_report_error"] = f"{type(error).__name__}: {error}"
+                            report.update(execution_status="failed")
                     try:
                         resource.close()
                     except BaseException as error:
@@ -155,7 +170,7 @@ def run_replay(
                                 )
             report["cleanup_confirmed"] = not report["cleanup_errors"]
             if report["cleanup_errors"]:
-                report.update(status="failed", execution_status="failed")
+                report.update(execution_status="failed")
                 report.setdefault("error", "resource cleanup failed")
             if primary is not None:
                 notes = [*getattr(primary, "__notes__", ()),
@@ -172,7 +187,7 @@ def run_replay(
                     report.setdefault("report_errors", []).append(
                         f"{path.name}: {type(error).__name__}: {error}"
                     )
-                    report.update(status="failed", execution_status="failed")
+                    report.update(execution_status="failed")
                     report.setdefault("error", "report persistence failed")
                     if primary is None:
                         primary = error
@@ -181,5 +196,5 @@ def run_replay(
                              status="cancelled" if isinstance(primary, KeyboardInterrupt) else "failed"))
         raise primary
     notify(ProgressEvent("finished", status=report["execution_status"],
-                         label=f"{report['execution_status'].upper()} / {report['validation_status'].upper()}"))
+                         label=report["execution_status"].upper()))
     return report

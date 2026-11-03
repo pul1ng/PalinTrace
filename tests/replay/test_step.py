@@ -96,7 +96,7 @@ def test_exit_mismatch_saves_actual_boundary_and_stops_even_at_endpoint(tmp_path
                 assert report["execution_status"] == "stopped"
                 assert report["stop_reason"] == "exit-code"
                 assert report["incomplete_step"] is (different_tool == 0)
-                mismatch = report["first_difference"]
+                mismatch = report["exit_mismatch"]
                 assert mismatch["source_index"] == 1 and mismatch["tool_index"] == different_tool
                 assert mismatch["source_exit_code"] == 0 and mismatch["actual_exit_code"] == 1
                 actual = read_call(store, mismatch["execution_id"])
@@ -137,7 +137,7 @@ def test_matching_exit_codes_keep_different_outputs_and_files_and_continue(tmp_p
                 report = replay_range(rec, context, sandbox, materials)
                 assert report["execution_status"] == "completed"
                 assert len(sandbox.calls) == len(store.list(Node)) == 3
-                assert "first_difference" not in report
+                assert "exit_mismatch" not in report
                 assert source_sandbox.files["file"] == "changed"
                 assert sandbox.files["file"] == "actual contents"
                 assert store.read_json(store.get(State, rec.current_node.state_id).manifest)["file"] == "actual contents"
@@ -168,7 +168,7 @@ def test_execution_or_adoption_fault_preserves_observed_mismatch(tmp_path, monke
                 with recording(store, materials, context, sandbox) as rec:
                     replay_range(rec, context, sandbox, materials, report=report)
             assert report["execution_status"] == "failed"
-            assert ("first_difference" in report) is after_mismatch
+            assert ("exit_mismatch" in report) is after_mismatch
             assert report["incomplete_step"] and not store.list(Node)
             assert store.check_integrity().ok
     finally:
