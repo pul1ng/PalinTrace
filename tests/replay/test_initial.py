@@ -18,7 +18,9 @@ def test_initialization_references_c20_without_capture(tmp_path, prepared):
         plan = pin_replay(source, "C20", "C22")
         materials = ReplayMaterials(plan, source.read_json(plan.run.config),
                                     source.read_json(plan.start.context),
-                                    source.read_json(plan.start.input_position), ())
+                                    source.read_json(plan.start.input_position), (),
+                                    source.read_bytes(plan.start.context),
+                                    source.read_bytes(plan.start.input_position))
     # No pool/container/capture API is provided: initialization must never use one.
     executor = SimpleNamespace(runtime=SimpleNamespace(launch=SimpleNamespace(environment={})))
     preparation = {"status": "ready", "config": {"services": [{"name": "A"}]},

@@ -113,8 +113,17 @@ def _summary(view):
     for issue in verification.get("issues", []):
         print(f"  {issue['record']}: {issue['message']}")
     for run in view["runs"]:
-        print(f"Run {run['run']['run_id']}  task={run['run']['task_id']}  status={run['status']}")
-        print(f"  Record complete: {run['record_complete']}; task success: not evaluated")
+        replay = run.get("replay")
+        status_label = "record_status" if replay is not None else "status"
+        print(f"Run {run['run']['run_id']}  task={run['run']['task_id']}  {status_label}={run['status']}")
+        boundary = "Record boundary complete" if replay is not None else "Record complete"
+        print(f"  {boundary}: {run['record_complete']}; task success: not evaluated")
+        if replay is not None:
+            print(f"  Replay execution: {replay['execution_status']}; completed steps: "
+                  f"{replay['completed_steps']}/{replay['selected_steps']}")
+            usage = replay["history_usage"]
+            print(f"  Historical answer supplies: {usage['historical_answer_supplies']}; "
+                  f"actual tool executions: {usage['actual_tool_executions']}")
         if run.get("source_start"):
             source = run["source_start"]
             print(f"  Source C{source['index']} (reference)  node={source['node_id']}"

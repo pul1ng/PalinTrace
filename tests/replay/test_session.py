@@ -41,13 +41,14 @@ def test_preflight_failure_retains_report_without_starting_docker(tmp_path, monk
 
 
 @pytest.fixture
-def replay_session(tmp_path, monkeypatch):
+def replay_session(tmp_path, monkeypatch, request):
     """Real history, session and recorder, with only the external Btrfs boundary replaced."""
     state = SimpleNamespace(fault=None, different_call=None, file_difference=False,
                             difference_kind="output", mtime_only=False,
                             cleanup_fault=False, termination_fault=False, closed=[],
                             comparisons=[], captures=0, restored=False, recorder=None,
-                            preparation_difference=False)
+                            preparation_difference=False, unavailable_snapshot=None,
+                            verified_snapshots=[])
     identity = uuid4()
     location = PoolLocation(volume="palinreplay-btrfs-" + identity.hex, uuid=identity,
                             daemon_id="fixture", helper_image_id="sha256:" + "a" * 64)
@@ -70,6 +71,25 @@ def replay_session(tmp_path, monkeypatch):
                      logical_parent_id=previous.state_id if previous else None)
 
     original._capture_state = capture
+    encoding = getattr(request, "param", None)
+    if encoding is not None:
+        import struct
+        import zlib
+
+        from palinreplay.core.interfaces import AgentSnapshot, Payload
+        from palinreplay.record.recorder import Recorder
+        from palinreplay.storage.codec import JSON_MEDIA, MAGIC, ZLIB_MEDIA
+
+        export = Recorder._agent_snapshot
+        def reencoded(recorder, boundary):
+            snapshot = export(recorder, boundary)
+            def encode(payload):
+                data = json.dumps(json.loads(payload.data), indent=2).encode()
+                if encoding == "compressed":
+                    return Payload(MAGIC + struct.pack(">Q", len(data)) + zlib.compress(data), ZLIB_MEDIA)
+                return Payload(data, JSON_MEDIA)
+            return AgentSnapshot(encode(snapshot.context), encode(snapshot.input_position))
+        monkeypatch.setattr(Recorder, "_agent_snapshot", reencoded)
     original.run(AgentTask("task", "Task"))
     state.source = source.root
     state.config = original.recorder.run.config
@@ -82,7 +102,8 @@ def replay_session(tmp_path, monkeypatch):
             self.location = location
 
         def verify(self, snapshot):
-            if state.fault == "snapshot-read":
+            state.verified_snapshots.append(snapshot.name)
+            if state.fault == "snapshot-read" or snapshot.name == state.unavailable_snapshot:
                 raise RuntimeError("snapshot read fault")
             assert snapshot.location == location
 
@@ -376,7 +397,7 @@ def test_preparation_failure_blocks_c0_and_history_and_keeps_primary_error(
 
     state.executor.exec = execute
     output = tmp_path / "output"
-    if fault.startswith("cancel"):
+    if fault.startswith("cancel") and not cleanup_fault:
         with pytest.raises(KeyboardInterrupt):
             run_replay(state.source, "C0", "C3", output=output,
                        services_config=config, progress=progress)
@@ -384,6 +405,8 @@ def test_preparation_failure_blocks_c0_and_history_and_keeps_primary_error(
     else:
         report = run_replay(state.source, "C0", "C3", output=output,
                             services_config=config, progress=progress)
+    if fault.startswith("cancel"):
+        assert report["cancellation"]["error_type"] == "KeyboardInterrupt"
     assert report["execution_status"] == (
         "cancelled" if fault.startswith("cancel") and not cleanup_fault else "failed"
     )
@@ -684,12 +707,11 @@ def test_report_failure_does_not_mask_primary_or_skip_cleanup(tmp_path, replay_s
         def interrupted(*args):
             raise KeyboardInterrupt("primary cancellation")
         state.executor.execute = interrupted
-        with pytest.raises(KeyboardInterrupt, match="primary cancellation"):
-            run_replay(state.source, "C0", "C3", output=tmp_path / "output")
-    else:
-        report = run_replay(state.source, "C0", "C3", output=tmp_path / "output")
-        assert report["execution_status"] == "failed"
-        assert "report disk fault" in report["report_errors"][0]
+    report = run_replay(state.source, "C0", "C3", output=tmp_path / "output")
+    assert report["execution_status"] == "failed"
+    assert "report disk fault" in report["report_errors"][0]
+    if cancel:
+        assert report["cancellation"]["error"] == "primary cancellation"
     assert state.closed == ["restore", "client"] and state.recorder.phase == "closed"
 
 
@@ -713,6 +735,130 @@ def test_output_constraints_prevent_overwrite_or_source_overlap(tmp_path, replay
         run_replay(state.source, "C0", "C3", output=output)
     assert marker.read_bytes() == b"user result"
     assert not state.restored and not state.sandbox.calls
+
+
+@pytest.mark.parametrize("replay_session", ["indented", "compressed"], indirect=True)
+def test_replay_accepts_valid_noncanonical_and_compressed_starting_json(tmp_path, replay_session):
+    state = replay_session
+    with RecordStore.open(state.source) as source:
+        assert source.check_integrity().ok
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C1", "C3", output=output)
+    assert report["r1"]["status"] == "passed" and report["execution_status"] == "completed"
+    assert [m["index"] for m in report["mappings"]] == [2, 3]
+    with RecordStore.open(output / "record") as actual:
+        assert actual.replay_source(report["run_id"]).start.index == 1
+        assert actual.check_integrity().ok
+
+
+def test_future_snapshot_unavailable_does_not_block_historical_execution(tmp_path, replay_session):
+    state = replay_session
+    with RecordStore.open(state.source) as source:
+        node = next(n for n in source.list(Node) if n.index == 3)
+        state.unavailable_snapshot = source.read_json(source.get(State, node.state_id).manifest)["name"]
+    report = run_replay(state.source, "C0", "C3", output=tmp_path / "output")
+    assert report["execution_status"] == "completed" and report["completed_steps"] == 3
+    assert len(state.verified_snapshots) == 1
+    assert state.unavailable_snapshot not in state.verified_snapshots
+    future = Snapshot(location=state.executor.pool.location, name=state.unavailable_snapshot, uuid=uuid4())
+    with pytest.raises(RuntimeError, match="snapshot read fault"):
+        state.executor.pool.verify(future)
+
+
+def test_failed_execution_retains_r1_inside_protected_run_config(tmp_path, replay_session):
+    state = replay_session
+    state.fault = "tool"
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C0", "C3", output=output)
+    assert report["execution_status"] == "failed" and report["r1"]["status"] == "passed"
+    (output / "r1-validation.json").unlink()
+    with RecordStore.open(output / "record") as actual:
+        run = actual.get(Run, report["run_id"])
+        assert actual.read_json(run.config)["replay"]["r1"] == report["r1"]
+        actual.verify_artifact(run.config)
+        assert actual.check_integrity().ok
+        config_path = actual._artifacts._path(run.config)
+    config_path.chmod(0o600)
+    config_path.write_bytes(b"tampered R1 evidence")
+    with RecordStore.open(output / "record") as actual:
+        assert not actual.check_integrity().ok
+
+
+@pytest.mark.parametrize("different_call", [1, 2])
+def test_selected_history_is_not_counted_as_supplied_history(
+    tmp_path, replay_session, different_call, capsys,
+):
+    from palinreplay.cli import main
+    from palinreplay.record.inspect import inspect_record
+
+    state = replay_session
+    state.different_call, state.difference_kind = different_call, "exit-code"
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C0", "C3", output=output)
+    with RecordStore.open(output / "record") as actual:
+        config = actual.read_json(actual.get(Run, report["run_id"]).config)["replay"]
+        assert len(config["selected_history"]) == 3 and "used_history" not in config
+    view = inspect_record(output / "record", check=True)
+    run, = view["runs"]
+    replay = run["replay"]
+    assert run["record_status"] == ("incomplete" if different_call == 1 else "completed")
+    assert replay["execution_status"] == "stopped" and replay["selected_steps"] == 3
+    assert replay["completed_steps"] == different_call - 1 and not replay["range_complete"]
+    usage = replay["history_usage"]
+    assert usage["historical_answer_supplies"] == 1
+    assert [s["index"] for s in usage["supplies"]] == [1]
+    assert usage["actual_tool_executions"] == different_call
+    assert report["history_usage"] == usage
+    assert run["source_dependency"]["checked"]
+    assert run["source_dependency"] == view["external_dependencies"][0]
+    assert main(["record", "inspect", str(output / "record")]) == 0
+    text = capsys.readouterr().out
+    assert "Replay execution: stopped" in text
+    assert f"completed steps: {different_call - 1}/3" in text
+    assert "Historical answer supplies: 1" in text
+
+
+@pytest.mark.parametrize("phase", ["execute", "cleanup"])
+@pytest.mark.parametrize("cleanup_fault", [False, True])
+def test_cancellation_priority_agrees_in_report_progress_store_and_cli(
+    tmp_path, replay_session, monkeypatch, phase, cleanup_fault, capsys,
+):
+    from palinreplay.cli import main
+    from palinreplay.cli import replay as replay_cli
+    from palinreplay.record.inspect import inspect_record
+
+    state = replay_session
+    state.cleanup_fault = cleanup_fault
+    events = []
+    class Progress:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def __call__(self, event):
+            events.append(event)
+            if phase == "cleanup" and event.phase == "cleanup":
+                raise KeyboardInterrupt("cleanup cancellation")
+    if phase == "execute":
+        def interrupted(request):
+            raise KeyboardInterrupt("execution cancellation")
+        state.executor.execute = interrupted
+    monkeypatch.setattr(replay_cli, "ReplayProgressDisplay", lambda *args: Progress())
+    output = tmp_path / "output"
+    code = main(["replay", str(state.source), "--from", "C0", "--to", "C3", "--output", str(output)])
+    report = json.loads((output / "report.json").read_text())
+    expected = "failed" if cleanup_fault else "cancelled"
+    assert code == (1 if cleanup_fault else 130)
+    if cleanup_fault:
+        stderr = capsys.readouterr().err
+        assert "cancellation" in stderr and "restore cleanup fault" in stderr
+    assert report["execution_status"] == expected
+    assert report["cancellation"]["error_type"] == "KeyboardInterrupt"
+    assert bool(report["cleanup_errors"]) is cleanup_fault
+    assert [e.status for e in events if e.phase == "finished"] == [expected]
+    run, = inspect_record(output / "record")["runs"]
+    assert run["replay"]["execution_status"] == expected
+    assert state.closed == ["restore", "client"]
 
 
 def test_corrupt_material_stops_before_restore(tmp_path, replay_session):

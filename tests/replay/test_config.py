@@ -1,6 +1,7 @@
 import pytest
 
 from palinreplay.agents import AgentTask
+from palinreplay.core.errors import IntegrityError
 from palinreplay.replay.config import replay_config
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
@@ -24,7 +25,8 @@ def test_v2_configuration_pins_c20_and_only_c21_through_c40(tmp_path):
         assert replay["node_numbering"] == "source-index-v1"
         assert replay["execution_policy"] == "historical-exit-code-v1"
         assert (replay["source_start_index"], replay["source_end_index"]) == (20, 40)
-        assert [s["index"] for s in replay["used_history"]] == list(range(21, 41))
+        assert [s["index"] for s in replay["selected_history"]] == list(range(21, 41))
+        assert "used_history" not in replay
         assert replay["source"] == materials.plan.provenance()
         start = replay["source_start"]
         assert start["node_id"] == materials.plan.start.node_id
@@ -41,6 +43,11 @@ def test_v2_configuration_pins_c20_and_only_c21_through_c40(tmp_path):
         assert materials.plan.end.index == 40
     finally:
         source.close()
+
+
+def test_configuration_rejects_failed_r1_before_run_creation():
+    with pytest.raises(IntegrityError, match="R1 validation must pass"):
+        replay_config(None, r1={"status": "failed"})
 
 
 def test_configuration_rejects_incomplete_preparation():

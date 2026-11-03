@@ -21,7 +21,9 @@ from palinreplay.core.models import (
     ToolGroup,
 )
 from palinreplay.record.calls import read_call
+from palinreplay.record.replay import replay_execution
 from palinreplay.record.source import source_dependency
+from palinreplay.storage.btrfs.verification import verification_scope
 from palinreplay.storage.codec import JSON_TYPES
 from palinreplay.storage.io import export_directory, outside_store, write_json
 from palinreplay.storage.store import MODELS, IntegrityError, RecordStore, artifact_refs
@@ -124,7 +126,7 @@ def storage_metrics(store: RecordStore) -> dict:
     return metrics
 
 
-def _run_document(store: RecordStore, run: Run, *, contents: bool) -> dict:
+def _run_document(store: RecordStore, run: Run, *, contents: bool, dependency: dict | None) -> dict:
     key = {"run_id": run.run_id}
     nodes, steps = store.list(Node, **key), store.list(Step, **key)
     committed = {node.step_id for node in nodes}
@@ -158,7 +160,6 @@ def _run_document(store: RecordStore, run: Run, *, contents: bool) -> dict:
                 else [],
             }
         )
-    dependency = source_dependency(store, run.run_id)
     empty_range = dependency is not None and dependency["start"]["index"] == dependency["end"]["index"]
     document = {
         "run": run.model_dump(mode="json"),
@@ -205,6 +206,8 @@ def _run_document(store: RecordStore, run: Run, *, contents: bool) -> dict:
         },
     }
     if dependency is not None:
+        document["record_status"] = status
+        document["replay"] = replay_execution(store, run.run_id)
         document["source_start"] = dependency["start"] | {
             "source_store": dependency["source_store"], "run_id": dependency["run_id"],
         }
@@ -225,7 +228,7 @@ def inspect_record(
     """Inspect facts; --check verifies local bytes and external Btrfs snapshot identities."""
     if node and execution:
         raise RecordUsageError("select a node or an execution, not both")
-    with RecordStore.open(source) as store, store.snapshot():
+    with RecordStore.open(source) as store, store.snapshot(), verification_scope():
         verification = {"checked": False, "ok": None}
         if check:
             started = time.monotonic()
@@ -248,6 +251,7 @@ def inspect_record(
             if not runs:
                 raise RecordUsageError("unknown run ID")
         dependencies = []
+        dependencies_by_run = {}
         for run in runs:
             try:
                 dependency = source_dependency(store, run.run_id, check=check)
@@ -257,13 +261,15 @@ def inspect_record(
                 verification["ok"] = False
                 verification["issues"].append({"record": f"source/{run.run_id}", "message": str(error)})
                 return {"verification": verification, "runs": []}
+            dependencies_by_run[run.run_id] = dependency
             if dependency is not None:
                 dependencies.append(dependency)
         document = {
             "schema_version": "palinreplay.inspect.v1",
             "verification": verification,
             "external_dependencies": dependencies,
-            "runs": [_run_document(store, run, contents=False) for run in runs],
+            "runs": [_run_document(store, run, contents=False, dependency=dependencies_by_run[run.run_id])
+                     for run in runs],
             "storage": storage_metrics(store),
             "states": [s.model_dump(mode="json") for s in store.list(State)],
         }
@@ -287,13 +293,19 @@ def export_record(source: str | Path, output: str | Path, *, bundle: bool = Fals
     source, output = Path(source).absolute(), Path(output).absolute()
     outside_store(source, output)
     started = time.monotonic()
-    with export_directory(output) as stage, RecordStore.open(source) as store, store.snapshot():
+    with (
+        export_directory(output) as stage,
+        RecordStore.open(source) as store,
+        store.snapshot(),
+        verification_scope(),
+    ):
         report = store.check_integrity()
         if not report.ok:
             raise IntegrityError(f"export refused: {len(report.issues)} integrity issue(s)")
         records = {name: store.list(model) for name, model in MODELS.items()}
-        dependencies = [dependency for run in records["run"]
-                        if (dependency := source_dependency(store, run.run_id, check=not bundle))]
+        dependencies_by_run = {run.run_id: source_dependency(store, run.run_id, check=not bundle)
+                               for run in records["run"]}
+        dependencies = [d for d in dependencies_by_run.values() if d is not None]
         if bundle:
             if dependencies:
                 raise RecordUsageError("portable bundles with external Replay source dependencies are not supported")
@@ -305,7 +317,8 @@ def export_record(source: str | Path, output: str | Path, *, bundle: bool = Fals
             "external_dependencies": dependencies,
             "filesystem_payloads": "omitted; restore from the source record and its Btrfs pool",
             "verification": report.model_dump(mode="json") | {"ok": report.ok},
-            "runs": [_run_document(store, run, contents=True) for run in records["run"]],
+            "runs": [_run_document(store, run, contents=True, dependency=dependencies_by_run[run.run_id])
+                     for run in records["run"]],
             # Preserve every identity, including orphaned captures and unfinished attempts.
             "facts": {
                 name: [record.model_dump(mode="json") for record in facts]

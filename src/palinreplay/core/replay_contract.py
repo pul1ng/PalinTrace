@@ -1,5 +1,7 @@
 """The source-reference permission shared by recording and checked readers."""
 
+import base64
+import json
 from dataclasses import dataclass
 from hashlib import sha256
 from itertools import pairwise
@@ -7,6 +9,7 @@ from itertools import pairwise
 from palinreplay.core.errors import IntegrityError
 from palinreplay.core.models import Node, Run, State
 from palinreplay.core.serialization import json_bytes
+from palinreplay.storage.codec import JSON_TYPES, decode
 
 
 @dataclass(frozen=True)
@@ -64,9 +67,16 @@ def source_reference(config) -> SourceReference | None:
         if start["node_id"] != nodes[0].node_id or start["state_id"] != states[0].state_id:
             raise ValueError("source start differs from pinned selection")
         for key, ref in (("context", nodes[0].context), ("input_position", nodes[0].input_position)):
-            data = json_bytes(start[key])
+            raw = start.get("raw_materials")
+            # Earlier v2 records copied canonical JSON only. Keep those readable;
+            # new records retain the exact source encoding, including compression.
+            data = json_bytes(start[key]) if raw is None else base64.b64decode(raw[key], validate=True)
             if sha256(data).hexdigest() != ref.sha256 or len(data) != ref.size:
                 raise ValueError("source prefix differs from its protected material reference")
+            if ref.media_type not in JSON_TYPES:
+                raise ValueError("source prefix requires a supported JSON media type")
+            if json_bytes(json.loads(decode(data, ref.media_type))) != json_bytes(start[key]):
+                raise ValueError("source prefix differs from its decoded material")
         return SourceReference(source["source_store"], run, nodes, states)
     except (KeyError, TypeError, ValueError) as error:
         raise IntegrityError(f"invalid Replay source reference: {error}") from error

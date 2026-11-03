@@ -41,6 +41,8 @@ def execute(args):
             print(f"  Source C{mapping['source_index']} -> C{mapping['index']}")
         if report.get("error"):
             print(f"error: {report['error']}", file=sys.stderr)
+        for detail in report.get("cleanup_errors", []):
+            print(f"cleanup error: {detail}", file=sys.stderr)
         if report.get("exit_mismatch"):
             first = report["exit_mismatch"]
             print(f"  Exit code mismatch at source C{first['source_index']},"

@@ -11,7 +11,7 @@ from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.initial import initial_recorder, validate_r1
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
-from palinreplay.replay.report import execution_facts
+from palinreplay.replay.report import execution_facts, final_execution_status
 from palinreplay.replay.run import replay_range
 from palinreplay.replay.service_config import load_services
 from palinreplay.replay.services import PreparationJournal, prepare_services
@@ -47,6 +47,21 @@ def run_replay(
     own_client = client is None
     primary = None
     notify = ProgressReporter(progress)
+
+    def cancelled_during_cleanup(error, *, persist=True):
+        nonlocal primary
+        detail = {"phase": "replay-cleanup", "error_type": type(error).__name__, "error": str(error)}
+        report.setdefault("cancellation", detail)
+        if primary is None:
+            primary = error
+            report.update(error_type=type(error).__name__, error=str(error))
+        if persist and store is not None and recorder is not None:
+            try:
+                store.save(Failure(run_id=recorder.run.run_id, attempt_id=recorder.attempt.attempt_id,
+                                   category="execution", details=store.put_json(detail)))
+            except BaseException as diagnostic:
+                report["termination_error"] = f"{type(diagnostic).__name__}: {diagnostic}"
+
     try:
         notify(ProgressEvent("preparing"))
         with RecordStore.open(source) as origin, origin.snapshot():
@@ -82,8 +97,7 @@ def run_replay(
                                        docker_host=docker_endpoint(),
                                        report_path=output / "restore.json")
         executor = RestoredExecutor(restored, baseline.runtime)
-        for snapshot in snapshots:
-            executor.pool.verify(snapshot)
+        executor.pool.verify(baseline.snapshot)
         for history in materials.steps:
             for tool in history.tools:
                 if tuple(tool.request["interpreter"]) != tuple(executor.runtime.launch.shell):
@@ -101,7 +115,8 @@ def run_replay(
                 preparation = prepare_services(executor, services, journal)
         store = RecordStore.create(output / "record")
         report["phase"] = "source-initialization"
-        recorder = initial_recorder(store, materials, executor, context.export, preparation=preparation)
+        recorder = initial_recorder(store, materials, executor, context.export,
+                                    r1=report["r1"], preparation=preparation)
         report["run_id"] = recorder.run.run_id
         notify(ProgressEvent("source-reference", source_step=plan.start.index,
                              completed_steps=0, total_steps=len(materials.steps)))
@@ -115,6 +130,9 @@ def run_replay(
         primary = error
         report.update(execution_status="cancelled" if isinstance(error, KeyboardInterrupt) else "failed",
                       error_type=type(error).__name__, error=str(error))
+        if isinstance(error, KeyboardInterrupt):
+            report["cancellation"] = {"phase": report["phase"], "error_type": type(error).__name__,
+                                      "error": str(error)}
         if error.__cause__ is not None:
             report["cause"] = {"error_type": type(error.__cause__).__name__,
                                "error": str(error.__cause__)}
@@ -141,6 +159,8 @@ def run_replay(
     finally:
         try:
             notify(ProgressEvent("cleanup"))
+        except KeyboardInterrupt as error:
+            cancelled_during_cleanup(error)
         finally:
             for name, resource in (("recorder", recorder), ("restore", restored),
                                    ("client", client if own_client else None), ("store", store)):
@@ -148,6 +168,9 @@ def run_replay(
                     if name == "store" and recorder is not None:
                         try:
                             report.update(execution_facts(recorder))
+                            usage = report["history_usage"]
+                            stats.data["historical_answer_supplies"] = usage["historical_answer_supplies"]
+                            stats.data["actual_tool_executions"] = usage["actual_tool_executions"]
                         except BaseException as error:
                             report["record_report_error"] = f"{type(error).__name__}: {error}"
                             report.update(execution_status="failed")
@@ -155,6 +178,8 @@ def run_replay(
                         resource.close()
                     except BaseException as error:
                         report["cleanup_errors"].append(f"{name}: {type(error).__name__}: {error}")
+                        if isinstance(error, KeyboardInterrupt):
+                            cancelled_during_cleanup(error, persist=name != "store")
                         if store is not None and recorder is not None and name != "store":
                             try:
                                 store.save(Failure(
@@ -177,6 +202,7 @@ def run_replay(
                          *getattr(primary.__cause__, "__notes__", ())]
                 if notes:
                     report["error_notes"] = notes
+            report["execution_status"] = final_execution_status(report)
             documents = [(output / "report.json", report)]
             if "r1" in report:
                 documents.insert(0, (output / "r1-validation.json", report["r1"]))
@@ -189,12 +215,20 @@ def run_replay(
                     )
                     report.update(execution_status="failed")
                     report.setdefault("error", "report persistence failed")
+                    if isinstance(error, KeyboardInterrupt):
+                        report.setdefault("cancellation", {"phase": "report-persistence",
+                            "error_type": type(error).__name__, "error": str(error)})
                     if primary is None:
                         primary = error
+    report["execution_status"] = final_execution_status(report)
+    try:
+        notify(ProgressEvent("finished", status=report["execution_status"],
+                             label=report["execution_status"].upper()))
+    except KeyboardInterrupt:
+        # Resources and the final report are already closed/published. A terminal
+        # observer cannot replace the durable outcome after this boundary.
+        pass
     if primary is not None and not isinstance(primary, Exception):
-        notify(ProgressEvent("finished",
-                             status="cancelled" if isinstance(primary, KeyboardInterrupt) else "failed"))
-        raise primary
-    notify(ProgressEvent("finished", status=report["execution_status"],
-                         label=report["execution_status"].upper()))
+        if not isinstance(primary, KeyboardInterrupt) or report["execution_status"] == "cancelled":
+            raise primary
     return report

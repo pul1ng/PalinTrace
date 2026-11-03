@@ -2,6 +2,7 @@
 
 from palinreplay.core.errors import IntegrityError
 from palinreplay.core.models import Run, State
+from palinreplay.storage.btrfs.verification import verification_scope
 from palinreplay.storage.store import RecordStore
 
 
@@ -19,7 +20,11 @@ def source_dependency(store, run_id, *, check=False):
     }
     if check:
         try:
-            with RecordStore.open(source.source_store) as origin, origin.snapshot():
+            with (
+                RecordStore.open(source.source_store) as origin,
+                origin.snapshot(),
+                verification_scope(),
+            ):
                 if origin.get(Run, source.run.run_id) != source.run:
                     raise IntegrityError("source Run differs from the pinned reference")
                 origin.verify_artifact(source.run.config)

@@ -461,8 +461,10 @@ class RecordStore:
         elif isinstance(record, Step):
             attempt = self.get(Attempt, record.attempt_id)
             self._same_run(record.run_id, attempt)
+            source = self.replay_source(record.run_id)
+            if source is not None and not source.start.index < record.index <= source.end.index:
+                raise IntegrityError("step index is outside the pinned Replay range")
             if record.parent_node_id is None:
-                source = self.replay_source(record.run_id)
                 if source is None or record.index != source.start.index + 1:
                     raise IntegrityError("parentless step requires the first Replay source index")
             else:

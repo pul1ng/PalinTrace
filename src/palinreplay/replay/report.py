@@ -2,6 +2,18 @@
 
 from palinreplay.core.models import Execution, Node, Operation, RunEnd, Step
 from palinreplay.record.calls import read_call
+from palinreplay.record.replay import replay_execution
+
+
+def final_execution_status(report):
+    """Framework/cleanup faults take precedence over cancellation and exit mismatches."""
+    if report["execution_status"] == "failed" or any(report.get(key) for key in (
+        "cleanup_errors", "termination_error", "record_report_error", "report_errors", "preparation_error",
+    )):
+        return "failed"
+    if report.get("cancellation"):
+        return "cancelled"
+    return report["execution_status"]
 
 
 def execution_facts(recorder):
@@ -33,4 +45,5 @@ def execution_facts(recorder):
         "last_node": ({"node_id": nodes[-1].node_id, "index": nodes[-1].index} if nodes else None),
         "incomplete_step": bool(tails), "incomplete_steps": tails,
         "run_end": ends[-1].model_dump(mode="json") if ends else None,
+        "history_usage": replay_execution(store, run_id)["history_usage"],
     }

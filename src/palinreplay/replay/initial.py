@@ -53,9 +53,9 @@ def validate_r1(materials, executor, *, stats=None):
 
 
 def initial_recorder(
-    store, materials, executor, export_agent=None, *, preparation=None,
+    store, materials, executor, export_agent=None, *, r1=None, preparation=None,
 ):
-    config = replay_config(materials, preparation=preparation)
+    config = replay_config(materials, r1=r1, preparation=preparation)
     if export_agent is None:
         initial = AgentSnapshot(Payload.json(materials.context), Payload.json(materials.input_position))
         def export_agent(boundary):
