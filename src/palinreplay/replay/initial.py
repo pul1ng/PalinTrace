@@ -53,8 +53,7 @@ def validate_r1(materials, executor, *, stats=None):
 
 
 def initial_recorder(
-    store, materials, executor, export_agent=None, *, stats=None, validation_mode="lenient",
-    preparation=None,
+    store, materials, executor, export_agent=None, *, stats=None, preparation=None,
 ):
     config = replay_config(materials, preparation=preparation)
     if export_agent is None:

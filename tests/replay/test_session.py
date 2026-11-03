@@ -674,6 +674,28 @@ def test_report_failure_does_not_mask_primary_or_skip_cleanup(tmp_path, replay_s
     assert state.closed == ["restore", "client"] and state.recorder.phase == "closed"
 
 
+@pytest.mark.parametrize("kind", ["existing", "inside-source", "contains-source", "alias"])
+def test_output_constraints_prevent_overwrite_or_source_overlap(tmp_path, replay_session, kind):
+    state = replay_session
+    marker = tmp_path / "existing" / "keep"
+    marker.parent.mkdir()
+    marker.write_bytes(b"user result")
+    if kind == "existing":
+        output = marker.parent
+    elif kind == "inside-source":
+        output = state.source / "replay"
+    elif kind == "contains-source":
+        output = tmp_path
+    else:
+        output = tmp_path / "alias"
+        output.symlink_to(state.source, target_is_directory=True)
+        output /= "replay"
+    with pytest.raises((ValueError, FileExistsError)):
+        run_replay(state.source, "C0", "C3", output=output)
+    assert marker.read_bytes() == b"user result"
+    assert not state.restored and not state.sandbox.calls
+
+
 def test_corrupt_material_stops_before_restore(tmp_path, replay_session):
     state = replay_session
     with RecordStore.open(state.source) as store:

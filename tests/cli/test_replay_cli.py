@@ -26,6 +26,8 @@ def test_minimal_cli_paths_and_status(tmp_path, monkeypatch, capsys, status, cod
     assert main(["replay", str(tmp_path), "--from", "C20"]) == code
     assert seen[0][0] == (tmp_path / "record", "C20", None)
     assert seen[0][1]["output"] == default_output("replay", "task")
+    assert seen[0][1]["output"] == Path("outputs/replay/261101_220000_task").absolute()
+    assert "validation_mode" not in seen[0][1]
     assert seen[0][1]["services_config"] is None
     assert callable(seen[0][1]["progress"])
     output = capsys.readouterr().out
@@ -59,7 +61,10 @@ def test_cli_retains_exit_mismatch_with_framework_failure(tmp_path, monkeypatch,
         assert "cleanup fault" in captured.err
 
 
-@pytest.mark.parametrize("options", [["--validation", "unknown"], ["--continue-on-difference"]])
+@pytest.mark.parametrize("options", [
+    ["--validation", "strict"], ["--validation", "lenient"], ["--validation", "unknown"],
+    ["--continue-on-difference"],
+])
 def test_invalid_or_removed_mode_option_is_rejected_before_execution(tmp_path, monkeypatch, options):
     import palinreplay.replay.session as session
 
@@ -70,6 +75,16 @@ def test_invalid_or_removed_mode_option_is_rejected_before_execution(tmp_path, m
     with pytest.raises(SystemExit) as exit:
         main(["replay", str(tmp_path), "--from", "C2", *options])
     assert exit.value.code == 2
+
+
+def test_help_exposes_execution_options_without_validation_mode(capsys):
+    with pytest.raises(SystemExit) as exit:
+        main(["replay", "--help"])
+    assert exit.value.code == 0
+    output = capsys.readouterr().out
+    assert "--validation" not in output and "--continue-on-difference" not in output
+    for option in ("--from", "--to", "--run", "--output", "--services-config", "--progress"):
+        assert option in output
 
 
 def test_replay_cancellation_keeps_exit_code_130(tmp_path, monkeypatch, capsys):

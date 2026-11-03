@@ -17,10 +17,7 @@ def add_commands(commands):
     replay.add_argument("--run", dest="run_id", help="source Run ID")
     replay.add_argument("--output", type=Path, help="new directory (default: outputs/replay/DATE_TASK)")
     replay.add_argument("--services-config", type=Path,
-                        help="JSON file listing services to prepare before saving C0")
-    replay.add_argument("--validation", dest="validation_mode", choices=("strict", "lenient"),
-                        default="lenient",
-                        help="stop on differences; lenient permits only file mtime differences (default: lenient)")
+                        help="JSON file listing services to prepare before historical execution")
     replay.add_argument("--progress", choices=("auto", "plain", "off"), default="auto",
                         help="auto: live progress on a terminal, plain logs when redirected; off: no progress")
 
@@ -33,8 +30,7 @@ def execute(args):
         output = args.output or default_output("replay", record_name(source))
         with cancellation_signals(), ReplayProgressDisplay(args.progress) as progress:
             report = run_replay(source, args.start, args.end, run_id=args.run_id, output=output,
-                                validation_mode=args.validation_mode, progress=progress,
-                                services_config=args.services_config)
+                                progress=progress, services_config=args.services_config)
         execution = report["execution_status"]
         print(f"Replay {execution.upper()} -> {output}")
         print("  完整一致性校验未执行")

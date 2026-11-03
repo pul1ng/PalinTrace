@@ -24,11 +24,9 @@ from palinreplay.storage.store import RecordStore
 
 
 def run_replay(
-    source, start, end=None, *, run_id=None, output, client=None, validation_mode="lenient",
+    source, start, end=None, *, run_id=None, output, client=None,
     progress: ProgressCallback | None = None, services_config: str | Path | None = None,
 ):
-    if validation_mode not in ("strict", "lenient"):
-        raise ValueError("validation_mode must be 'strict' or 'lenient'")
     services = load_services(services_config) if services_config is not None else None
     source, output = Path(source).absolute(), Path(output).absolute()
     outside_store(source, output)
@@ -103,11 +101,11 @@ def run_replay(
         store = RecordStore.create(output / "record")
         report["phase"] = "source-initialization"
         recorder = initial_recorder(store, materials, executor, context.export, stats=stats,
-                                    validation_mode=validation_mode, preparation=preparation)
+                                    preparation=preparation)
         report["run_id"] = recorder.run.run_id
         report["phase"] = "execute"
         replay_range(recorder, context, executor, materials, report=report, stats=stats,
-                     validation_mode=validation_mode, progress=notify)
+                     progress=notify)
         if recorder.phase == "ready":
             recorder.finish("Replay " + report["execution_status"], details={"replay": report})
         report["phase"] = "finished"

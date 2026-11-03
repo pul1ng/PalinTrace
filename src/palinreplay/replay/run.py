@@ -16,7 +16,6 @@ class PartialDifference(Exception):
 
 def replay_range(
     recorder, context, executor, materials, *, report=None, stats=None,
-    validation_mode="lenient",
     progress: ProgressCallback | None = None,
 ):
     stats = stats or ReplayStats()
