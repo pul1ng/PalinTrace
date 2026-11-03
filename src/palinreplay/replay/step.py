@@ -31,7 +31,8 @@ def execute_step(recorder, context, executor, history, *, on_result=None, stats=
                 Payload(result.output), "sandbox-merged-output-bytes",
                 details={"decoded": context.native.BorrowedEnvironment.output(result),
                          "duration_sec": result.duration_sec},
-                outcome="error" if result.exit_code else "returned",
+                outcome=("unknown" if type(result.exit_code) is not int else
+                         "error" if result.exit_code else "returned"),
             ), visibility="observed-attempt",
         )
         call = step.tool(adapter, tool.request, tool_call_id=tool.source["tool_call_id"])

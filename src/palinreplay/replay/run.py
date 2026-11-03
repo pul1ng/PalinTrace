@@ -2,7 +2,7 @@
 
 from palinreplay.core.models import State
 from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressReporter
-from palinreplay.replay.compare import compare_tool, is_mtime_only_difference
+from palinreplay.replay.compare import compare_exit_codes
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.replay.step import execute_step
 from palinreplay.storage.btrfs.models import Snapshot
@@ -46,77 +46,55 @@ def preparation_comparison(store, executor, source, source_node, node, *, report
 
 
 def replay_range(
-    recorder, context, executor, materials, compare_files=None, *, report=None, stats=None,
+    recorder, context, executor, materials, *, report=None, stats=None,
     validation_mode="lenient",
     progress: ProgressCallback | None = None,
 ):
     stats = stats or ReplayStats()
     notify = ProgressReporter(progress)
-    plan = materials.plan
-    mappings = [{"source_node_id": plan.start.node_id, "source_index": plan.start.index,
-                 "node_id": recorder.current_node.node_id, "index": 0}]
     if report is None:
         report = {}
-    report.update(status="failed", execution_status="failed",
-                  validation_status="difference" if "first_difference" in report else "incomplete",
-                  validation_mode=validation_mode, incomplete_step=False,
-                  mappings=mappings, steps=[], statistics=stats.data)
-    notify(ProgressEvent("committed", step=0, source_step=plan.start.index,
-                         total_steps=len(materials.steps)))
+    report.update(status="failed", execution_status="failed", validation_status="not-performed",
+                  incomplete_step=False, mappings=[], steps=[], statistics=stats.data)
 
-    def stop(reason):
-        completed = len(mappings) == len(materials.steps) + 1
-        report.update(status="difference", execution_status="completed" if completed else "stopped")
-        if not completed:
-            report["stop_reason"] = reason
+    def stop():
+        report.update(status="difference", execution_status="stopped", stop_reason="exit-code")
         return report
 
     for index, history in enumerate(materials.steps):
-        previous = recorder.current_node
-        tool_comparisons = []
+        tools = []
         location = {"source_node_id": history.node.node_id, "source_index": history.node.index}
-        entry = {**location, "tools": tool_comparisons,
-                 "starting_divergent": report["validation_status"] == "difference"}
+        entry = {**location, "tools": tools}
         report["steps"].append(entry)
         report["incomplete_step"] = True
         notify(ProgressEvent("replaying", source_step=history.node.index, step=index + 1))
 
         def on_result(i, tool, call, result, last):
-            compared = {**compare_tool(tool, result), **location,
-                        "tool_index": i, "execution_id": call.execution_id}
-            tool_comparisons.append(compared)
-            if not compared["definitive"]:
-                raise RuntimeError("Replay tool result is not definitive")
+            compared = {
+                **compare_exit_codes(tool.details["backend"]["decoded"]["returncode"], result.exit_code),
+                **location, "tool_index": i, "execution_id": call.execution_id,
+                "source_execution_id": tool.source["execution_id"],
+            }
+            tools.append(compared)
             if not compared["equal"]:
-                _difference(report, compared, "tool-result")
+                report.setdefault("first_difference", compared)
+                report["stop_reason"] = "exit-code"
                 if not last:
                     raise PartialDifference(compared)
 
         try:
             node, _ = execute_step(recorder, context, executor, history, on_result=on_result, stats=stats)
         except PartialDifference:
-            stop("tool-result")
-            recorder.end_incomplete("Replay tool difference", details={"replay": report})
+            stop()
+            recorder.end_incomplete("Replay exit code differs", details={"replay": report})
             return report
-        mappings.append({**location, "node_id": node.node_id, "index": node.index})
+        report["mappings"].append({**location, "node_id": node.node_id, "index": node.index})
         entry["node_id"] = node.node_id
         report["incomplete_step"] = False
-        if any(not c["equal"] for c in tool_comparisons):
-            notify(ProgressEvent("committed", source_step=history.node.index, step=node.index))
-            return stop("tool-result")
-        if compare_files is None:
-            raise ValueError("Replay requires incremental file comparison")
-        notify(ProgressEvent("verifying", source_step=history.node.index, step=node.index))
-        files = {**compare_files(index, previous, node), **location}
-        entry["files"] = files
-        if not files["equal"]:
-            _difference(report, files, "file-state")
-        stats.files(files)
         notify(ProgressEvent("committed", source_step=history.node.index, step=node.index))
-        if not files["equal"] and (validation_mode == "strict" or not is_mtime_only_difference(files)):
-            return stop("file-state")
-    validation = "difference" if "first_difference" in report else "match"
-    report.update(status=validation, execution_status="completed", validation_status=validation)
+        if any(not tool["equal"] for tool in tools):
+            return stop()
+    report.update(status="match", execution_status="completed")
     return report
 
 

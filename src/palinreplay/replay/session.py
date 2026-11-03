@@ -10,7 +10,7 @@ from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.initial import initial_recorder, validate_r1
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
-from palinreplay.replay.run import btrfs_comparison, preparation_comparison, replay_range
+from palinreplay.replay.run import preparation_comparison, replay_range
 from palinreplay.replay.service_config import load_services
 from palinreplay.replay.services import PreparationJournal, prepare_services
 from palinreplay.replay.stats import ReplayStats
@@ -101,8 +101,7 @@ def run_replay(
             stats.files(files)
             write_json(output / "preparation-files.json", files)
         report["phase"] = "execute"
-        replay_range(recorder, context, executor, materials,
-                     btrfs_comparison(store, executor, snapshots), report=report, stats=stats,
+        replay_range(recorder, context, executor, materials, report=report, stats=stats,
                      validation_mode=validation_mode, progress=notify)
         if recorder.phase == "ready":
             recorder.finish("Replay " + report["status"], details={"replay": report})

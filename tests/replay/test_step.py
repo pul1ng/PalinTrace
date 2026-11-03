@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 import pytest
 
 from palinreplay.agents import AgentTask
@@ -5,11 +7,11 @@ from palinreplay.core.interfaces import BoundaryAdapter, Payload
 from palinreplay.core.models import Node, State
 from palinreplay.record.calls import read_call
 from palinreplay.record.recorder import Recorder
+from palinreplay.replay.config import replay_config
 from palinreplay.replay.context import ReplayContext
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.run import replay_range
-from palinreplay.replay.step import execute_step
 from palinreplay.sandbox.base import ExecResult
 from palinreplay.storage.store import RecordStore
 from tests.agents.test_mini_agent import (  # noqa: F401
@@ -19,390 +21,172 @@ from tests.agents.test_mini_agent import (  # noqa: F401
     integrated,
     response,
 )
-from tests.helpers.replay import mtime_difference
 
 
-def test_real_execution_is_recorded_with_new_calls_and_context(tmp_path):
-    source, _, _, _, original = integrated(tmp_path, [response("write"), response("submit")])
+@contextmanager
+def recording(store, materials, context, sandbox):
+    rec = Recorder(store, task_id="task", agent_name="mini", agent_version="fixture",
+                   config=Payload.json(replay_config(materials)),
+                   boundary=BoundaryAdapter(context.export, Capture(sandbox)))
+    rec.start_from_source()
     try:
-        original.run(AgentTask("task", "Task"))
-        materials = load_replay_materials(source, pin_replay(source, "C0", "C1"))
-        context, sandbox = ReplayContext(materials), Sandbox()
-        sandbox.execute = lambda req: sandbox.exec(req["action"]["command"], cwd=req["cwd"],
-                                                 env=req["env"], timeout_sec=req["timeout_sec"])
-        with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini-swe-agent", agent_version="fixture",
-                          config=Payload.json({}),
-                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                node, results = execute_step(rec, context, sandbox, materials.steps[0])
-                assert node.index == 1 and sandbox.files["file"] == "changed"
-                assert sandbox.calls[0][0] == "write" and results[0].output == b"ok\n"
-                assert node.model_execution_id != materials.plan.end.model_execution_id
-                assert node.tool_execution_ids != materials.plan.end.tool_execution_ids
-                assert store.read_json(node.context)["messages"][-1]["extra"]["raw_output"] == "ok\n"
-                assert store.read_json(node.input_position)["adoptions"][-1]["execution_id"] == node.tool_execution_ids[0]
-                assert store.check_integrity().ok
+        yield rec
+    except BaseException as error:
+        rec.__exit__(type(error), error, error.__traceback__)
+        raise
+    else:
+        if rec.phase == "ready":
+            if rec.current_node is not None:
                 rec.finish()
+            else:
+                rec.cancel()  # Successful zero-node termination is enabled in task 7.
     finally:
-        source.close()
+        rec.close()
 
 
-def test_fixed_c20_to_c23_range_becomes_c0_to_c3(tmp_path):
-    responses = [response("write")] * 24 + [response("submit")]
-    source, _, _, _, original = integrated(tmp_path, responses, agent_config={"step_limit": 30})
+def executor(sandbox):
+    sandbox.execute = lambda req: sandbox.exec(req["action"]["command"], cwd=req["cwd"],
+                                             env=req["env"], timeout_sec=req["timeout_sec"])
+    return sandbox
+
+
+def test_fixed_c20_range_records_only_actual_source_numbered_nodes(tmp_path):
+    source, _, _, _, original = integrated(
+        tmp_path, [response("write")] * 24 + [response("submit")], agent_config={"step_limit": 30},
+    )
     try:
         original.run(AgentTask("task", "Task"))
         materials = load_replay_materials(source, pin_replay(source, "C20", "C23"))
-        context, sandbox = ReplayContext(materials), Sandbox()
-        sandbox.files["file"] = "changed"
-        sandbox.execute = lambda req: sandbox.exec(req["action"]["command"])
+        context, sandbox = ReplayContext(materials), executor(Sandbox())
         with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini", agent_version="fixture",
-                          config=Payload.json({}),
-                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                report = replay_range(rec, context, sandbox, materials,
-                                      compare_files=lambda *args: {"equal": True})
-                assert report["status"] == "match"
+            with recording(store, materials, context, sandbox) as rec:
+                report = replay_range(rec, context, sandbox, materials)
                 assert report["execution_status"] == "completed"
-                assert report["validation_status"] == "match"
-                assert [m["source_index"] for m in report["mappings"]] == [20, 21, 22, 23]
-                assert [m["index"] for m in report["mappings"]] == [0, 1, 2, 3]
+                assert [m["source_index"] for m in report["mappings"]] == [21, 22, 23]
+                assert [m["index"] for m in report["mappings"]] == [21, 22, 23]
+                assert [n.index for n in store.list(Node)] == [21, 22, 23]
                 assert len(sandbox.calls) == 3
-                saved = store.read_json(rec.current_node.context)
+                node = rec.current_node
+                assert node.model_execution_id != materials.plan.end.model_execution_id
+                assert node.tool_execution_ids != materials.plan.end.tool_execution_ids
+                saved = store.read_json(node.context)
                 assert saved["counters"]["n_calls"] == 23
                 assert saved["replay"]["historical_answer_supplies"] == 3
                 assert saved["replay"]["actual_model_calls"] == 0
-                rec.finish()
+                assert saved["messages"][-1]["extra"]["raw_output"] == "ok\n"
+                assert store.check_integrity().ok
     finally:
         source.close()
 
 
-@pytest.mark.parametrize("validation_mode", ["strict", "lenient"])
 @pytest.mark.parametrize("end", ["C1", "C2"])
-@pytest.mark.parametrize("different_tool,expected_nodes,expected_calls", [(0, 1, 1), (1, 2, 2)])
-def test_early_and_final_tool_differences_keep_correct_boundary(
-    tmp_path, validation_mode, end, different_tool, expected_nodes, expected_calls,
-):
+@pytest.mark.parametrize("different_tool", [0, 1])
+def test_exit_mismatch_saves_actual_boundary_and_stops_even_at_endpoint(tmp_path, end, different_tool):
     source, _, _, _, original = integrated(tmp_path, [response("read", "read"), response("submit")])
     try:
         original.run(AgentTask("task", "Task"))
         materials = load_replay_materials(source, pin_replay(source, "C0", end))
         context, sandbox = ReplayContext(materials), Sandbox()
+        requests = []
         def execute(req):
+            requests.append(req)
             result = sandbox.exec(req["action"]["command"])
-            if len(sandbox.calls) - 1 == different_tool:
-                return ExecResult(result.command, b"different", 0, 1)
-            return result
+            return ExecResult(result.command, b"actual", 1 if len(requests) - 1 == different_tool else 0, 1)
         sandbox.execute = execute
         with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini", agent_version="v", config=Payload.json({}), boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                report = replay_range(rec, context, sandbox, materials,
-                                      compare_files=lambda *args: {"equal": True},
-                                      validation_mode=validation_mode)
-                assert report["status"] == "difference"
-                completed = end == "C1" and different_tool == 1
-                assert report["execution_status"] == ("completed" if completed else "stopped")
-                assert report["validation_status"] == "difference"
-                assert report["incomplete_step"] == (different_tool == 0)
-                assert ("stop_reason" in report) == (not completed)
-                assert report["first_difference"]["source_index"] == 1
-                assert report["first_difference"]["source_node_id"] == materials.steps[0].node.node_id
-                assert report["first_difference"]["tool_index"] == different_tool
-                assert len(store.list(Node)) == expected_nodes
-                assert len(sandbox.calls) == expected_calls
+            with recording(store, materials, context, sandbox) as rec:
+                report = replay_range(rec, context, sandbox, materials)
+                assert report["execution_status"] == "stopped"
+                assert report["stop_reason"] == "exit-code"
+                assert report["incomplete_step"] is (different_tool == 0)
+                mismatch = report["first_difference"]
+                assert mismatch["source_index"] == 1 and mismatch["tool_index"] == different_tool
+                assert mismatch["source_exit_code"] == 0 and mismatch["actual_exit_code"] == 1
+                actual = read_call(store, mismatch["execution_id"])
+                assert store.read_bytes(actual.events[1].payload) == b"actual"
+                assert requests == [t.request for t in materials.steps[0].tools[:different_tool + 1]]
+                assert len(store.list(Node)) == different_tool
+                assert len(report["mappings"]) == different_tool
+                if different_tool:
+                    assert store.list(Node)[0].index == 1
+                    assert store.read_json(rec.current_node.context)["messages"][-1]["extra"]["raw_output"] == "actual"
                 assert store.check_integrity().ok
-                if rec.phase == "ready":
-                    rec.finish("difference")
     finally:
         source.close()
 
 
-@pytest.mark.parametrize("end", ["C1", "C2"])
-def test_file_difference_distinguishes_completed_range(tmp_path, end):
-    source, _, _, _, original = integrated(
-        tmp_path, [response("write"), response("read"), response("submit")]
+def test_matching_exit_codes_keep_different_outputs_and_files_and_continue(tmp_path, monkeypatch):
+    source, source_sandbox, _, _, original = integrated(
+        tmp_path, [response("write"), response("read-file"), response("read"), response("submit")],
     )
     try:
         original.run(AgentTask("task", "Task"))
-        materials = load_replay_materials(source, pin_replay(source, "C0", end))
+        materials = load_replay_materials(source, pin_replay(source, "C0", "C3"))
         context, sandbox = ReplayContext(materials), Sandbox()
-        sandbox.execute = lambda req: sandbox.exec(req["action"]["command"])
+        def execute(req):
+            result = sandbox.exec(req["action"]["command"])
+            sandbox.files["file"] = "actual contents"
+            return ExecResult(result.command, b"different\xff\r\n", 0, 1)
+        sandbox.execute = execute
+        def no_comparison(*args, **kwargs):
+            pytest.fail("runtime output/file comparison was called")
+        monkeypatch.setattr("palinreplay.replay.compare.compare_tool", no_comparison)
+        monkeypatch.setattr("palinreplay.replay.run.btrfs_comparison", no_comparison)
         with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
-                          config=Payload.json({}),
-                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                report = replay_range(rec, context, sandbox, materials,
-                                      compare_files=lambda *args: {"equal": False,
-                                                                   "different_paths": ["file"]},
-                                      validation_mode="strict")
-                assert report["execution_status"] == ("completed" if end == "C1" else "stopped")
-                assert report["validation_status"] == "difference"
-                assert ("stop_reason" in report) == (end != "C1")
-                assert not report["incomplete_step"]
-                assert report["first_difference"] == report["steps"][0]["files"]
-                assert report["first_difference"]["source_index"] == 1
-                assert report["first_difference"]["different_paths"] == ["file"]
-                assert len(sandbox.calls) == 1 and len(store.list(Node)) == 2
-                rec.finish("difference")
-    finally:
-        source.close()
-
-
-@pytest.mark.parametrize("mode", ["strict", "lenient"])
-@pytest.mark.parametrize("end", ["C0", "C2"])
-def test_preparation_difference_survives_matching_history_and_empty_range(tmp_path, mode, end):
-    source, _, _, _, original = integrated(tmp_path, [response("read"), response("read"), response("submit")])
-    try:
-        original.run(AgentTask("task", "Task"))
-        materials = load_replay_materials(source, pin_replay(source, "C0", end))
-        context, sandbox = ReplayContext(materials), Sandbox()
-        sandbox.execute = lambda req: sandbox.exec(req["action"]["command"])
-        first = {"source_index": 0, "difference_reason": "service-preparation", "equal": False}
-        report = {"first_difference": first, "validation_status": "difference"}
-        with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
-                          config=Payload.json({}), boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                replay_range(rec, context, sandbox, materials, report=report, validation_mode=mode,
-                             compare_files=lambda *args: {"equal": True})
-                assert report["execution_status"] == "completed"
-                assert report["validation_status"] == "difference"
-                assert report["first_difference"] is first
-                assert all(step["starting_divergent"] for step in report["steps"])
-                assert all(tool["equal"] for step in report["steps"] for tool in step["tools"])
-                assert len(sandbox.calls) == (0 if end == "C0" else 2)
-                rec.finish()
-    finally:
-        source.close()
-
-
-def test_empty_range_is_completed_and_matched(tmp_path):
-    source, _, _, _, original = integrated(tmp_path, [response("submit")])
-    try:
-        original.run(AgentTask("task", "Task"))
-        materials = load_replay_materials(source, pin_replay(source, "C0", "C0"))
-        context, sandbox = ReplayContext(materials), Sandbox()
-        with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
-                          config=Payload.json({}),
-                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
+            with recording(store, materials, context, sandbox) as rec:
                 report = replay_range(rec, context, sandbox, materials)
                 assert report["execution_status"] == "completed"
-                assert report["validation_status"] == "match"
-                assert not report["steps"] and len(report["mappings"]) == 1
-                assert not sandbox.calls
-                rec.finish()
+                assert len(sandbox.calls) == len(store.list(Node)) == 3
+                assert "first_difference" not in report
+                assert source_sandbox.files["file"] == "changed"
+                assert sandbox.files["file"] == "actual contents"
+                assert store.read_json(store.get(State, rec.current_node.state_id).manifest)["file"] == "actual contents"
+                call = read_call(store, rec.current_node.tool_execution_ids[0])
+                assert store.read_bytes(call.events[1].payload) == b"different\xff\r\n"
+                assert all("files" not in step for step in report["steps"])
+                assert store.check_integrity().ok
     finally:
         source.close()
 
 
-@pytest.mark.parametrize("after_difference", [False, True])
-def test_execution_fault_preserves_first_observed_difference(tmp_path, monkeypatch, after_difference):
+@pytest.mark.parametrize("after_mismatch", [False, True])
+def test_execution_or_adoption_fault_preserves_observed_mismatch(tmp_path, monkeypatch, after_mismatch):
     source, _, _, _, original = integrated(tmp_path, [response("read"), response("submit")])
     try:
         original.run(AgentTask("task", "Task"))
         materials = load_replay_materials(source, pin_replay(source, "C0", "C1"))
         context, sandbox = ReplayContext(materials), Sandbox()
-
         def fault(*args):
             raise RuntimeError("execution fault")
-
         sandbox.execute = fault
-        if after_difference:
-            sandbox.execute = lambda req: ExecResult("read", b"different", 0, 1)
+        if after_mismatch:
+            sandbox.execute = lambda req: ExecResult("read", b"actual", 1, 1)
             monkeypatch.setattr(context, "accept_results", fault)
         report = {}
         with RecordStore.create(tmp_path / "replay") as store:
             with pytest.raises(RuntimeError, match="execution fault"):
-                with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
-                              config=Payload.json({}),
-                              boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
+                with recording(store, materials, context, sandbox) as rec:
                     replay_range(rec, context, sandbox, materials, report=report)
             assert report["execution_status"] == "failed"
-            assert report["validation_status"] == ("difference" if after_difference else "incomplete")
-            assert ("first_difference" in report) == after_difference
-            assert report["incomplete_step"] and len(store.list(Node)) == 1
-            if after_difference:
-                assert report["first_difference"]["source_index"] == 1
+            assert ("first_difference" in report) is after_mismatch
+            assert report["incomplete_step"] and not store.list(Node)
+            assert store.check_integrity().ok
     finally:
         source.close()
 
 
-@pytest.mark.parametrize("validation_mode", ["strict", "lenient"])
-@pytest.mark.parametrize("different_tool", [0, 1])
-@pytest.mark.parametrize("kind", ["output", "exit-code"])
-def test_validation_mode_retains_actual_tool_results(
-    tmp_path, validation_mode, different_tool, kind,
-):
-    source, _, _, _, original = integrated(
-        tmp_path, [response("read", "read"), response("read"), response("submit")]
-    )
+def test_equal_nonzero_exits_allow_historical_recovery(tmp_path):
+    source, _, _, _, original = integrated(tmp_path, [response("bad"), response("read"), response("submit")])
     try:
         original.run(AgentTask("task", "Task"))
         materials = load_replay_materials(source, pin_replay(source, "C0", "C2"))
-        context, sandbox = ReplayContext(materials), Sandbox()
-
-        def execute(req):
-            result = sandbox.exec(req["action"]["command"])
-            if len(sandbox.calls) - 1 == different_tool:
-                return ExecResult(result.command, b"actual" if kind == "output" else result.output,
-                                  1 if kind == "exit-code" else result.exit_code, 1)
-            return result
-
-        sandbox.execute = execute
+        context, sandbox = ReplayContext(materials), executor(Sandbox())
         with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
-                          config=Payload.json({}),
-                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                def compare(*args):
-                    pytest.fail("tool mismatch must stop before file comparison or further history")
-
-                report = replay_range(rec, context, sandbox, materials, compare_files=compare,
-                                      validation_mode=validation_mode)
-                assert report["execution_status"] == "stopped"
-                assert report["validation_mode"] == validation_mode
-                assert report["validation_status"] == report["status"] == "difference"
-                first = report["steps"][0]["tools"][different_tool]
-                assert report["first_difference"] == first
-                assert first["source_index"] == 1 and first["tool_index"] == different_tool
-                actual = read_call(store, first["execution_id"])
-                actual_output = b"actual" if kind == "output" else b"ok\n"
-                assert store.read_bytes(actual.events[1].payload) == actual_output
-                details = store.read_json(actual.events[1].details)
-                assert details["backend"]["decoded"]["returncode"] == (1 if kind == "exit-code" else 0)
-                assert len(sandbox.calls) == different_tool + 1
-                assert len(store.list(Node)) == (1 if different_tool == 0 else 2)
-                assert report["incomplete_step"] is (different_tool == 0)
-                assert report["stop_reason"] == "tool-result" and len(report["steps"]) == 1
-                if different_tool == 1:
-                    node = store.list(Node)[1]
-                    messages = store.read_json(node.context)["messages"]
-                    assert messages[-1]["extra"]["raw_output"] == actual_output.decode()
+            with recording(store, materials, context, sandbox) as rec:
+                report = replay_range(rec, context, sandbox, materials)
+                assert report["execution_status"] == "completed" and len(sandbox.calls) == 2
+                tool = report["steps"][0]["tools"][0]
+                assert tool["source_exit_code"] == tool["actual_exit_code"] == 1
                 assert store.check_integrity().ok
-                if rec.phase == "ready":
-                    rec.finish("Replay difference")
-    finally:
-        source.close()
-
-
-@pytest.mark.parametrize("validation_mode", [None, "strict", "lenient"])
-def test_content_difference_stops_and_preserves_actual_workspace(tmp_path, validation_mode):
-    source, source_sandbox, _, _, original = integrated(
-        tmp_path, [response("write"), response("read-file"), response("read"), response("submit")]
-    )
-    try:
-        original.run(AgentTask("task", "Task"))
-        materials = load_replay_materials(source, pin_replay(source, "C0", "C3"))
-        context, sandbox = ReplayContext(materials), Sandbox()
-
-        def execute(req):
-            result = sandbox.exec(req["action"]["command"])
-            sandbox.files["file"] = "actual contents"
-            return result
-
-        sandbox.execute = execute
-        with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
-                          config=Payload.json({}),
-                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                def compare(index, previous, node):
-                    assert index == 0
-                    actual = store.read_json(store.get(State, node.state_id).manifest)
-                    assert actual["file"] == "actual contents"
-                    files = mtime_difference()
-                    files["differences"][0]["actual"]["sha256"] = "0" * 64
-                    return files
-
-                options = {} if validation_mode is None else {"validation_mode": validation_mode}
-                report = replay_range(rec, context, sandbox, materials, compare_files=compare,
-                                      **options)
-                assert report["validation_mode"] == (validation_mode or "lenient")
-                assert report["execution_status"] == "stopped"
-                assert report["validation_status"] == report["status"] == "difference"
-                assert report["first_difference"] == report["steps"][0]["files"]
-                assert report["stop_reason"] == "file-state"
-                assert source_sandbox.files["file"] == "changed"
-                assert len(store.list(Node)) == 2 and len(sandbox.calls) == 1
-                assert store.check_integrity().ok
-                rec.finish("Replay difference")
-    finally:
-        source.close()
-
-
-@pytest.mark.parametrize("validation_mode", [None, "strict", "lenient"])
-@pytest.mark.parametrize("later", ["match", "tool", "file"])
-def test_only_allowed_mtime_drift_continues_until_a_critical_difference(
-    tmp_path, validation_mode, later,
-):
-    source, _, _, _, original = integrated(
-        tmp_path, [response("write"), response("read"), response("read"), response("submit")]
-    )
-    try:
-        original.run(AgentTask("task", "Task"))
-        materials = load_replay_materials(source, pin_replay(source, "C0", "C3"))
-        context, sandbox = ReplayContext(materials), Sandbox()
-
-        def execute(req):
-            result = sandbox.exec(req["action"]["command"])
-            if len(sandbox.calls) == 2 and later == "tool":
-                return ExecResult(result.command, result.output, 1, 1)
-            return result
-
-        sandbox.execute = execute
-        with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
-                          config=Payload.json({}),
-                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                def compare(index, *args):
-                    if index == 0:
-                        return mtime_difference()
-                    if index == 1 and later == "file":
-                        return {"equal": False, "different_paths": ["missing-file"]}
-                    return {"equal": True}
-
-                options = {} if validation_mode is None else {"validation_mode": validation_mode}
-                report = replay_range(rec, context, sandbox, materials, compare_files=compare,
-                                      **options)
-                strict = validation_mode == "strict"
-                completed = not strict and later == "match"
-                assert report["execution_status"] == ("completed" if completed else "stopped")
-                assert report["validation_status"] == "difference"
-                assert report["first_difference"] == report["steps"][0]["files"]
-                assert report["first_difference"]["source_index"] == 1
-                assert len(sandbox.calls) == (1 if strict else 3 if completed else 2)
-                assert len(store.list(Node)) == len(sandbox.calls) + 1
-                if not strict:
-                    assert all(step["starting_divergent"] for step in report["steps"][1:])
-                if not completed:
-                    assert report["stop_reason"] == ("tool-result" if not strict and later == "tool"
-                                                     else "file-state")
-                assert store.check_integrity().ok
-                rec.finish("Replay difference")
-    finally:
-        source.close()
-
-
-@pytest.mark.parametrize("validation_mode", ["strict", "lenient"])
-def test_matching_nonzero_exit_continues_to_next_history(tmp_path, validation_mode):
-    source, _, _, _, original = integrated(
-        tmp_path, [response("bad"), response("read"), response("submit")]
-    )
-    try:
-        original.run(AgentTask("task", "Task"))
-        materials = load_replay_materials(source, pin_replay(source, "C0", "C2"))
-        context, sandbox = ReplayContext(materials), Sandbox()
-        sandbox.execute = lambda req: sandbox.exec(req["action"]["command"])
-        with RecordStore.create(tmp_path / "replay") as store:
-            with Recorder(store, task_id="task", agent_name="mini", agent_version="v",
-                          config=Payload.json({}),
-                          boundary=BoundaryAdapter(context.export, Capture(sandbox))) as rec:
-                report = replay_range(rec, context, sandbox, materials,
-                                      compare_files=lambda *args: {"equal": True},
-                                      validation_mode=validation_mode)
-                assert report["execution_status"] == "completed"
-                assert report["validation_status"] == "match" and len(sandbox.calls) == 2
-                first = report["steps"][0]["tools"][0]
-                assert first["source_exit_code"] == first["actual_exit_code"] == 1
-                assert store.check_integrity().ok
-                rec.finish()
     finally:
         source.close()
