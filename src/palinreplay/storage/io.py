@@ -112,7 +112,9 @@ def publish_receipt_json(path, value):
         except BaseException as diagnostic:
             errors.append(f"retraction: {type(diagnostic).__name__}: {diagnostic}")
         return {"status": "unconfirmed", "published": published,
-                "directory_synced": synced, "errors": errors}
+                "directory_synced": synced, "errors": errors,
+                "failure": {"phase": "receipt-publication", "error_type": type(error).__name__,
+                            "error": str(error)}}
     finally:
         if stage is not None:
             try:

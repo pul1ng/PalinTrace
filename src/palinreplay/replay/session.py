@@ -5,6 +5,7 @@ from pathlib import Path
 from palinreplay.core.errors import IntegrityError
 from palinreplay.core.models import Failure, RunEnd
 from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressReporter
+from palinreplay.core.replay_outcome import failure_evidence
 from palinreplay.record.restore import load_restore_materials, restore_r1_node
 from palinreplay.replay.context import ReplayContext
 from palinreplay.replay.environment import RestoredExecutor
@@ -295,11 +296,28 @@ def run_replay(
                 write_report()
             report["execution_status"] = final_execution_status(report)
             if binding is not None:
-                payload = {**binding, "execution_status": report["execution_status"],
-                           **report["outcome_evidence"], "resource_closes": closes,
-                           "publications": publications}
-                publication = publish(store.root, payload)
+                try:
+                    payload = {**binding, "execution_status": report["execution_status"],
+                               **report["outcome_evidence"], "resource_closes": closes,
+                               "publications": publications}
+                    publication = publish(store.root, payload)
+                except BaseException as error:
+                    remember(error)
+                    publication = {
+                        "status": "unconfirmed", "errors": [f"{type(error).__name__}: {error}"],
+                        "failure": {"phase": "receipt-publication",
+                                    "error_type": type(error).__name__, "error": str(error)},
+                    }
                 if publication["status"] != "confirmed":
+                    detail = publication.get("failure", {
+                        "phase": "receipt-publication", "error_type": "ReceiptPublicationError",
+                        "error": "required receipt publication was not confirmed",
+                    })
+                    evidence = failure_evidence("cleanup", detail)
+                    for key, values in evidence.items():
+                        report["outcome_evidence"][key].extend(values)
+                    if evidence["cancellations"]:
+                        report.setdefault("cancellation", detail)
                     report["receipt_publication"] = publication
                     report.setdefault("report_errors", []).extend(publication.get("errors", ()))
                     report["execution_status"] = "failed"

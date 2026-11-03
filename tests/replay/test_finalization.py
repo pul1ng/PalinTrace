@@ -222,6 +222,63 @@ def test_failed_publication_preserves_an_existing_receipt(tmp_path):
 
 
 @pytest.mark.parametrize("known_fault", [False, True])
+@pytest.mark.parametrize("phase", ["validation", "envelope", "encoding", "link"])
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, OSError])
+def test_publication_exception_cannot_replace_the_final_outcome(
+    tmp_path, replay_session, monkeypatch, known_fault, phase, error_type,
+):
+    from palinreplay.cli import replay as cli
+    from palinreplay.storage import replay_finalization as finalization
+
+    if known_fault:
+        replay_session.fault = "tool"
+    events = []
+    class Progress:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def __call__(self, event):
+            events.append(event)
+    monkeypatch.setattr(cli, "ReplayProgressDisplay", lambda *a: Progress())
+    def interrupted(*args, **kwargs):
+        raise error_type("receipt publication interrupted")
+    output = tmp_path / "output"
+    with monkeypatch.context() as inject:
+        if phase == "validation":
+            inject.setattr(finalization.Receipt, "model_validate", interrupted)
+        elif phase == "envelope":
+            inject.setattr(finalization, "envelope", interrupted)
+        elif phase == "link":
+            link = io.os.link
+            def broken_link(source, destination, **kwargs):
+                if destination.name.startswith("replay-finalization-"):
+                    interrupted()
+                return link(source, destination, **kwargs)
+            inject.setattr(io.os, "link", broken_link)
+        else:
+            encode = io.json_bytes
+            def broken_encode(value):
+                if isinstance(value, dict) and set(value) == {"payload", "sha256"}:
+                    interrupted()
+                return encode(value)
+            inject.setattr(io, "json_bytes", broken_encode)
+        code = main(["replay", str(replay_session.source), "--from", "C0", "--to", "C3",
+                     "--output", str(output)])
+    report = json.loads((output / "report.json").read_bytes())
+    assert code == 1 and report["execution_status"] == "failed"
+    assert bool(report.get("cancellation")) is (error_type is KeyboardInterrupt)
+    assert report["outcome_evidence"]["faults"]
+    assert [e.status for e in events if e.phase == "finished"] == ["failed"]
+    replay = replay_view(output)
+    assert replay["execution_status"] == ("failed" if known_fault else "unconfirmed")
+    assert replay["finalization"]["status"] == "unconfirmed"
+    with RecordStore.open(output / "record") as store:
+        assert len(store.list(RunEnd)) == 1
+    assert len(replay_session.sandbox.calls) == (2 if known_fault else 4)
+
+
+@pytest.mark.parametrize("known_fault", [False, True])
 def test_session_receipt_failure_leaves_explicit_unconfirmed_evidence(
     tmp_path, replay_session, monkeypatch, known_fault,
 ):
