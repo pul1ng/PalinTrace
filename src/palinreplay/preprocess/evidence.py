@@ -243,11 +243,11 @@ class EvidenceBatch:
     prompt_version: str = EVIDENCE_PROMPT_VERSION
 
 
-def _find_unique(text: str, quote: str) -> int:
+def _find_unique(text: str, quote: str, *, unique: bool) -> int:
     first = text.find(quote)
     if first < 0:
         raise ValueError(f"quoted evidence is not present: {quote!r}")
-    if text.find(quote, first + 1) >= 0:
+    if unique and text.find(quote, first + 1) >= 0:
         raise ValueError(f"quoted evidence is ambiguous; include more context: {quote!r}")
     return first
 
@@ -256,6 +256,8 @@ def _span(
     call: TimelineCall,
     field_name: Literal["request.command", "result.output_text"],
     quote: str,
+    *,
+    unique: bool = True,
 ) -> VerifiedSpan:
     if field_name == "request.command":
         text, artifact = call.request.command, call.refs.request.sha256
@@ -264,7 +266,7 @@ def _span(
         if text is None:
             raise ValueError("cannot quote non-UTF-8 or missing output text")
         artifact = call.refs.output.sha256
-    start = _find_unique(text, quote)
+    start = _find_unique(text, quote, unique=unique)
     return VerifiedSpan(
         field=field_name,
         quote=quote,
@@ -282,7 +284,11 @@ def _build_candidate_evidence(
             f"evidence service_name {raw.service_name!r} does not match candidate {candidate.name!r}"
         )
     identity = tuple(
-        VerifiedClue(kind=clue.kind, value=clue.value, span=_span(call, clue.field, clue.quote))
+        VerifiedClue(
+            kind=clue.kind,
+            value=clue.value,
+            span=_span(call, clue.field, clue.quote, unique=False),
+        )
         for clue in raw.identity
     )
     events = tuple(
