@@ -24,14 +24,23 @@ def validate_r1(materials, executor, *, stats=None):
             raise IntegrityError("restored context/input position/config differs from source prefix")
         source = Snapshot.model_validate(restored.report["snapshot"])
         executor._container.pause()
+        primary = None
         try:
             with stats.timed("content_compare") if stats else nullcontext():
                 result["files"] = executor.pool.command(
                     "verify", source=source.name, workspace=executor.workspace,
                     scope=SCOPE, oracle_sha256=executor.runtime.c0_oracle_sha256,
                 )
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            executor._container.unpause()
+            try:
+                executor._container.unpause()
+            except BaseException as error:
+                if primary is None:
+                    raise
+                primary.add_note(f"container unpause also failed: {error!r}")
         restored.report["checks"]["full_filesystem"] = True
         restored.report.update(verification="full-logical-filesystem", file_comparison=result["files"])
         restored._write_report()

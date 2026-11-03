@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from palinreplay.core.errors import IntegrityError
+from palinreplay.core.models import Failure
 from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressReporter
 from palinreplay.record.restore import load_restore_materials, restore_r1_node
 from palinreplay.replay.context import ReplayContext
@@ -105,7 +106,9 @@ def run_replay(
         primary = error
         report.update(status="failed", execution_status="failed",
                       error_type=type(error).__name__, error=str(error))
-        report.pop("stop_reason", None)
+        if error.__cause__ is not None:
+            report["cause"] = {"error_type": type(error.__cause__).__name__,
+                               "error": str(error.__cause__)}
         if journal is not None and journal.data["status"] == "preparing":
             journal.data.update(status="failed", error_type=type(error).__name__, error=str(error))
             try:
@@ -130,21 +133,49 @@ def run_replay(
         try:
             notify(ProgressEvent("cleanup"))
         finally:
-            for name, resource in (("recorder", recorder), ("restore", restored), ("store", store),
-                                   ("client", client if own_client else None)):
+            for name, resource in (("recorder", recorder), ("restore", restored),
+                                   ("client", client if own_client else None), ("store", store)):
                 if resource is not None:
                     try:
                         resource.close()
                     except BaseException as error:
                         report["cleanup_errors"].append(f"{name}: {type(error).__name__}: {error}")
+                        if store is not None and recorder is not None and name != "store":
+                            try:
+                                store.save(Failure(
+                                    run_id=recorder.run.run_id, attempt_id=recorder.attempt.attempt_id,
+                                    category="cleanup", details=store.put_json({
+                                        "phase": "replay-cleanup", "resource": name,
+                                        "error_type": type(error).__name__, "error": str(error),
+                                    }),
+                                ))
+                            except BaseException as diagnostic:
+                                report["cleanup_errors"].append(
+                                    f"cleanup-diagnostic: {type(diagnostic).__name__}: {diagnostic}"
+                                )
             report["cleanup_confirmed"] = not report["cleanup_errors"]
             if report["cleanup_errors"]:
                 report.update(status="failed", execution_status="failed")
                 report.setdefault("error", "resource cleanup failed")
-                report.pop("stop_reason", None)
+            if primary is not None:
+                notes = [*getattr(primary, "__notes__", ()),
+                         *getattr(primary.__cause__, "__notes__", ())]
+                if notes:
+                    report["error_notes"] = notes
+            documents = [(output / "report.json", report)]
             if "r1" in report:
-                write_json(output / "r1-validation.json", report["r1"])
-            write_json(output / "report.json", report, replace=True)
+                documents.insert(0, (output / "r1-validation.json", report["r1"]))
+            for path, document in documents:
+                try:
+                    write_json(path, document, replace=path.name == "report.json")
+                except BaseException as error:
+                    report.setdefault("report_errors", []).append(
+                        f"{path.name}: {type(error).__name__}: {error}"
+                    )
+                    report.update(status="failed", execution_status="failed")
+                    report.setdefault("error", "report persistence failed")
+                    if primary is None:
+                        primary = error
     if primary is not None and not isinstance(primary, Exception):
         notify(ProgressEvent("finished",
                              status="cancelled" if isinstance(primary, KeyboardInterrupt) else "failed"))

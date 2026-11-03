@@ -7,7 +7,7 @@ import pytest
 import palinreplay.replay.session as session
 from palinreplay.agents import AgentTask
 from palinreplay.core.errors import IntegrityError
-from palinreplay.core.models import Node, Run, RunEnd, State, StateCapture, Step
+from palinreplay.core.models import Failure, Node, Run, RunEnd, State, StateCapture, Step
 from palinreplay.record.calls import read_call
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
@@ -544,6 +544,117 @@ def test_termination_fault_keeps_primary_error(tmp_path, replay_session):
     assert report["error"] == "unknown execution fault"
     assert report["termination_error"] == "RuntimeError: termination fault"
     assert report["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("different_call", [1, 2])
+def test_cleanup_failure_retains_mismatch_and_durable_end(tmp_path, replay_session, different_call):
+    state = replay_session
+    state.cleanup_fault = True
+    state.different_call, state.difference_kind = different_call, "exit-code"
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C0", "C3", output=output)
+    assert report["execution_status"] == "failed" and report["stop_reason"] == "exit-code"
+    assert report["first_difference"]["actual_exit_code"] == 1
+    assert len(state.sandbox.calls) == different_call and state.closed == ["restore", "client"]
+    with RecordStore.open(output / "record") as store:
+        end, = store.list(RunEnd)
+        assert end.status == ("incomplete" if different_call == 1 else "completed")
+        failures = [f for f in store.list(Failure) if f.category == "cleanup"]
+        assert len(failures) == 1
+        assert store.read_json(failures[0].details)["resource"] == "restore"
+        assert len(store.list(Node)) == different_call - 1
+        assert store.check_integrity().ok
+
+
+@pytest.mark.parametrize("fault,calls,nodes", [
+    ("adoption", 2, 0), ("first-capture", 2, 0), ("node-persistence", 2, 0),
+    ("cancel-first", 1, 0), ("cancel-later", 3, 1),
+])
+def test_failures_and_cancellation_keep_real_tail_without_reexecution(
+    tmp_path, replay_session, monkeypatch, fault, calls, nodes,
+):
+    state = replay_session
+    output = tmp_path / "output"
+    def fail(*args, **kwargs):
+        raise RuntimeError(fault)
+    if fault == "adoption":
+        state.different_call, state.difference_kind = 2, "exit-code"
+        monkeypatch.setattr(session.ReplayContext, "accept_results", fail)
+    elif fault == "first-capture":
+        state.executor.pool.snapshot = fail
+    elif fault == "node-persistence":
+        monkeypatch.setattr(RecordStore, "commit_node", fail)
+    else:
+        execute = state.executor.execute
+        def cancelled(request):
+            result = execute(request)
+            if len(state.sandbox.calls) == calls:
+                raise KeyboardInterrupt(fault)
+            return result
+        state.executor.execute = cancelled
+    if fault.startswith("cancel"):
+        with pytest.raises(KeyboardInterrupt, match=fault):
+            run_replay(state.source, "C0", "C3", output=output)
+        report = json.loads((output / "report.json").read_text())
+    else:
+        report = run_replay(state.source, "C0", "C3", output=output)
+    assert report["execution_status"] == "failed" and report["incomplete_step"]
+    assert report["cleanup_confirmed"] and len(state.sandbox.calls) == calls
+    if fault == "adoption":
+        assert report["stop_reason"] == "exit-code" and report["first_difference"]
+    with RecordStore.open(output / "record") as store:
+        assert len(store.list(Node)) == nodes
+        end, = store.list(RunEnd)
+        assert end.status == ("cancelled" if fault.startswith("cancel") else "failed")
+        assert (end.last_node_id is not None) == bool(nodes)
+        assert store.check_integrity().ok
+
+
+@pytest.mark.parametrize("during", ["r1", "capture"])
+def test_unpause_error_does_not_mask_primary_failure(tmp_path, replay_session, during):
+    state = replay_session
+    if during == "r1":
+        state.fault = "baseline"
+    else:
+        def fail_capture(*args):
+            state.captures += 1
+            raise RuntimeError("primary capture fault")
+        state.executor.pool.snapshot = fail_capture
+    def unpause():
+        if during == "r1" or state.captures:
+            raise RuntimeError("unpause fault")
+    state.executor._container.unpause = unpause
+    report = run_replay(state.source, "C0", "C3", output=tmp_path / "output")
+    if during == "r1":
+        assert "baseline verification fault" in report["error"]
+    else:
+        assert "primary capture fault" in report["cause"]["error"]
+    assert "unpause fault" in str(report["error_notes"])
+    assert report["cleanup_confirmed"]
+    if during == "capture":
+        assert not report["mappings"]
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_report_failure_does_not_mask_primary_or_skip_cleanup(tmp_path, replay_session, monkeypatch, cancel):
+    state = replay_session
+    write = session.write_json
+    def broken(path, document, **kwargs):
+        if path.name == "report.json" and kwargs.get("replace"):
+            raise OSError("report disk fault")
+        write(path, document, **kwargs)
+    monkeypatch.setattr(session, "write_json", broken)
+    if cancel:
+        def interrupted(*args):
+            raise KeyboardInterrupt("primary cancellation")
+        state.executor.execute = interrupted
+        with pytest.raises(KeyboardInterrupt, match="primary cancellation"):
+            run_replay(state.source, "C0", "C3", output=tmp_path / "output")
+    else:
+        report = run_replay(state.source, "C0", "C3", output=tmp_path / "output")
+        assert report["execution_status"] == "failed"
+        assert "report disk fault" in report["report_errors"][0]
+    assert state.closed == ["restore", "client"] and state.recorder.phase == "closed"
 
 
 def test_corrupt_material_stops_before_restore(tmp_path, replay_session):

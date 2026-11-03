@@ -74,6 +74,37 @@ def test_startup_failure_is_not_retried_and_is_retained(tmp_path, fault):
         assert attempt["status"] == "unknown" and "exit_code" not in attempt
 
 
+@pytest.mark.parametrize("outcome", ["error", "cancel", "returned"])
+def test_evidence_failure_preserves_command_outcome_without_retry(tmp_path, monkeypatch, outcome):
+    spec, journal = setup(tmp_path)
+    write = services.write_json
+    calls = []
+    def failed_write(*args, **kwargs):
+        if calls:
+            raise OSError("evidence disk fault")
+        write(*args, **kwargs)
+    monkeypatch.setattr(services, "write_json", failed_write)
+    def execute(command, **kwargs):
+        calls.append(command)
+        if outcome == "error":
+            raise RuntimeError("primary command fault")
+        if outcome == "cancel":
+            raise KeyboardInterrupt("primary cancellation")
+        return ExecResult(command, b"actual result", 0, 0.1)
+    executor = SimpleNamespace(exec=execute, runtime=SimpleNamespace(launch=SimpleNamespace(workdir="/")))
+    error_type = {"error": RuntimeError, "cancel": KeyboardInterrupt, "returned": OSError}[outcome]
+    with pytest.raises(error_type) as caught:
+        start_service(executor, spec, journal)
+    assert calls == [spec.start_command] and journal.data["status"] == "failed"
+    assert journal.data["evidence_errors"] and "evidence disk fault" in str(caught.value.__notes__)
+    attempt = journal.data["services"][0]["startup"]
+    if outcome == "returned":
+        assert attempt["status"] == "returned" and attempt["exit_code"] == 0
+        assert base64.b64decode(attempt["output_base64"]) == b"actual result"
+    else:
+        assert "primary" in str(caught.value) and attempt["status"] == "unknown"
+
+
 @pytest.fixture
 def clock(monkeypatch):
     now = [0.0]

@@ -21,13 +21,20 @@ class PreparationJournal:
         self.data = {"status": "preparing", "config": config.model_dump(mode="json"), "services": []}
         write_json(self.path, self.data)
 
-    def save(self):
-        write_json(self.path, self.data, replace=True)
+    def save(self, *, primary=None):
+        try:
+            write_json(self.path, self.data, replace=True)
+        except BaseException as error:
+            if primary is None:
+                raise
+            detail = f"{type(error).__name__}: {error}"
+            self.data.setdefault("evidence_errors", []).append(detail)
+            primary.add_note(f"preparation evidence could not be saved: {detail}")
 
     def fail(self, entry, error):
         entry.update(status="failed", error_type=type(error).__name__, error=str(error))
         self.data["status"] = "failed"
-        self.save()
+        self.save(primary=error)
 
 
 @dataclass
@@ -47,16 +54,16 @@ def _command(executor, service, command, deadline, attempt, journal):
         if remaining <= 0:
             raise PreparationError(f"{service.name}: service deadline exceeded")
         result = executor.exec(command, cwd=service.cwd, env=service.env, timeout_sec=remaining)
-        attempt.update(status="returned", exit_code=result.exit_code,
-                       output_base64=base64.b64encode(result.output).decode("ascii"),
-                       duration_sec=result.duration_sec)
-        journal.save()
-        return result
     except BaseException as error:
         attempt.update(status="unknown", error_type=type(error).__name__, error=str(error),
                        duration_sec=time.monotonic() - started)
-        journal.save()
+        journal.save(primary=error)
         raise
+    attempt.update(status="returned", exit_code=result.exit_code,
+                   output_base64=base64.b64encode(result.output).decode("ascii"),
+                   duration_sec=result.duration_sec)
+    journal.save()
+    return result
 
 
 def start_service(executor, service: ServiceSpec, journal: PreparationJournal) -> StartedService:
