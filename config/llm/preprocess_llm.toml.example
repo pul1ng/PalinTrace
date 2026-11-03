@@ -1,0 +1,29 @@
+# Copy this template to config/llm/preprocess_llm.toml and edit the local copy.
+# The preprocessing pipeline reads only this file; it never reuses the recording
+# configuration or PALINREPLAY_LLM_CONFIG. The real file is ignored by Git.
+# The API key may be set here or supplied through OPENAI_API_KEY.
+
+[llm]
+base_url = "https://api.openai.com/v1"
+model = "your-model"
+
+# Set OPENAI_API_KEY in the environment, or uncomment this in the local copy.
+# api_key = "your-api-key"
+
+timeout = 120.0
+# Keep retries off: a transport failure may follow a completed charged request.
+max_retries = 0
+
+[preprocess]
+# Total request budget and reserved response room are both part of the limit.
+request_token_budget = 32768
+response_token_reserve = 4096
+concurrency = 4
+
+# A custom OpenAI-compatible model alias may not have a tiktoken mapping.
+# Uncomment exactly one setting in that case; otherwise omit both.
+# tokenizer_model = "your-tokenizer-model"
+# tokenizer_encoding = "cl100k_base"
+
+# Timeout used only for Replay service preparation recipes, not source calls.
+preparation_timeout_sec = 30.0

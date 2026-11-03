@@ -19,6 +19,8 @@ __pycache__/
 !/config/llm/
 /config/llm/*
 !/config/llm/llm.example.toml
+!/config/llm/preprocess_llm.toml.example
+/config/llm/preprocess_llm.toml
 llm.local.toml
 
 # Local data: dataset exports, image archives, recorded trajectories
