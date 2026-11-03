@@ -7,10 +7,12 @@ from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressR
 from palinreplay.record.restore import load_restore_materials, restore_r1_node
 from palinreplay.replay.context import ReplayContext
 from palinreplay.replay.environment import RestoredExecutor
-from palinreplay.replay.initial import initial_recorder
+from palinreplay.replay.initial import initial_recorder, validate_r1
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
-from palinreplay.replay.run import btrfs_comparison, replay_range
+from palinreplay.replay.run import btrfs_comparison, preparation_comparison, replay_range
+from palinreplay.replay.service_config import load_services
+from palinreplay.replay.services import PreparationJournal, prepare_services
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.sandbox.client import connect_docker, docker_endpoint
 from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, Snapshot
@@ -21,10 +23,11 @@ from palinreplay.storage.store import RecordStore
 
 def run_replay(
     source, start, end=None, *, run_id=None, output, client=None, validation_mode="lenient",
-    progress: ProgressCallback | None = None,
+    progress: ProgressCallback | None = None, services_config: str | Path | None = None,
 ):
     if validation_mode not in ("strict", "lenient"):
         raise ValueError("validation_mode must be 'strict' or 'lenient'")
+    services = load_services(services_config) if services_config is not None else None
     source, output = Path(source).absolute(), Path(output).absolute()
     outside_store(source, output)
     if source.resolve().is_relative_to(output.resolve()):
@@ -38,7 +41,7 @@ def run_replay(
     stats = ReplayStats()
     report["statistics"] = stats.data
     write_json(output / "report.json", report)
-    restored = recorder = store = None
+    restored = recorder = store = journal = None
     own_client = client is None
     primary = None
     notify = ProgressReporter(progress)
@@ -77,12 +80,26 @@ def run_replay(
             for tool in history.tools:
                 if tuple(tool.request["interpreter"]) != tuple(executor.runtime.launch.shell):
                     raise ValueError("historical interpreter differs from the restored launch shell")
+        report["phase"] = "r1-validation"
+        notify(ProgressEvent("verifying", source_step=plan.start.index, step=0))
+        report["r1"] = validate_r1(materials, executor, stats=stats)
+        preparation = None
+        if services is not None:
+            report["phase"] = "service-preparation"
+            journal = PreparationJournal(output / "preparation.json", services)
+            report["preparation"] = journal.data
+            notify(ProgressEvent("service-preparation"))
+            preparation = prepare_services(executor, services, journal)
         store = RecordStore.create(output / "record")
         report["phase"] = "initial-boundary"
-        notify(ProgressEvent("verifying", source_step=plan.start.index, step=0))
         recorder = initial_recorder(store, materials, executor, context.export, stats=stats,
-                                    validation_mode=validation_mode)
+                                    validation_mode=validation_mode, preparation=preparation)
         report["run_id"] = recorder.run.run_id
+        if preparation is not None:
+            files = preparation_comparison(store, executor, snapshots[0], plan.start,
+                                           recorder.current_node, report=report)
+            stats.files(files)
+            write_json(output / "preparation-files.json", files)
         report["phase"] = "execute"
         replay_range(recorder, context, executor, materials,
                      btrfs_comparison(store, executor, snapshots), report=report, stats=stats,
@@ -95,6 +112,15 @@ def run_replay(
         report.update(status="failed", execution_status="failed",
                       error_type=type(error).__name__, error=str(error))
         report.pop("stop_reason", None)
+        if journal is not None and journal.data["status"] == "preparing":
+            journal.data.update(status="failed", error_type=type(error).__name__, error=str(error))
+            try:
+                journal.save()
+            except BaseException as diagnostic:
+                report["preparation_error"] = f"{type(diagnostic).__name__}: {diagnostic}"
+                error.add_note(f"preparation evidence could not be saved: {diagnostic!r}")
+        if hasattr(error, "r1_report"):
+            report["r1"] = error.r1_report
         if hasattr(error, "restore_report"):
             report["restore_report"] = error.restore_report
             report["cleanup_errors"].extend(
@@ -122,6 +148,8 @@ def run_replay(
                 report.update(status="failed", execution_status="failed")
                 report.setdefault("error", "resource cleanup failed")
                 report.pop("stop_reason", None)
+            if "r1" in report:
+                write_json(output / "r1-validation.json", report["r1"])
             write_json(output / "report.json", report, replace=True)
     if primary is not None and not isinstance(primary, Exception):
         notify(ProgressEvent("finished",

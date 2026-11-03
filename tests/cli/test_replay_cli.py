@@ -30,13 +30,16 @@ def test_minimal_cli_paths_and_status(tmp_path, monkeypatch, capsys, status, cod
     assert seen[0][0] == (tmp_path / "record", "C20", None)
     assert seen[0][1]["output"] == default_output("replay", "task")
     assert seen[0][1]["validation_mode"] == "lenient"
+    assert seen[0][1]["services_config"] is None
     assert callable(seen[0][1]["progress"])
     output = capsys.readouterr().out
     assert "Validation mode: lenient" in output
     assert f"Validation: {'INCOMPLETE' if status == 'failed' else status.upper()}" in output
     for index, mode in enumerate(("lenient", "strict"), start=1):
         assert main(["replay", str(tmp_path), "--from", "C20", "--to", "C23",
-                     "--run", "run-id", "--output", "custom", "--validation", mode]) == code
+                     "--run", "run-id", "--output", "custom", "--validation", mode,
+                     "--services-config", "services.json"]) == code
+        assert seen[index][1]["services_config"] == Path("services.json")
         assert seen[index][1]["output"] == Path("custom")
         assert seen[index][1]["run_id"] == "run-id"
         assert seen[index][1]["validation_mode"] == mode
@@ -69,7 +72,8 @@ def test_cli_reports_mode_execution_and_validation_independently(
     assert f"Replay {execution.upper()}" in captured.out
     assert f"Validation mode: {mode}" in captured.out
     assert f"Validation: {validation.upper()}" in captured.out
-    assert ("Stopped on difference" in captured.out) == (execution == "stopped")
+    assert "Stopped on difference" not in captured.out
+    assert ("First difference" in captured.out) == (validation == "difference")
     if validation == "difference":
         assert "MATCH" not in captured.out and "source C3" in captured.out
     if execution == "failed":
@@ -82,6 +86,7 @@ def test_validation_modes_are_documented_in_help(capsys):
     assert exit.value.code == 0
     output = capsys.readouterr().out
     assert "--validation {strict,lenient}" in output and "default: lenient" in output
+    assert "lenient permits only file mtime differences" in " ".join(output.split())
     assert "--continue-on-difference" not in output
 
 

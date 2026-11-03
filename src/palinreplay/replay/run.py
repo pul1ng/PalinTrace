@@ -2,10 +2,11 @@
 
 from palinreplay.core.models import State
 from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressReporter
-from palinreplay.replay.compare import compare_tool
+from palinreplay.replay.compare import compare_tool, is_mtime_only_difference
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.replay.step import execute_step
 from palinreplay.storage.btrfs.models import Snapshot
+from palinreplay.storage.rootfs import SCOPE
 
 
 class PartialDifference(Exception):
@@ -24,6 +25,26 @@ def _difference(report, comparison, reason):
     report.setdefault("first_difference", comparison)
 
 
+def preparation_comparison(store, executor, source, source_node, node, *, report):
+    """Compare the verified R1 baseline with the read-only, prepared C0."""
+    actual = node_snapshot(store, node)
+    delta = executor.pool.changes(source, actual)
+    files = {
+        **executor.pool._file_command(
+            "compare_candidates", source=source.name, actual=actual.name,
+            candidates=delta["candidates"], scope=SCOPE,
+        ),
+        "source_node_id": source_node.node_id, "source_index": source_node.index,
+        "node_id": node.node_id, "index": node.index,
+        "source_snapshot": source.model_dump(mode="json"),
+        "actual_snapshot": actual.model_dump(mode="json"), "actual_delta": delta,
+    }
+    report["preparation_files"] = files
+    if not files["equal"]:
+        _difference(report, files, "service-preparation")
+    return files
+
+
 def replay_range(
     recorder, context, executor, materials, compare_files=None, *, report=None, stats=None,
     validation_mode="lenient",
@@ -36,7 +57,8 @@ def replay_range(
                  "node_id": recorder.current_node.node_id, "index": 0}]
     if report is None:
         report = {}
-    report.update(status="failed", execution_status="failed", validation_status="incomplete",
+    report.update(status="failed", execution_status="failed",
+                  validation_status="difference" if "first_difference" in report else "incomplete",
                   validation_mode=validation_mode, incomplete_step=False,
                   mappings=mappings, steps=[], statistics=stats.data)
     notify(ProgressEvent("committed", step=0, source_step=plan.start.index,
@@ -67,7 +89,7 @@ def replay_range(
                 raise RuntimeError("Replay tool result is not definitive")
             if not compared["equal"]:
                 _difference(report, compared, "tool-result")
-                if not last and validation_mode == "strict":
+                if not last:
                     raise PartialDifference(compared)
 
         try:
@@ -79,7 +101,7 @@ def replay_range(
         mappings.append({**location, "node_id": node.node_id, "index": node.index})
         entry["node_id"] = node.node_id
         report["incomplete_step"] = False
-        if any(not c["equal"] for c in tool_comparisons) and validation_mode == "strict":
+        if any(not c["equal"] for c in tool_comparisons):
             notify(ProgressEvent("committed", source_step=history.node.index, step=node.index))
             return stop("tool-result")
         if compare_files is None:
@@ -91,7 +113,7 @@ def replay_range(
             _difference(report, files, "file-state")
         stats.files(files)
         notify(ProgressEvent("committed", source_step=history.node.index, step=node.index))
-        if not files["equal"] and validation_mode == "strict":
+        if not files["equal"] and (validation_mode == "strict" or not is_mtime_only_difference(files)):
             return stop("file-state")
     validation = "difference" if "first_difference" in report else "match"
     report.update(status=validation, execution_status="completed", validation_status=validation)

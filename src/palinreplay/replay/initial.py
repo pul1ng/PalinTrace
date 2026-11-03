@@ -2,17 +2,53 @@
 
 from contextlib import nullcontext
 
+from palinreplay.core.errors import IntegrityError
 from palinreplay.core.interfaces import AgentSnapshot, BoundaryAdapter, Payload
-from palinreplay.core.models import State
 from palinreplay.record.recorder import Recorder
 from palinreplay.record.state import BtrfsStateBackend
+from palinreplay.replay.services import PreparationError
 from palinreplay.storage.btrfs.models import Snapshot
 from palinreplay.storage.rootfs import SCOPE
 
 
+def validate_r1(materials, executor, *, stats=None):
+    """Validate the restored prefix and files before preparation or C0 capture."""
+    restored = executor.restored
+    result = {"status": "checking", "context_checks": {
+        "context": restored.context == materials.context,
+        "input_position": restored.input_position == materials.input_position,
+        "config": restored.config == materials.config,
+    }}
+    try:
+        if not all(result["context_checks"].values()):
+            raise IntegrityError("restored context/input position/config differs from source prefix")
+        source = Snapshot.model_validate(restored.report["snapshot"])
+        executor._container.pause()
+        try:
+            with stats.timed("content_compare") if stats else nullcontext():
+                result["files"] = executor.pool.command(
+                    "verify", source=source.name, workspace=executor.workspace,
+                    scope=SCOPE, oracle_sha256=executor.runtime.c0_oracle_sha256,
+                )
+        finally:
+            executor._container.unpause()
+        restored.report["checks"]["full_filesystem"] = True
+        restored.report.update(verification="full-logical-filesystem", file_comparison=result["files"])
+        restored._write_report()
+        result["status"] = "passed"
+        return result
+    except BaseException as error:
+        result.update(status="failed", error_type=type(error).__name__, error=str(error))
+        error.r1_report = result
+        raise
+
+
 def initial_recorder(
     store, materials, executor, export_agent=None, *, stats=None, validation_mode="lenient",
+    preparation=None,
 ):
+    if preparation is not None and preparation["status"] != "ready":
+        raise PreparationError("service preparation must be ready before capturing C0")
     if export_agent is None:
         initial = AgentSnapshot(Payload.json(materials.context), Payload.json(materials.input_position))
         def export_agent(boundary):
@@ -29,6 +65,11 @@ def initial_recorder(
             "validation_mode": validation_mode,
         },
     }
+    if preparation is not None:
+        config["replay"]["preparation"] = {
+            "config": preparation["config"],
+            "evidence": preparation,
+        }
     recorder = Recorder(store, task_id=materials.plan.run.task_id,
                         agent_name=materials.plan.run.agent_name,
                         agent_version=materials.plan.run.agent_version,
@@ -36,14 +77,7 @@ def initial_recorder(
                         boundary=BoundaryAdapter(export_agent, backend.capture))
     try:
         with stats.timed("snapshot_commit") if stats else nullcontext():
-            node = recorder.start()
-            state = store.get(State, node.state_id)
-            snapshot = Snapshot.model_validate(store.read_json(state.manifest))
-        source_snapshot = Snapshot.model_validate(executor.restored.report["snapshot"])
-        # This explicit initial baseline is the prerequisite for subsequent deltas.
-        with stats.timed("content_compare") if stats else nullcontext():
-            executor.pool.command("verify", source=source_snapshot.name, workspace=snapshot.name,
-                                  scope=SCOPE, oracle_sha256=executor.runtime.c0_oracle_sha256)
+            recorder.start()
         return recorder
     except BaseException as error:
         recorder.__exit__(type(error), error, error.__traceback__)

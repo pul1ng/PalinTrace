@@ -6,7 +6,11 @@ import pytest
 
 import palinreplay.replay.session as session
 from palinreplay.agents import AgentTask
-from palinreplay.core.models import Node, State
+from palinreplay.core.errors import IntegrityError
+from palinreplay.core.models import Node, Run, State
+from palinreplay.record.calls import read_call
+from palinreplay.replay.materials import load_replay_materials
+from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.session import run_replay
 from palinreplay.sandbox.base import ExecResult, SandboxTimeout
 from palinreplay.sandbox.runtime import C0LaunchConfig
@@ -15,6 +19,7 @@ from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, PoolLocation
 from palinreplay.storage.store import RecordStore
 from tests.agents.test_mini_agent import Sandbox, deterministic, integrated, response  # noqa: F401
 from tests.helpers import recorder_smoke as fake
+from tests.helpers.replay import mtime_difference
 
 
 def test_preflight_failure_retains_report_without_starting_docker(tmp_path, monkeypatch):
@@ -41,8 +46,10 @@ def test_preflight_failure_retains_report_without_starting_docker(tmp_path, monk
 def replay_session(tmp_path, monkeypatch):
     """Real history, session and recorder, with only the external Btrfs boundary replaced."""
     state = SimpleNamespace(fault=None, different_call=None, file_difference=False,
+                            difference_kind="output", mtime_only=False,
                             cleanup_fault=False, termination_fault=False, closed=[],
-                            comparisons=[], captures=0, restored=False, recorder=None)
+                            comparisons=[], captures=0, restored=False, recorder=None,
+                            preparation_difference=False)
     identity = uuid4()
     location = PoolLocation(volume="palinreplay-btrfs-" + identity.hex, uuid=identity,
                             daemon_id="fixture", helper_image_id="sha256:" + "a" * 64)
@@ -88,16 +95,30 @@ def replay_session(tmp_path, monkeypatch):
             return {"uuid": str(uuid4())}
 
         def command(self, op, **kwargs):
+            if op == "verify":
+                assert state.captures == 0, "full R1 check must precede initial capture"
             if op == "verify" and state.fault == "baseline":
                 raise RuntimeError("baseline verification fault")
             assert op in ("verify", "usage")
             return {"equal": True}
 
+        def changes(self, before, after):
+            assert state.captures == 1, "compare preparation only after actual C0 exists"
+            return {"complete": True, "candidates": ["service.pid"]}
+
+        def _file_command(self, op, **kwargs):
+            assert op == "compare_candidates"
+            return {"equal": not state.preparation_difference,
+                    "different_paths": ["service.pid"] if state.preparation_difference else []}
+
         def compare_incremental(self, *snapshots):
             index = len(state.comparisons)
             state.comparisons.append(snapshots)
-            if state.fault == "compare" or (state.fault == "compare-after-file" and index == 1):
+            if ((state.fault == "compare" and index == (1 if state.mtime_only else 0))
+                    or (state.fault == "compare-after-file" and index == 1)):
                 raise RuntimeError("comparison fault")
+            if state.mtime_only and index == 0:
+                return mtime_difference()
             return {"equal": not (state.file_difference and index == 0),
                     "different_paths": ["file"] if state.file_difference and index == 0 else []}
 
@@ -111,26 +132,38 @@ def replay_session(tmp_path, monkeypatch):
             raise RuntimeError("restore cleanup fault")
 
     restored = SimpleNamespace(pool=pool, close=close_restore,
-                               report={"snapshot": Snapshot(location=location, name="bases/C0",
-                                                            uuid=uuid4()).model_dump(mode="json")})
+                               _write_report=lambda: None,
+                               report={"checks": {}, "snapshot": Snapshot(
+                                   location=location, name="bases/C0", uuid=uuid4()
+                               ).model_dump(mode="json")})
     executor = SimpleNamespace(runtime=runtime, pool=pool, workspace="workspaces/fixture",
                                _container=container, check_root=lambda: None, restored=restored)
 
     def execute(request):
         result = sandbox.exec(request["action"]["command"])
-        if state.fault == "tool" and len(sandbox.calls) == 2:
+        fault_call = 3 if state.mtime_only else 2
+        if state.fault == "tool" and len(sandbox.calls) == fault_call:
             raise SandboxTimeout("unknown execution fault")
-        if state.fault == "unknown" and len(sandbox.calls) == 2:
+        if state.fault == "unknown" and len(sandbox.calls) == fault_call:
             return ExecResult(result.command, result.output, None, 1)
         if len(sandbox.calls) == state.different_call:
-            return ExecResult(result.command, b"actual", 0, 1)
+            return ExecResult(result.command,
+                              b"actual" if state.difference_kind == "output" else result.output,
+                              1 if state.difference_kind == "exit-code" else result.exit_code, 1)
         return result
 
+    state.executor = executor
     executor.execute = execute
     client = SimpleNamespace(close=lambda: state.closed.append("client"))
     state.client = client
 
-    def restore(*args, **kwargs):
+    def restore(store, selector, **kwargs):
+        saved = session.load_restore_materials(store, selector)
+        restored.context = saved.context
+        restored.input_position = saved.input_position
+        restored.config = saved.config
+        if state.fault == "context":
+            restored.context = {"messages": ["future context"]}
         state.restored = True
         if state.fault == "restore":
             state.closed.append("restore-internal")
@@ -158,34 +191,266 @@ def replay_session(tmp_path, monkeypatch):
     return state
 
 
-@pytest.mark.parametrize("validation_mode", [None, "strict", "lenient"])
-def test_session_mode_reaches_report_recording_and_loop(tmp_path, replay_session, validation_mode):
+@pytest.mark.parametrize("difference", [False, True])
+def test_services_prepare_after_r1_before_c0_and_leave_history_unchanged(tmp_path, replay_session, difference):
     state = replay_session
-    state.different_call = 1
+    state.preparation_difference = difference
+    commands = []
+    spec = {"name": "A", "start_command": "start A", "readiness_command": "ready A",
+            "timeout_sec": 10, "cwd": "/srv/A", "env": {"ONLY_SERVICE": "1"}}
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [spec]}))
+
+    def execute(command, **kwargs):
+        assert state.executor.restored.report["checks"]["full_filesystem"]
+        assert state.captures == 0 and not state.sandbox.calls
+        assert kwargs["cwd"] == spec["cwd"] and kwargs["env"] == spec["env"]
+        commands.append(command)
+        return ExecResult(command, b"real service result", 0, 0.1)
+
+    state.executor.exec = execute
+    output = tmp_path / "output"
+    events = []
+    report = run_replay(state.source, "C0", "C3", output=output,
+                        services_config=config, progress=events.append)
+    assert commands == ["start A", "ready A", "ready A"]
+    assert report["r1"]["status"] == "passed" and report["preparation"]["status"] == "ready"
+    assert report["execution_status"] == "completed"
+    assert report["validation_status"] == ("difference" if difference else "match")
+    assert all(step["starting_divergent"] == difference for step in report["steps"])
+    assert json.loads((output / "preparation.json").read_text()) == report["preparation"]
+    assert json.loads((output / "preparation-files.json").read_text()) == report["preparation_files"]
+    assert [event.phase for event in events].index("service-preparation") < [event.phase for event in events].index("committed")
+    assert [event.step for event in events if event.phase == "committed"] == [0, 1, 2, 3]
+    assert report["statistics"]["actual_model_calls"] == 0
+    assert report["statistics"]["actual_tool_executions"] == 4
+    with RecordStore.open(state.source) as origin, RecordStore.open(output / "record") as actual:
+        history = load_replay_materials(origin, pin_replay(origin, "C0", "C3"))
+        for step, mapping in zip(history.steps, report["mappings"][1:], strict=True):
+            node = actual.get(Node, mapping["node_id"])
+            for tool, execution_id in zip(step.tools, node.tool_execution_ids, strict=True):
+                trace = read_call(actual, execution_id)
+                assert actual.read_json(trace.execution.request) == tool.request
+        assert actual.read_json(actual.get(Node, report["mappings"][0]["node_id"]).context)["messages"] == history.context["messages"]
+    assert state.executor.runtime.launch.workdir == "/testbed"
+    assert state.executor.runtime.launch.environment == {"PATH": "/bin"}
+    assert report["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("damage", ["missing-artifact", "missing-config", "missing-evidence", "changed-output"])
+def test_preparation_material_is_inline_and_covered_by_record_integrity(tmp_path, replay_session, damage):
+    state = replay_session
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [
+        {"name": "A", "start_command": "start A", "readiness_command": "ready A", "timeout_sec": 10},
+    ]}))
+    state.executor.exec = lambda command, **kwargs: ExecResult(command, b"\xff\x00ready\n", 0, 0.1)
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C0", "C3", output=output, services_config=config)
+    assert report["execution_status"] == "completed" and report["preparation"]["status"] == "ready"
+    # The recorded materials must survive without the original input or external journal.
+    config.unlink()
+    (output / "preparation.json").unlink()
+    with RecordStore.open(output / "record") as store:
+        run = store.get(Run, report["run_id"])
+        recorded = store.read_json(run.config)
+        preparation = recorded["replay"]["preparation"]
+        assert preparation["config"] == report["preparation"]["config"]
+        assert preparation["evidence"] == report["preparation"]
+        assert store.check_integrity().ok
+        path = store._artifacts._path(run.config)
+    if damage == "missing-artifact":
+        path.unlink()
+    else:
+        if damage == "changed-output":
+            preparation["evidence"]["services"][0]["startup"]["output_base64"] = "dGFtcGVyZWQ="
+        else:
+            del preparation[damage.removeprefix("missing-")]
+        path.chmod(0o600)
+        path.write_text(json.dumps(recorded))
+    with RecordStore.open(output / "record") as store:
+        audit = store.check_integrity()
+        assert not audit.ok
+        assert any(issue.record == "run/" + run.run_id and run.config.sha256 in issue.message
+                   for issue in audit.issues)
+        with pytest.raises(IntegrityError, match=run.config.sha256):
+            store.read_json(run.config)
+
+
+@pytest.mark.parametrize("fault", ["exit", "timeout", "cancel"])
+def test_final_readiness_failure_blocks_c0_after_all_initial_checks_pass(tmp_path, replay_session, fault):
+    state = replay_session
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [
+        {"name": name, "start_command": "start " + name, "readiness_command": "ready " + name,
+         "timeout_sec": 10} for name in ("A", "B")
+    ]}))
+    commands = []
+
+    def execute(command, **kwargs):
+        commands.append(command)
+        if command == "ready A" and commands.count(command) == 2:
+            if fault == "timeout":
+                raise SandboxTimeout("A final check timed out")
+            if fault == "cancel":
+                raise KeyboardInterrupt("cancelled during final readiness")
+            return ExecResult(command, b"A exited while B started", 1, 0.1)
+        return ExecResult(command, b"initially ready", 0, 0.1)
+
+    state.executor.exec = execute
+    output = tmp_path / "output"
+    if fault == "cancel":
+        with pytest.raises(KeyboardInterrupt):
+            run_replay(state.source, "C0", "C3", output=output, services_config=config)
+        report = json.loads((output / "report.json").read_text())
+    else:
+        report = run_replay(state.source, "C0", "C3", output=output, services_config=config)
+    assert commands == ["start A", "ready A", "start B", "ready B", "ready A"]
+    assert report["execution_status"] == "failed" and report["phase"] == "service-preparation"
+    assert report["preparation"]["status"] == "failed"
+    saved = json.loads((output / "preparation.json").read_text())
+    assert saved == report["preparation"]
+    a, b = saved["services"]
+    assert a["readiness"][0]["exit_code"] == b["readiness"][0]["exit_code"] == 0
+    assert a["status"] == "failed" and b["status"] == "ready"
+    assert a["final_readiness"]["status"] == ("returned" if fault == "exit" else "unknown")
+    assert not (output / "record").exists() and state.captures == 0
+    assert not state.sandbox.calls and state.recorder is None
+    assert report["statistics"]["actual_tool_executions"] == 0
+    assert report["cleanup_confirmed"] and state.closed == ["restore", "client"]
+
+
+@pytest.mark.parametrize("cleanup_fault", [False, True])
+@pytest.mark.parametrize("fault", ["startup", "readiness", "partial", "cancel", "cancel-before"])
+def test_preparation_failure_blocks_c0_and_history_and_keeps_primary_error(
+    tmp_path, replay_session, cleanup_fault, fault,
+):
+    state = replay_session
+    state.cleanup_fault = cleanup_fault
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [
+        {"name": name, "start_command": "start " + name, "readiness_command": "ready " + name,
+         "timeout_sec": 10} for name in ("A", "B")
+    ]}))
+    commands = []
+
+    def execute(command, **kwargs):
+        commands.append(command)
+        if fault == "readiness" and command == "ready A":
+            raise SandboxTimeout("readiness command timed out; environment discarded")
+        if fault == "cancel" and command == "start B":
+            raise KeyboardInterrupt("cancelled during B")
+        failed = (fault == "startup" and command == "start A") or (fault == "partial" and command == "start B")
+        return ExecResult(command, b"\xffactual output", 17 if failed else 0, 0.1)
+
+    def progress(event):
+        if fault == "cancel-before" and event.phase == "service-preparation":
+            raise KeyboardInterrupt("cancelled before commands")
+
+    state.executor.exec = execute
+    output = tmp_path / "output"
+    if fault.startswith("cancel"):
+        with pytest.raises(KeyboardInterrupt):
+            run_replay(state.source, "C0", "C3", output=output,
+                       services_config=config, progress=progress)
+        report = json.loads((output / "report.json").read_text())
+    else:
+        report = run_replay(state.source, "C0", "C3", output=output,
+                            services_config=config, progress=progress)
+    assert report["execution_status"] == "failed" and report["phase"] == "service-preparation"
+    assert report["r1"]["status"] == "passed"
+    assert report["error_type"] == ("KeyboardInterrupt" if fault.startswith("cancel") else
+                                    "SandboxTimeout" if fault == "readiness" else "PreparationError")
+    assert report["error"] != "resource cleanup failed"
+    assert not (output / "record").exists() and state.captures == 0
+    assert not state.sandbox.calls and state.recorder is None
+    assert report["statistics"]["actual_tool_executions"] == 0
+    saved = json.loads((output / "preparation.json").read_text())
+    assert saved == report["preparation"] and saved["status"] == "failed"
+    if fault in ("partial", "cancel"):
+        assert [service["status"] for service in saved["services"]] == ["ready", "failed"]
+        assert saved["services"][0]["startup"]["exit_code"] == 0
+        assert saved["services"][0]["readiness"][0]["exit_code"] == 0
+    assert len(commands) == {"startup": 1, "readiness": 2, "partial": 3, "cancel": 3, "cancel-before": 0}[fault]
+    assert report["cleanup_confirmed"] is (not cleanup_fault)
+    assert state.closed == ["restore", "client"]
+    assert bool(report["cleanup_errors"]) is cleanup_fault
+
+
+@pytest.mark.parametrize("fault", ["baseline", "context"])
+def test_failed_r1_never_runs_configured_service(tmp_path, replay_session, fault):
+    state = replay_session
+    state.fault = fault
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [{"name": "A", "start_command": "start A",
+                                              "readiness_command": "ready A", "timeout_sec": 10}]}))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("service commands must not run after failed R1")
+
+    state.executor.exec = forbidden
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C0", "C3", output=output, services_config=config)
+    assert report["r1"]["status"] == "failed" and not state.sandbox.calls
+    assert not (output / "preparation.json").exists() and not (output / "record").exists()
+    assert report["cleanup_confirmed"]
+
+
+def test_invalid_service_config_is_rejected_before_source_or_output(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid service configuration must be rejected before opening resources")
+
+    monkeypatch.setattr(session.RecordStore, "open", forbidden)
+    monkeypatch.setattr(session, "connect_docker", forbidden)
+    config = tmp_path / "services.json"
+    config.write_text('{"services": [{"name": "A"}]}')
+    output = tmp_path / "output"
+    with pytest.raises(ValueError):
+        run_replay(tmp_path / "missing-source", "C0", services_config=config, output=output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("validation_mode", [None, "strict", "lenient"])
+@pytest.mark.parametrize("different_call", [1, 2, 3])
+@pytest.mark.parametrize("kind", ["output", "exit-code"])
+def test_session_mode_reaches_report_recording_and_loop(
+    tmp_path, replay_session, validation_mode, different_call, kind,
+):
+    state = replay_session
+    state.different_call, state.difference_kind = different_call, kind
     options = {} if validation_mode is None else {"validation_mode": validation_mode}
     output = tmp_path / "output"
     events = []
     report = run_replay(state.source, "C0", "C3", output=output, progress=events.append, **options)
-    strict = validation_mode == "strict"
+    expected_nodes = 1 if different_call == 1 else different_call
     assert report["validation_mode"] == (validation_mode or "lenient")
     assert "continue_on_difference" not in report
-    assert report["execution_status"] == ("stopped" if strict else "completed")
+    assert report["execution_status"] == "stopped"
     assert report["validation_status"] == report["status"] == "difference"
-    assert len(state.sandbox.calls) == (1 if strict else 4)
+    assert report["stop_reason"] == "tool-result"
+    assert len(state.sandbox.calls) == different_call
     with RecordStore.open(output / "record") as store:
         config = store.read_json(state.recorder.run.config)["replay"]
         assert config["validation_mode"] == report["validation_mode"]
         assert "continue_on_difference" not in config
-        assert len(store.list(Node)) == (1 if strict else 4)
+        assert len(store.list(Node)) == expected_nodes
+        first = report["first_difference"]
+        actual = read_call(store, first["execution_id"])
+        result = next(event for event in actual.events if event.kind == "result")
+        assert store.read_bytes(result.payload) == (b"actual" if kind == "output" else b"ok\n")
+        assert store.read_json(result.details)["backend"]["decoded"]["returncode"] == (
+            1 if kind == "exit-code" else 0
+        )
+        assert store.check_integrity().ok
     assert report["cleanup_confirmed"] and state.closed == ["restore", "client"]
     assert state.recorder.phase == "closed"
     assert json.loads((output / "report.json").read_text()) == report
     assert [event.total_steps for event in events if event.total_steps is not None] == [3, 3]
     committed = [event.step for event in events if event.phase == "committed"]
-    assert committed == ([0] if strict else [0, 1, 2, 3])
+    assert committed == list(range(expected_nodes))
     assert events[0].phase == "preparing" and events[-2].phase == "cleanup"
-    assert events[-1].status == report["execution_status"]
-    assert events[-1].label == f"{report['execution_status'].upper()} / DIFFERENCE"
+    assert events[-1].status == "stopped"
+    assert events[-1].label == "STOPPED / DIFFERENCE"
 
 
 @pytest.mark.parametrize("start,end,expected", [("C1", "C3", [(1, 0), (2, 1), (3, 2)]),
@@ -229,16 +494,17 @@ def test_invalid_validation_mode_is_rejected_before_creating_output(tmp_path, mo
     assert not output.exists()
 
 
+@pytest.mark.parametrize("validation_mode", ["strict", "lenient"])
 @pytest.mark.parametrize("difference_kind", ["tool", "file"])
-def test_strict_final_complete_step_is_completed_with_difference(
-    tmp_path, replay_session, difference_kind,
+def test_final_complete_step_is_completed_with_difference(
+    tmp_path, replay_session, validation_mode, difference_kind,
 ):
     state = replay_session
     state.different_call = 2 if difference_kind == "tool" else None
     state.file_difference = difference_kind == "file"
     output = tmp_path / "output"
-    report = run_replay(state.source, "C0", "C1", output=output, validation_mode="strict")
-    assert report["validation_mode"] == "strict"
+    report = run_replay(state.source, "C0", "C1", output=output, validation_mode=validation_mode)
+    assert report["validation_mode"] == validation_mode
     assert report["execution_status"] == "completed"
     assert report["validation_status"] == report["status"] == "difference"
     assert report["first_difference"]["source_index"] == 1
@@ -249,7 +515,8 @@ def test_strict_final_complete_step_is_completed_with_difference(
 
 
 @pytest.mark.parametrize("fault,expected_calls,expected_nodes", [
-    ("snapshot-read", 0, 0), ("baseline", 0, 1), ("tool", 2, 1), ("unknown", 2, 1),
+    ("snapshot-read", 0, 0), ("baseline", 0, 0), ("context", 0, 0),
+    ("tool", 2, 1), ("unknown", 2, 1),
     ("compare", 2, 2), ("snapshot-capture", 3, 2),
 ])
 @pytest.mark.parametrize("validation_mode,prior_difference", [
@@ -259,8 +526,10 @@ def test_validation_modes_stop_faults_and_preserve_boundaries(
     tmp_path, replay_session, fault, expected_calls, expected_nodes, validation_mode, prior_difference,
 ):
     state = replay_session
-    state.fault = fault
-    state.different_call = 1 if prior_difference else None
+    state.fault, state.mtime_only = fault, prior_difference
+    if prior_difference and fault in ("tool", "unknown", "compare"):
+        expected_calls = 3
+        expected_nodes = 3 if fault == "compare" else 2
     output = tmp_path / "output"
     events = []
     report = run_replay(state.source, "C0", "C3", output=output, validation_mode=validation_mode,
@@ -279,9 +548,10 @@ def test_validation_modes_stop_faults_and_preserve_boundaries(
     else:
         assert not (output / "record").exists()
     if observed_difference:
-        assert report["first_difference"] == report["steps"][0]["tools"][0]
+        assert report["first_difference"] == report["steps"][0]["files"]
     if fault == "unknown":
-        assert report["steps"][0]["tools"][1]["status"] == "unknown"
+        unknown = report["steps"][-1]["tools"][-1]
+        assert unknown["status"] == "unknown"
         assert report["incomplete_step"]
     if fault == "snapshot-capture":
         assert report["incomplete_step"] and "node_id" not in report["steps"][1]
@@ -293,7 +563,7 @@ def test_validation_modes_stop_faults_and_preserve_boundaries(
 
 def test_comparison_fault_keeps_prior_file_difference(tmp_path, replay_session):
     state = replay_session
-    state.file_difference = True
+    state.mtime_only = True
     state.fault = "compare-after-file"
     report = run_replay(state.source, "C0", "C3", output=tmp_path / "output",
                         validation_mode="lenient")
@@ -342,7 +612,7 @@ def test_cleanup_failure_overrides_execution_without_erasing_validation(
 
 def test_termination_fault_preserves_primary_error_and_cleanup(tmp_path, replay_session):
     state = replay_session
-    state.fault, state.different_call, state.termination_fault = "tool", 1, True
+    state.fault, state.mtime_only, state.termination_fault = "tool", True, True
     report = run_replay(state.source, "C0", "C3", output=tmp_path / "output",
                         validation_mode="lenient")
     assert report["error"] == "unknown execution fault"

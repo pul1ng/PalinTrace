@@ -11,6 +11,8 @@ def test_redirected_progress_is_flushed_and_does_not_advance_during_work():
     with ReplayProgressDisplay(stream=output) as progress:
         progress(ProgressEvent("preparing", total_steps=43))
         progress(ProgressEvent("restoring", source_step=1, step=0))
+        progress(ProgressEvent("service-preparation"))
+        assert progress.completed == 0 and "准备指定服务" in output.getvalue()
         progress(ProgressEvent("committed", source_step=1, step=0))
         progress(ProgressEvent("replaying", source_step=2, step=1))
         progress(ProgressEvent("verifying", source_step=2, step=1))
