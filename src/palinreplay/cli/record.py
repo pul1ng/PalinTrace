@@ -115,6 +115,10 @@ def _summary(view):
     for run in view["runs"]:
         print(f"Run {run['run']['run_id']}  task={run['run']['task_id']}  status={run['status']}")
         print(f"  Record complete: {run['record_complete']}; task success: not evaluated")
+        if run.get("source_start"):
+            source = run["source_start"]
+            print(f"  Source C{source['index']} (reference)  node={source['node_id']}"
+                  f"  store={source['source_store']}")
         for node in run["nodes"]:
             print(f"  {node['label']}  node={node['node_id']}  state={node['state_id']}")
         for call in run["calls"]:

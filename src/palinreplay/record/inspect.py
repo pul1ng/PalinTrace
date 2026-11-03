@@ -21,6 +21,7 @@ from palinreplay.core.models import (
     ToolGroup,
 )
 from palinreplay.record.calls import read_call
+from palinreplay.record.source import source_dependency
 from palinreplay.storage.codec import JSON_TYPES
 from palinreplay.storage.io import export_directory, outside_store, write_json
 from palinreplay.storage.store import MODELS, IntegrityError, RecordStore, artifact_refs
@@ -157,10 +158,12 @@ def _run_document(store: RecordStore, run: Run, *, contents: bool) -> dict:
                 else [],
             }
         )
+    dependency = source_dependency(store, run.run_id)
+    empty_range = dependency is not None and dependency["start"]["index"] == dependency["end"]["index"]
     document = {
         "run": run.model_dump(mode="json"),
         "status": status,
-        "record_complete": bool(nodes)
+        "record_complete": (bool(nodes) or (empty_range and not steps))
         and status in ("completed", "paused")
         and not tail
         and not uncertain,
@@ -201,6 +204,11 @@ def _run_document(store: RecordStore, run: Run, *, contents: bool) -> dict:
             "reused_states": sum(bool(d.get("reused_state")) for d in details),
         },
     }
+    if dependency is not None:
+        document["source_start"] = dependency["start"] | {
+            "source_store": dependency["source_store"], "run_id": dependency["run_id"],
+        }
+        document["source_dependency"] = dependency
     if contents:
         document["config"] = payload(store, run.config)
     return document
@@ -239,9 +247,22 @@ def inspect_record(
             runs = tuple(run for run in runs if run.run_id == run_id)
             if not runs:
                 raise RecordUsageError("unknown run ID")
+        dependencies = []
+        for run in runs:
+            try:
+                dependency = source_dependency(store, run.run_id, check=check)
+            except IntegrityError as error:
+                if not check:
+                    raise
+                verification["ok"] = False
+                verification["issues"].append({"record": f"source/{run.run_id}", "message": str(error)})
+                return {"verification": verification, "runs": []}
+            if dependency is not None:
+                dependencies.append(dependency)
         document = {
             "schema_version": "palinreplay.inspect.v1",
             "verification": verification,
+            "external_dependencies": dependencies,
             "runs": [_run_document(store, run, contents=False) for run in runs],
             "storage": storage_metrics(store),
             "states": [s.model_dump(mode="json") for s in store.list(State)],
@@ -271,12 +292,17 @@ def export_record(source: str | Path, output: str | Path, *, bundle: bool = Fals
         if not report.ok:
             raise IntegrityError(f"export refused: {len(report.issues)} integrity issue(s)")
         records = {name: store.list(model) for name, model in MODELS.items()}
+        dependencies = [dependency for run in records["run"]
+                        if (dependency := source_dependency(store, run.run_id, check=not bundle))]
         if bundle:
+            if dependencies:
+                raise RecordUsageError("portable bundles with external Replay source dependencies are not supported")
             if any(state.backend == "btrfs-image.v1" for state in records["state"]):
                 raise RecordUsageError("portable bundles for external Btrfs pools are not supported")
         trajectory = {
             "schema_version": "palinreplay.trajectory.v1",
             "restorable": False,
+            "external_dependencies": dependencies,
             "filesystem_payloads": "omitted; restore from the source record and its Btrfs pool",
             "verification": report.model_dump(mode="json") | {"ok": report.ok},
             "runs": [_run_document(store, run, contents=True) for run in records["run"]],
@@ -312,6 +338,8 @@ def export_record(source: str | Path, output: str | Path, *, bundle: bool = Fals
             "kind": "bundle" if bundle else "trajectory",
             "store_path": "record" if bundle else None,
             "source_integrity_ok": True,
+            "external_dependencies": dependencies,
+            "self_contained": bundle,
             "incomplete_steps": list(report.incomplete_steps),
             "pending_executions": list(report.pending_executions),
             "omitted_staged_artifacts": list(report.staged_artifacts),
