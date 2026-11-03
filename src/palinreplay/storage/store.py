@@ -453,10 +453,16 @@ class RecordStore:
                     raise IntegrityError("attempt cannot precede itself")
         elif isinstance(record, Step):
             attempt = self.get(Attempt, record.attempt_id)
-            parent = self.get(Node, record.parent_node_id)
-            self._same_run(record.run_id, attempt, parent)
-            if record.index != parent.index + 1:
-                raise IntegrityError("step index must follow its parent node")
+            self._same_run(record.run_id, attempt)
+            if record.parent_node_id is None:
+                source = self.replay_source(record.run_id)
+                if source is None or record.index != source.start.index + 1:
+                    raise IntegrityError("parentless step requires the first Replay source index")
+            else:
+                parent = self.get(Node, record.parent_node_id)
+                self._same_run(record.run_id, parent)
+                if record.index != parent.index + 1:
+                    raise IntegrityError("step index must follow its parent node")
         elif isinstance(record, Operation):
             step = self.get(Step, record.step_id)
             self._same_run(record.run_id, step)
@@ -559,7 +565,7 @@ class RecordStore:
             if isinstance(record, Step):
                 self._attempt_open(record.attempt_id)
                 tip = self._tip(record.run_id)
-                if tip is None or tip.node_id != record.parent_node_id:
+                if (tip.node_id if tip else None) != record.parent_node_id:
                     raise ConflictError("step parent is not the current node")
                 if any(
                     s.attempt_id == record.attempt_id and s.index == record.index
@@ -857,6 +863,8 @@ class RecordStore:
         if len(captures) > 1:
             raise IntegrityError("multiple captures for one boundary")
         records.extend(captures)
+        if node.index == 0 and self.replay_source(node.run_id) is not None:
+            raise IntegrityError("source-reference Replay cannot contain a local C0")
         if node.index:
             step = self.get(Step, node.step_id)
             self._relations(step)
@@ -887,7 +895,9 @@ class RecordStore:
             if node.index == 0:
                 if tip is not None or self.list(Event, run_id=node.run_id):
                     raise ConflictError("C0 must precede execution history")
-            elif tip is None or tip.node_id != node.parent_node_id or node.index != tip.index + 1:
+            elif (tip.node_id if tip else None) != node.parent_node_id or (
+                tip is not None and node.index != tip.index + 1
+            ):
                 raise ConflictError("node does not extend the current history")
             cursor = max((e.sequence for e in self.list(Event, run_id=node.run_id)), default=0)
             if node.accepted_event_sequence != cursor:

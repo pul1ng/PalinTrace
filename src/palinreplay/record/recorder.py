@@ -293,6 +293,8 @@ class Recorder:
 
     def start(self) -> Node:
         self._require("new")
+        if self.store.replay_source(self.run.run_id) is not None:
+            raise IncompleteRecordError("source-reference Replay must use start_from_source()")
         return self._capture(None)
 
     def start_from_source(self) -> None:
@@ -305,12 +307,13 @@ class Recorder:
     def begin_step(self) -> RecordStep:
         self._require("ready")
         try:
+            source = self.store.replay_source(self.run.run_id) if self._head is None else None
             step = self.store.save(
                 Step(
                     run_id=self.run.run_id,
                     attempt_id=self.attempt.attempt_id,
-                    index=self._head.index + 1,
-                    parent_node_id=self._head.node_id,
+                    index=self._head.index + 1 if self._head else source.start.index + 1,
+                    parent_node_id=self._head.node_id if self._head else None,
                 )
             )
             self._active = RecordStep(self, step)

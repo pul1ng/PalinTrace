@@ -52,7 +52,7 @@ class Step(Fact):
     run_id: Identity
     attempt_id: Identity
     index: Annotated[int, Field(strict=True, ge=1)]
-    parent_node_id: Identity
+    parent_node_id: Identity | None
 
 
 class Operation(Fact):
@@ -203,8 +203,8 @@ class Node(Fact):
                 or self.accepted_event_sequence
             ):
                 raise ValueError("C0 cannot contain step, parent or accepted-call history")
-        elif not self.parent_node_id or not self.step_id or not self.model_execution_id:
-            raise ValueError("step node requires parent, step and model execution")
+        elif not self.step_id or not self.model_execution_id:
+            raise ValueError("step node requires step and model execution")
         for values in (self.tool_operation_ids, self.tool_execution_ids):
             if len(set(values)) != len(values):
                 raise ValueError("duplicate tool identities in node")
