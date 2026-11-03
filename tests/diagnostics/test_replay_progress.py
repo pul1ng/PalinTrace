@@ -9,39 +9,43 @@ from palinreplay.core.progress import ProgressEvent
 def test_redirected_progress_is_flushed_and_does_not_advance_during_work():
     output = StringIO()
     with ReplayProgressDisplay(stream=output) as progress:
-        progress(ProgressEvent("preparing", total_steps=43))
-        progress(ProgressEvent("restoring", source_step=1, step=0))
+        progress(ProgressEvent("preparing", total_steps=20))
+        progress(ProgressEvent("restoring", source_step=20, completed_steps=0))
         progress(ProgressEvent("service-preparation"))
         assert progress.completed == 0 and "准备指定服务" in output.getvalue()
-        progress(ProgressEvent("committed", source_step=1, step=0))
-        progress(ProgressEvent("replaying", source_step=2, step=1))
-        progress(ProgressEvent("verifying", source_step=2, step=1))
-        assert progress.completed == 0
-        assert "0/43" in output.getvalue() and "校验 源 C2 → C1" in output.getvalue()
-        progress(ProgressEvent("committed", source_step=2, step=1))
+        progress(ProgressEvent("source-reference", source_step=20, completed_steps=0))
+        progress(ProgressEvent("replaying", source_step=21, step=21, completed_steps=0))
+        assert progress.completed == 0 and "源 C20 (引用)" in output.getvalue()
+        assert "0/20" in output.getvalue() and "源 C21 → C21" in output.getvalue()
+        progress(ProgressEvent("committed", source_step=21, step=21, completed_steps=1))
         progress(ProgressEvent("cleanup"))
-        progress(ProgressEvent("finished", status="stopped", label="STOPPED / DIFFERENCE"))
+        progress(ProgressEvent("finished", status="stopped", label="STOPPED"))
         assert progress.completed == 1
     text = output.getvalue()
-    assert "1/43" in text and "STOPPED / DIFFERENCE" in text
-    assert "43/43" not in text and "\x1b" not in text
+    assert "1/20" in text and "STOPPED" in text
+    assert "20/20" not in text and "\x1b" not in text
 
 
 @pytest.mark.parametrize("mode", ["auto", "plain", "off"])
-@pytest.mark.parametrize("status,completed", [("completed", 3), ("stopped", 1), ("failed", 1)])
-def test_terminal_keeps_actual_progress_and_validation_separate(mode, status, completed):
+@pytest.mark.parametrize("status,completed", [("completed", 20), ("stopped", 1), ("failed", 1), ("completed", 0)])
+def test_terminal_keeps_actual_progress_separate_from_node_number(mode, status, completed):
     rich = pytest.importorskip("rich.console")
     output = StringIO()
     console = rich.Console(file=output, force_terminal=True, width=110)
     with ReplayProgressDisplay(mode, stream=output, console=console) as progress:
         display = progress._progress
-        progress(ProgressEvent("preparing", total_steps=3))
-        progress(ProgressEvent("committed", source_step=20 + completed, step=completed))
-        label = f"{status.upper()} / DIFFERENCE"
+        total = 0 if completed == 0 else 20
+        progress(ProgressEvent("preparing", total_steps=total))
+        progress(ProgressEvent("source-reference", source_step=20, completed_steps=0))
+        if completed:
+            progress(ProgressEvent("committed", source_step=20 + completed, step=20 + completed,
+                                   completed_steps=completed))
+        label = status.upper()
         progress(ProgressEvent("finished", status=status, label=label))
+        assert progress.completed == completed
         if mode == "auto":
             assert display.live.is_started
-            assert display.tasks[0].completed == completed and display.tasks[0].total == 3
+            assert display.tasks[0].completed == completed and display.tasks[0].total == total
             assert display.tasks[0].stop_time is not None
         else:
             assert display is None
@@ -51,7 +55,7 @@ def test_terminal_keeps_actual_progress_and_validation_separate(mode, status, co
         assert output.getvalue() == ""
     else:
         text = output.getvalue()
-        assert label in text and f"{completed}/3" in text and "MATCH" not in text
+        assert label in text and f"{completed}/{total}" in text and "MATCH" not in text
         if mode == "plain":
             assert "\x1b" not in text
 

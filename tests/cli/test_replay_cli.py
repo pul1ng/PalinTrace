@@ -109,7 +109,7 @@ def test_cli_progress_stream_does_not_change_report_output(tmp_path, monkeypatch
     def replay(*args, **kwargs):
         progress = kwargs["progress"]
         progress(ProgressEvent("preparing", total_steps=1))
-        progress(ProgressEvent("committed", source_step=21, step=1))
+        progress(ProgressEvent("committed", source_step=21, step=21, completed_steps=1))
         progress(ProgressEvent("finished", status="completed", label="COMPLETED"))
         return {"execution_status": "completed"}
 

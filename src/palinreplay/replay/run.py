@@ -36,7 +36,8 @@ def replay_range(
         report["steps"].append(entry)
         report["position"] = {**location, "index": history.node.index}
         report["incomplete_step"] = True
-        notify(ProgressEvent("replaying", source_step=history.node.index, step=index + 1))
+        notify(ProgressEvent("replaying", source_step=history.node.index, step=history.node.index,
+                             completed_steps=index, total_steps=len(materials.steps)))
 
         def on_result(i, tool, call, result, last):
             trace = read_call(recorder.store, call.execution_id)
@@ -76,7 +77,9 @@ def replay_range(
             tool["node_id"] = node.node_id
         report.update(incomplete_step=False, actual_node_count=index + 1, completed_steps=index + 1)
         report["position"]["node_id"] = node.node_id
-        notify(ProgressEvent("committed", source_step=history.node.index, step=node.index))
+        stats.data["completed_steps"] += 1
+        notify(ProgressEvent("committed", source_step=history.node.index, step=node.index,
+                             completed_steps=index + 1, total_steps=len(materials.steps)))
         if any(not tool["equal"] for tool in tools):
             return stop()
     report.update(execution_status="completed")

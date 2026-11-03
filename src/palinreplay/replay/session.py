@@ -76,7 +76,7 @@ def run_replay(
             notify(ProgressEvent("connecting"))
             client = connect_docker(600)
         report["phase"] = "restore"
-        notify(ProgressEvent("restoring", source_step=plan.start.index, step=0))
+        notify(ProgressEvent("restoring", source_step=plan.start.index, completed_steps=0))
         with stats.timed("restore"), RecordStore.open(source) as origin:
             restored = restore_r1_node(origin, plan.start.node_id, client=client,
                                        docker_host=docker_endpoint(),
@@ -89,7 +89,7 @@ def run_replay(
                 if tuple(tool.request["interpreter"]) != tuple(executor.runtime.launch.shell):
                     raise ValueError("historical interpreter differs from the restored launch shell")
         report["phase"] = "r1-validation"
-        notify(ProgressEvent("verifying", source_step=plan.start.index, step=0))
+        notify(ProgressEvent("verifying", source_step=plan.start.index, completed_steps=0))
         report["r1"] = validate_r1(materials, executor, stats=stats)
         preparation = None
         if services is not None:
@@ -97,12 +97,14 @@ def run_replay(
             journal = PreparationJournal(output / "preparation.json", services)
             report["preparation"] = journal.data
             notify(ProgressEvent("service-preparation"))
-            preparation = prepare_services(executor, services, journal)
+            with stats.timed("preparation"):
+                preparation = prepare_services(executor, services, journal)
         store = RecordStore.create(output / "record")
         report["phase"] = "source-initialization"
-        recorder = initial_recorder(store, materials, executor, context.export, stats=stats,
-                                    preparation=preparation)
+        recorder = initial_recorder(store, materials, executor, context.export, preparation=preparation)
         report["run_id"] = recorder.run.run_id
+        notify(ProgressEvent("source-reference", source_step=plan.start.index,
+                             completed_steps=0, total_steps=len(materials.steps)))
         report["phase"] = "execute"
         replay_range(recorder, context, executor, materials, report=report, stats=stats,
                      progress=notify)

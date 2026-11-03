@@ -49,26 +49,29 @@ def executor(sandbox):
 
 def test_fixed_c20_range_records_only_actual_source_numbered_nodes(tmp_path):
     source, _, _, _, original = integrated(
-        tmp_path, [response("write")] * 24 + [response("submit")], agent_config={"step_limit": 30},
+        tmp_path, [response("write")] * 40 + [response("submit")], agent_config={"step_limit": 50},
     )
     try:
         original.run(AgentTask("task", "Task"))
-        materials = load_replay_materials(source, pin_replay(source, "C20", "C23"))
+        materials = load_replay_materials(source, pin_replay(source, "C20", "C40"))
         context, sandbox = ReplayContext(materials), executor(Sandbox())
         with RecordStore.create(tmp_path / "replay") as store:
             with recording(store, materials, context, sandbox) as rec:
                 report = replay_range(rec, context, sandbox, materials)
                 assert report["execution_status"] == "completed"
-                assert [m["source_index"] for m in report["mappings"]] == [21, 22, 23]
-                assert [m["index"] for m in report["mappings"]] == [21, 22, 23]
-                assert [n.index for n in store.list(Node)] == [21, 22, 23]
-                assert len(sandbox.calls) == 3
+                assert [m["source_index"] for m in report["mappings"]] == list(range(21, 41))
+                assert [m["index"] for m in report["mappings"]] == list(range(21, 41))
+                assert [n.index for n in store.list(Node)] == list(range(21, 41))
+                assert len(sandbox.calls) == 20
+                assert report["completed_steps"] == report["actual_node_count"] == 20
+                assert report["statistics"]["historical_steps"] == 20
+                assert report["statistics"]["completed_steps"] == 20
                 node = rec.current_node
                 assert node.model_execution_id != materials.plan.end.model_execution_id
                 assert node.tool_execution_ids != materials.plan.end.tool_execution_ids
                 saved = store.read_json(node.context)
-                assert saved["counters"]["n_calls"] == 23
-                assert saved["replay"]["historical_answer_supplies"] == 3
+                assert saved["counters"]["n_calls"] == 40
+                assert saved["replay"]["historical_answer_supplies"] == 20
                 assert saved["replay"]["actual_model_calls"] == 0
                 assert saved["messages"][-1]["extra"]["raw_output"] == "ok\n"
                 assert store.check_integrity().ok

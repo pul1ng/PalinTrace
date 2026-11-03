@@ -8,6 +8,8 @@ from palinreplay.replay.history import supply_history
 
 def execute_step(recorder, context, executor, history, *, on_result=None, stats=None):
     step = recorder.begin_step()
+    if stats:
+        stats.data["historical_steps"] += 1
     context.historical_answer(history)
     supply_history(step, history, context.messages, context.adopt)
     if stats:

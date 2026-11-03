@@ -7,13 +7,15 @@ from palinreplay.core.progress import ProgressEvent, ProgressReporter
 
 
 def describe(event: ProgressEvent) -> str:
+    if event.phase == "source-reference":
+        return f"源 C{event.source_step} (引用)"
     position = f"源 C{event.source_step} → C{event.step}"
     if event.phase == "restoring":
-        return f"恢复 {position}"
+        return f"恢复源 C{event.source_step}"
     if event.phase == "replaying":
         return f"执行与保存 {position}"
     if event.phase == "verifying":
-        return f"校验 {position}"
+        return f"检查源 C{event.source_step} 的 R1 恢复"
     if event.phase == "committed":
         return f"已完成 {position}"
     if event.phase == "finished":
@@ -85,13 +87,13 @@ class ReplayProgressDisplay:
             self._stop_live()
 
     def _update(self, event: ProgressEvent):
-        if self.mode == "off":
-            return
         if event.total_steps is not None:
             self.total = event.total_steps
-        if event.phase == "committed":
-            self.completed = event.step
+        if event.completed_steps is not None:
+            self.completed = event.completed_steps
         self.finished = event.phase == "finished"
+        if self.mode == "off":
+            return
         message = describe(event)
         if self._progress is not None:
             self._progress.update(self._task, description=message,

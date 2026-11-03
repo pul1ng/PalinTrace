@@ -246,6 +246,7 @@ def test_services_prepare_after_r1_before_reference_initialization_and_leave_his
     assert [event.step for event in events if event.phase == "committed"] == [1, 2, 3]
     assert report["statistics"]["actual_model_calls"] == 0
     assert report["statistics"]["actual_tool_executions"] == 4
+    assert report["statistics"]["seconds"]["preparation"] > 0
     with RecordStore.open(state.source) as origin, RecordStore.open(output / "record") as actual:
         history = load_replay_materials(origin, pin_replay(origin, "C0", "C3"))
         for step, mapping in zip(history.steps, report["mappings"], strict=True):
@@ -489,13 +490,31 @@ def test_session_endpoint_exit_mismatch_remains_stopped(tmp_path, replay_session
     assert report["mappings"][0]["index"] == 1 and state.captures == 1
 
 
-def test_progress_reports_only_actual_commits(tmp_path, replay_session):
-    events = []
-    report = run_replay(replay_session.source, "C1", "C3", output=tmp_path / "output",
-                        progress=events.append)
+@pytest.mark.parametrize("mode", ["auto", "plain", "off"])
+def test_progress_reports_actual_commits_and_saves_timings_in_every_mode(tmp_path, replay_session, mode):
+    from io import StringIO
+
+    from palinreplay.cli.replay_progress import ReplayProgressDisplay
+
+    events, stream = [], StringIO()
+    with ReplayProgressDisplay(mode, stream=stream) as display:
+        def observe(event):
+            events.append(event)
+            display(event)
+        report = run_replay(replay_session.source, "C1", "C3", output=tmp_path / "output",
+                            progress=observe)
+        assert display.completed == display.total == 2
     assert report["execution_status"] == "completed"
-    assert [(e.source_step, e.step) for e in events if e.phase == "committed"] == [(2, 2), (3, 3)]
+    assert [(e.source_step, e.step, e.completed_steps) for e in events
+            if e.phase == "committed"] == [(2, 2, 1), (3, 3, 2)]
+    reference, = [e for e in events if e.phase == "source-reference"]
+    assert reference.source_step == 1 and reference.step is None and reference.completed_steps == 0
     assert all(e.total_steps == 2 for e in events if e.total_steps is not None)
+    assert (stream.getvalue() == "") is (mode == "off")
+    seconds = report["statistics"]["seconds"]
+    assert all(seconds[key] > 0 for key in ("restore", "r1_validation", "execution", "snapshot_commit"))
+    assert seconds["preparation"] == 0
+    assert report["statistics"]["historical_steps"] == report["statistics"]["completed_steps"] == 2
 
 
 def test_progress_observer_error_does_not_change_execution(tmp_path, replay_session):

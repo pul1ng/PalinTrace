@@ -26,7 +26,7 @@ def validate_r1(materials, executor, *, stats=None):
         executor._container.pause()
         primary = None
         try:
-            with stats.timed("content_compare") if stats else nullcontext():
+            with stats.timed("r1_validation") if stats else nullcontext():
                 result["files"] = executor.pool.command(
                     "verify", source=source.name, workspace=executor.workspace,
                     scope=SCOPE, oracle_sha256=executor.runtime.c0_oracle_sha256,
@@ -53,7 +53,7 @@ def validate_r1(materials, executor, *, stats=None):
 
 
 def initial_recorder(
-    store, materials, executor, export_agent=None, *, stats=None, preparation=None,
+    store, materials, executor, export_agent=None, *, preparation=None,
 ):
     config = replay_config(materials, preparation=preparation)
     if export_agent is None:
