@@ -10,7 +10,7 @@ from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.initial import initial_recorder, validate_r1
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
-from palinreplay.replay.run import preparation_comparison, replay_range
+from palinreplay.replay.run import replay_range
 from palinreplay.replay.service_config import load_services
 from palinreplay.replay.services import PreparationJournal, prepare_services
 from palinreplay.replay.stats import ReplayStats
@@ -91,15 +91,10 @@ def run_replay(
             notify(ProgressEvent("service-preparation"))
             preparation = prepare_services(executor, services, journal)
         store = RecordStore.create(output / "record")
-        report["phase"] = "initial-boundary"
+        report["phase"] = "source-initialization"
         recorder = initial_recorder(store, materials, executor, context.export, stats=stats,
                                     validation_mode=validation_mode, preparation=preparation)
         report["run_id"] = recorder.run.run_id
-        if preparation is not None:
-            files = preparation_comparison(store, executor, snapshots[0], plan.start,
-                                           recorder.current_node, report=report)
-            stats.files(files)
-            write_json(output / "preparation-files.json", files)
         report["phase"] = "execute"
         replay_range(recorder, context, executor, materials, report=report, stats=stats,
                      validation_mode=validation_mode, progress=notify)

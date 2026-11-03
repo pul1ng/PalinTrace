@@ -131,7 +131,6 @@ def test_matching_exit_codes_keep_different_outputs_and_files_and_continue(tmp_p
         def no_comparison(*args, **kwargs):
             pytest.fail("runtime output/file comparison was called")
         monkeypatch.setattr("palinreplay.replay.compare.compare_tool", no_comparison)
-        monkeypatch.setattr("palinreplay.replay.run.btrfs_comparison", no_comparison)
         with RecordStore.create(tmp_path / "replay") as store:
             with recording(store, materials, context, sandbox) as rec:
                 report = replay_range(rec, context, sandbox, materials)

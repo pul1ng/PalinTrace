@@ -431,10 +431,17 @@ class RecordStore:
 
     def replay_source(self, run_id: str) -> SourceReference | None:
         """Read the protected declaration, without treating external IDs as local relations."""
+        from palinreplay.storage.codec import JSON_TYPES, decode
+
         run = self.get(Run, run_id)
-        if run.config.media_type != "application/json":
+        if run.config.media_type not in JSON_TYPES:
             return None
-        return source_reference(self.read_json(run.config))
+        data = decode(self.read_bytes(run.config), run.config.media_type)
+        try:
+            config = json.loads(data)
+        except (ValueError, UnicodeError):
+            return None  # Ordinary Record configurations may be opaque payloads.
+        return source_reference(config)
 
     def _relations(self, record: Fact) -> None:
         """Validate durable relations, also usable when inspecting old history."""

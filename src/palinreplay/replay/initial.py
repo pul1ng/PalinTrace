@@ -6,13 +6,13 @@ from palinreplay.core.errors import IntegrityError
 from palinreplay.core.interfaces import AgentSnapshot, BoundaryAdapter, Payload
 from palinreplay.record.recorder import Recorder
 from palinreplay.record.state import BtrfsStateBackend
-from palinreplay.replay.services import PreparationError
+from palinreplay.replay.config import replay_config
 from palinreplay.storage.btrfs.models import Snapshot
 from palinreplay.storage.rootfs import SCOPE
 
 
 def validate_r1(materials, executor, *, stats=None):
-    """Validate the restored prefix and files before preparation or C0 capture."""
+    """Validate the restored prefix and files before preparation or history execution."""
     restored = executor.restored
     result = {"status": "checking", "context_checks": {
         "context": restored.context == materials.context,
@@ -47,37 +47,20 @@ def initial_recorder(
     store, materials, executor, export_agent=None, *, stats=None, validation_mode="lenient",
     preparation=None,
 ):
-    if preparation is not None and preparation["status"] != "ready":
-        raise PreparationError("service preparation must be ready before capturing C0")
+    config = replay_config(materials, preparation=preparation)
     if export_agent is None:
         initial = AgentSnapshot(Payload.json(materials.context), Payload.json(materials.input_position))
         def export_agent(boundary):
             return initial
     backend = BtrfsStateBackend(executor, public_env_keys=executor.runtime.launch.environment,
                                 runtime=executor.runtime)
-    config = {
-        **materials.config,
-        "replay": {
-            "schema_version": "palinreplay.replay.v1",
-            "source": materials.plan.provenance(),
-            "used_history": [step.document() for step in materials.steps],
-            "comparison_policy": "rootfs-files-v1-strict-mtime-seconds",
-            "validation_mode": validation_mode,
-        },
-    }
-    if preparation is not None:
-        config["replay"]["preparation"] = {
-            "config": preparation["config"],
-            "evidence": preparation,
-        }
     recorder = Recorder(store, task_id=materials.plan.run.task_id,
                         agent_name=materials.plan.run.agent_name,
                         agent_version=materials.plan.run.agent_version,
                         config=Payload.json(config),
                         boundary=BoundaryAdapter(export_agent, backend.capture))
     try:
-        with stats.timed("snapshot_commit") if stats else nullcontext():
-            recorder.start()
+        recorder.start_from_source()
         return recorder
     except BaseException as error:
         recorder.__exit__(type(error), error, error.__traceback__)
