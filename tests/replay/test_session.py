@@ -870,3 +870,64 @@ def test_corrupt_material_stops_before_restore(tmp_path, replay_session):
     report = run_replay(state.source, "C0", "C3", output=tmp_path / "output")
     assert report["execution_status"] == "failed" and report["phase"] == "preflight"
     assert not state.restored and not state.sandbox.calls and not state.closed
+
+
+def _empty_manifest(tmp_path, source_doc, *, unknown=False):
+    from palinreplay.preprocess.manifest import (
+        ManifestSource,
+        ManifestUnknown,
+        ServiceManifest,
+    )
+
+    values = dict(source_doc)
+    manifest = ServiceManifest(
+        source=ManifestSource(**values),
+        services=(),
+        unknowns=(ManifestUnknown(
+            name="A", start_inclusive=0, end_exclusive=1, kind="state",
+            reason="initial state unknown",
+        ),) if unknown else (),
+    )
+    path = tmp_path / "services.json"
+    path.write_text(manifest.model_dump_json())
+    return path
+
+
+def test_manifest_unknown_at_start_fails_before_docker(tmp_path, monkeypatch):
+    from palinreplay.preprocess.source import pin_source
+
+    source = tmp_path / "source"
+    with RecordStore.create(source) as store:
+        with fake.recorder(store, fake.FakeAgent(), fake.FakeStateBackend()) as rec:
+            rec.finish()
+        with RecordStore.open(source) as reader:
+            document = pin_source(reader).document()
+    manifest = _empty_manifest(tmp_path, document, unknown=True)
+    monkeypatch.setattr(
+        "palinreplay.replay.session.connect_docker",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Docker must not start")),
+    )
+    report = run_replay(source, "C0", output=tmp_path / "out", services_config=manifest)
+    assert report["execution_status"] == "failed" and report["phase"] == "preflight"
+    assert "unknown at C0" in report["error"]
+    assert not (tmp_path / "out" / "record").exists()
+
+
+def test_manifest_digest_mismatch_fails_before_docker(tmp_path, monkeypatch):
+    from palinreplay.preprocess.source import pin_source
+
+    source = tmp_path / "source"
+    with RecordStore.create(source) as store:
+        with fake.recorder(store, fake.FakeAgent(), fake.FakeStateBackend()) as rec:
+            rec.finish()
+        with RecordStore.open(source) as reader:
+            document = pin_source(reader).document()
+    document["selection_sha256"] = "0" * 64
+    manifest = _empty_manifest(tmp_path, document)
+    monkeypatch.setattr(
+        "palinreplay.replay.session.connect_docker",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Docker must not start")),
+    )
+    report = run_replay(source, "C0", output=tmp_path / "out", services_config=manifest)
+    assert report["execution_status"] == "failed" and report["phase"] == "preflight"
+    assert "source digest" in report["error"]
