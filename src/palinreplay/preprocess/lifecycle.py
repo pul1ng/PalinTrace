@@ -33,6 +33,7 @@ class ServiceInterval:
     stop_event: VerifiedEvent | None
     last_live_event: VerifiedEvent
     open_end: bool
+    events: tuple[VerifiedEvent, ...] = ()
 
     def document(self) -> dict:
         return {
@@ -136,6 +137,7 @@ def _lifecycle(
             "first_up": event,
             "probe": event if event.action == "probe" else None,
             "last_live": event,
+            "events": [event],
         }
 
     def extend(event: VerifiedEvent) -> None:
@@ -143,6 +145,7 @@ def _lifecycle(
         if current is None:
             return
         current["last_live"] = event
+        current["events"].append(event)
         if current["probe"] is None and event.action == "probe":
             current["probe"] = event
 
@@ -162,6 +165,7 @@ def _lifecycle(
                     stop_event=stop,
                     last_live_event=current["last_live"],
                     open_end=open_end,
+                    events=tuple(current["events"]),
                 )
             )
         current = None
