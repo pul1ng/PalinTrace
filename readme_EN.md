@@ -4,10 +4,11 @@ Execution trace recording, environment restoration, and historical replay for co
 
 PalinTrace links an agent's model interactions, tool calls, execution results, context, and task environment state. The goal is to let users select any saved node, restore its associated environment, and replay recorded interactions from that point, keeping playback and environment state aligned with the same position in history.
 
-- **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and future replay.
-- **Preprocess · Service manifest (MVP implemented)**: analyze one complete Record with one model request per complete-call chunk, directly extract service controls and original commands, then validate source references and merge intervals into a reusable `services.json`.
+- **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and historical replay.
 - **Replay · Historical re-execution (MVP implemented)**: Restore a committed source node and execute subsequent tools from a fixed history without model requests or credentials. Save actual results and snapshots; stop on a definite exit-code mismatch or a framework failure. Full consistency checking is planned as separate Verify work.
 - **Resume · Fork and continue (planned)**: Restore the agent context and task environment at any saved node, optionally provide new instructions, and continue on an independent trajectory while preserving the original history.
+
+See the [final Replay MVP acceptance summary (Chinese)](docs/validation/replay-mvp-20261104.md) for the delivered scope, implementation commits, and real experiment results.
 
 ## Demo (Chinese)
 
@@ -15,7 +16,7 @@ https://github.com/user-attachments/assets/26b0c034-820d-426f-8b40-8113f72c9520
 
 ## Quickstart
 
-Run the following commands from the project root. After installation and configuration, use the script to start Record. The resulting traces and snapshots are intended to serve as inputs for future Replay and Resume workflows.
+Run the following commands from the project root. After installation and configuration, use the script to start Record. The resulting traces and snapshots can be used for Replay and provide inputs for future Resume workflows.
 
 ### 1. Install dependencies
 
@@ -49,37 +50,36 @@ The script prepares an Astropy task, preloads C0, records the run, verifies rest
 
 By default, it calls a real model and runs at most two steps. Outputs are grouped by type under `outputs/`, with names starting with `YYMMDD_HHMMSS_`. All stages in the same invocation share a timestamp. Use the script's `--output DIR` to change the output root; see `--help` for other options.
 
-### 3. Replay
+### 3. Preprocess (service manifest)
 
-Restore a committed source node, pass the R1 file, context, and configuration checks, and execute subsequent historical tools without a model, model configuration, or API key:
+Analyze an existing Record to extract background-service startup commands and lifecycle intervals. The generated `services.json` supports environment restoration for Replay and future Resume. This step calls a model.
 
-```bash
-.venv/bin/palin replay "$PALIN_RUN" --from C20 --to C40
-```
-
-Source C20 remains an external reference. The new run creates no local C20, C0, initial State, or starting checkpoint; it saves only actually completed C21–C40, with independent node IDs and the source indices. `--to` is inclusive and defaults to the last committed node at startup; `--run` selects the source Run. `--output` must name a new directory separate from the source. The default is `outputs/replay/YYMMDD_HHMMSS_任务名/` (task name), containing `report.json` and this run's `record/`. The source trace remains unchanged.
-
-Progress shows phases, the source reference, actual nodes, completed steps, and elapsed time: source C20 (reference) is `0/20`, committed C21 is `1/20`, and committed C40 is `20/20`. Redirected output uses plain text; `--progress plain` always uses text and `--progress off` disables progress display. Timings for restoration, R1 checks, preparation, tool execution, and actual snapshot commits are always saved.
-
-During historical execution, Replay checks only whether both tool exit codes are definite integers with equal values. Equal nonzero exits continue; raw output and filesystem state are not compared at runtime. A mismatch stops subsequent calls and retains actual results: a mismatch before the last tool leaves an incomplete tail, while a last-tool mismatch can commit the actual node but still reports `stopped`, even at the end of the selected range. Indefinite exit codes, corrupt materials, or restoration, preparation, execution, snapshot, recording, or cleanup faults are failures.
-
-To restore services, explicitly supply `--services-config FILE`, either a legacy static list or a manifest generated by `palin preprocess`. Replay prepares only selected services and runs historical tools after startup, initial readiness checks, and final readiness rechecks all pass. Preparation creates no independent filesystem state or checkpoint; `preparation_state_captured` is `false`. The first actual snapshot contains the net filesystem effects of preparation and the first step together, so the files at the end of preparation cannot be restored separately.
-
-The report's `execution_status` is `completed / stopped / failed / cancelled`, with exit codes `0 / 2 / 1 / 130`. Framework or cleanup faults take precedence over cancellation, while retaining both cancellation and fault evidence; the final report, progress, and CLI use the same outcome. `completed` means only that the selected execution range finished; the CLI explicitly states `完整一致性校验未执行` (full consistency checking was not performed). Verify remains separate future work, with no implemented Verify command. `--validation` and the Python API's `validation_mode` argument have been removed; there is no continue switch.
-
-Run configuration uses `palinreplay.replay.v2` and reports use `palinreplay.replay-report.v2`, declaring `source-reference-v1`, `source-index-v1`, and `historical-exit-code-v1`. `record inspect` lists source C20 separately; it is not selectable as a local `--node C20`. Integrity checks and exports still require the source Record Store, artifacts, and retained filesystem snapshots. Copying only the Replay output is not self-contained, and portable bundles are unsupported for these runs. Replay does not rewrite historical commands, retry tools, repair files, or replace actual results with source snapshots. See the [command reference (Chinese)](docs/命令参考.md#replay).
-
-### 4. Preprocess (service manifest)
-
-Preprocess reads one complete Record and a dedicated model config; it takes no Replay start/end nodes:
+Copy the [preprocessing model configuration template](config/llm/preprocess_llm.toml.example):
 
 ```bash
 cp -n config/llm/preprocess_llm.toml.example config/llm/preprocess_llm.toml
-# fill model, base_url and api_key in preprocess_llm.toml
-.venv/bin/palin preprocess "$PALIN_RUN" --run "$PALIN_RUN_ID"
 ```
 
-The default output is `outputs/preprocess/YYMMDD_HHMMSS_TASK/`, containing `services.json` and an analysis report. The v2 manifest records which services Replay should try to start at a given node. A recorded startup command opens an interval even if the call exited with an error. A successful stop closes it. For a compound command, the manifest keeps only the independently executable startup fragment. The report preserves the exit code of the entire call. The manifest binds the source digest and includes the working directory, environment and preparation timeout. Preprocess reports an error if it cannot extract an independent startup command. After all chunks are merged, a start without a successful stop covers the last recorded node. A successful stop without a matching start is an error. `palin replay --services-config` selects services at `--from` and checks the source and evidence before connecting to Docker. Git ignores the local model configuration. See the [configuration template](config/llm/preprocess_llm.toml.example).
+Set `model`, `base_url`, and `api_key` in the config. Set `PALIN_RUN` to the recording directory produced in the previous step:
+
+```bash
+PALIN_RUN="/path/to/record"
+.venv/bin/palin preprocess "$PALIN_RUN"
+```
+
+The manifest and analysis report are saved under `outputs/preprocess/YYMMDD_HHMMSS_TASK/` by default. The command prints the output path.
+
+### 4. Replay
+
+Restore a saved node, execute subsequent historical operations without model calls, and save new results and snapshots while preserving the original Record. Set `PALIN_SERVICES` to the `services.json` generated above:
+
+```bash
+PALIN_SERVICES="/path/to/services.json"
+.venv/bin/palin replay "$PALIN_RUN" --from C0 \
+  --services-config "$PALIN_SERVICES"
+```
+
+This example runs from C0 to the recorded end. Use `--from` and `--to` to select a range. Results default to `outputs/replay/YYMMDD_HHMMSS_TASK/`; an exit-code mismatch stops execution and preserves actual results. See the [command reference (Chinese)](docs/命令参考.md#replay) for all parameters and restoration scope.
 
 ### 5. Resume (not yet implemented)
 
@@ -93,6 +93,8 @@ PALIN_RAW="outputs/download/${PALIN_STAMP}_swebench_lite"
 PALIN_TASKS="outputs/convert/${PALIN_STAMP}_swebench_lite"
 PALIN_PRELOAD="outputs/preload/${PALIN_STAMP}_astropy__astropy-12907"
 PALIN_RUN="outputs/record/${PALIN_STAMP}_astropy__astropy-12907"
+PALIN_PREPROCESS="outputs/preprocess/${PALIN_STAMP}_astropy__astropy-12907"
+PALIN_REPLAY="outputs/replay/${PALIN_STAMP}_astropy__astropy-12907"
 ```
 
 You can also omit `--output` to generate a timestamped path under `outputs/<type>/` in the current directory. Each command prints its output path. An explicit `--output` uses the supplied path; existing results are not overwritten.
@@ -182,7 +184,7 @@ Export a readable trace:
 .venv/bin/palin record export "$PALIN_RUN"
 ```
 
-The export does not include the Btrfs storage pool. Keep the recording directory, the base, and their associated storage pool for restoration verification and future Replay and Resume workflows. When exporting Replay results, also retain the original source Store, artifacts, and snapshots; the export declares these external dependencies without packaging them. See the [command reference (Chinese)](docs/命令参考.md) for complete options.
+The export does not include the Btrfs storage pool. Keep the recording directory, the base, and their associated storage pool for restoration verification, Replay, and future Resume. When exporting Replay results, also retain the original source Store, artifacts, and snapshots; the export declares these external dependencies without packaging them. See the [command reference (Chinese)](docs/命令参考.md) for complete options.
 
 ### 7. record visualize: Generate a visualization
 
@@ -193,6 +195,46 @@ The export does not include the Btrfs storage pool. Keep the recording directory
 The page is saved to `outputs/visual/<timestamp>_<task_id>.html` by default. Open it in a browser to inspect nodes, context, calls, timings, and Btrfs snapshot information. Use `--output FILE` to choose another location.
 
 The playback controls at the bottom support pause, restart, speed selection, and looping, keeping the timeline and details in sync as records advance. This viewer plays back saved records; it does not run the agent or restore containers.
+
+### 8. preprocess: Generate a service manifest
+
+Analyze the completed Record to extract background-service startup commands and lifecycle intervals. The manifest supports environment restoration for Replay and future Resume.
+
+Copy the dedicated [model configuration template](config/llm/preprocess_llm.toml.example):
+
+```bash
+cp -n config/llm/preprocess_llm.toml.example config/llm/preprocess_llm.toml
+```
+
+Set `model`, `base_url`, and `api_key` in the config, then run:
+
+```bash
+.venv/bin/palin preprocess "$PALIN_RUN" \
+  --output "$PALIN_PREPROCESS"
+```
+
+This step calls a model and writes `$PALIN_PREPROCESS/services.json` and an analysis report. It does not start task services. Reuse the same manifest for different Replay starting nodes.
+
+### 9. replay: Restore and re-execute history
+
+Use the original recording and the generated service manifest to restore C0 and execute through the recorded end:
+
+```bash
+.venv/bin/palin replay "$PALIN_RUN" \
+  --from C0 \
+  --services-config "$PALIN_PREPROCESS/services.json" \
+  --output "$PALIN_REPLAY"
+```
+
+Use `--from` and `--to` to select another saved range; the manifest selects services for the starting node. Replay makes no model calls and saves actual results and snapshots under `$PALIN_REPLAY`, preserving the original recording. An exit-code mismatch stops execution and retains completed work.
+
+Inspect the new recording and check its materials:
+
+```bash
+.venv/bin/palin record inspect "$PALIN_REPLAY" --check
+```
+
+Only actually completed steps produce local nodes; starting from source C0 makes C1 the first new node. See the [command reference (Chinese)](docs/命令参考.md#replay) for all parameters and restoration scope.
 
 ## Project Structure
 
@@ -212,6 +254,7 @@ outputs/             Local outputs grouped by type and timestamp (Git-ignored)
 - [x] Replay MVP: Restore a committed source node, pass R1 and explicitly configured service preparation, and execute fixed historical tools without model requests. Reference the source baseline, save only actually completed steps, and use definite historical exit codes to control continuation while retaining actual evidence.
 - [ ] Verify: Independently check actual Replay results against the pinned source; no Verify command is implemented yet.
 - [ ] Resume: Restore agent context and a runnable environment, then create an independent branch from a historical node while preserving the original trace.
+- [ ] Rewrite: Generate and actually execute replacement operations for a selected historical interval, validate its exit conditions and context handoff, and save a separate derived trace while preserving the original Record.
 - [ ] Incremental storage management: Merge and split storage increments while retaining historical nodes.
 - [ ] Portable backups and migration across machines.
 - [ ] Btrfs storage pool expansion and reference reclamation.

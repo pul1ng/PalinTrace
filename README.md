@@ -7,9 +7,10 @@
 PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文和任务环境状态关联保存。项目目标是让使用者能够定位到轨迹中的任意已保存节点，恢复该节点对应的环境，并从该位置回放历史执行过程，使回放内容与环境状态始终对应同一个历史位置。
 
 - **Record · 轨迹录制（已实现 MVP）**：记录 Agent 的模型交互、工具调用与结果，关联当时的上下文、任务文件和运行配置，为历史查看、环境恢复与后续回放提供依据。
-- **Preprocess · 服务清单（已实现 MVP）**：分析一条完整 Record，每个完整调用分块只请求模型一次，直接提取服务和启停命令；程序核对原文、跨块归并区间并生成可复用的 `services.json`。
 - **Replay · 历史重执行（已实现 MVP）**：从已提交的来源节点恢复环境，按固定历史真实执行后续工具，不调用模型、不需要模型凭据；保存真实结果与快照，确定的退出码不符或框架故障会停止执行。完整一致性校验另列为后续 Verify 工作。
 - **Resume · 分叉续跑（计划中）**：从任意已保存节点恢复 Agent 上下文与任务环境，可补充新的指令并继续运行，生成独立的新轨迹，保留原始历史。
+
+Replay MVP 的交付范围、对应提交和真实实验结果见[最终验收摘要](docs/validation/replay-mvp-20261104.md)。
 
 ## 演示视频
 
@@ -17,7 +18,7 @@ https://github.com/user-attachments/assets/26b0c034-820d-426f-8b40-8113f72c9520
 
 ## Quickstart
 
-以下命令在项目根目录执行。安装和配置完成后，通过脚本启动 Record；生成的轨迹与快照将作为后续 Replay、Resume 的输入。
+以下命令在项目根目录执行。安装和配置完成后，通过脚本启动 Record；生成的轨迹与快照可用于 Replay，并为后续 Resume 提供输入。
 
 ### 1. 安装依赖
 
@@ -51,37 +52,36 @@ bash scripts/quickstart_record.sh
 
 默认调用真实模型、最多运行两步。产物按类型保存在 `outputs/`，名称以 `YYMMDD_HHMMSS_` 开头；同一轮共用时间戳。脚本的 `--output DIR` 可更改产物根目录，其他参数见 `--help`。
 
-### 3. Replay
+### 3. Preprocess（生成服务清单）
 
-从已提交的来源节点恢复，通过 R1 文件、上下文与配置检查后，沿固定历史真实执行后续工具，不调用模型，也不需要模型配置或 API Key：
+分析已有 Record，提取后台服务的启动命令和启停区间，生成 `services.json`，供 Replay 及后续 Resume 恢复环境时使用。此过程会调用模型。
 
-```bash
-.venv/bin/palin replay "$PALIN_RUN" --from C20 --to C40
-```
-
-源 C20 保留为外部来源引用，本次不创建 C20、C0、初始 State 或起点 checkpoint；只保存实际完成的 C21–C40，节点 ID 独立、序号沿用来源。`--to` 包含终点，省略时固定启动时最后一个已提交节点；`--run` 选择来源 Run。`--output` 必须是与来源目录分离、尚不存在的新目录，默认写入 `outputs/replay/YYMMDD_HHMMSS_任务名/`，保存 `report.json` 和本次 `record/`。来源轨迹保持不变。
-
-终端显示阶段、来源引用、实际节点、完成步数与耗时：源 C20（引用）为 `0/20`，完成本次 C21 后为 `1/20`，完成 C40 后为 `20/20`。重定向时使用普通文本，`--progress plain` 固定使用文本，`--progress off` 关闭进度显示；恢复、R1 检查、准备、工具执行及实际快照提交的计时仍始终保存。
-
-历史执行期间仅检查工具两边确定的整数退出码是否相同，相同的非零退出码也继续；原始输出和文件状态不做运行时比较。退出码不符时停止后续调用，保存已执行结果：组内非末尾工具不符时留下未完成尾部，末个工具不符时可保存完整实际节点，但即使是范围最后一步也仍报告 `stopped`。无法确定退出码、材料损坏、恢复、准备、执行、快照、录制或清理故障属于失败。
-
-需要恢复服务时，用 `--services-config services.json` 明确指定；也可传入 `palin preprocess` 生成的版本化清单，Replay 会校验来源并按 `--from` 选择服务。自动清单中的服务只启动一次，启动退出码为 0 后继续历史步骤，失败或超时则报告准备失败；准备阶段不会自动发出业务请求。旧的人工静态列表和 v1 清单继续兼容，显式给出的 `readiness_command` 仍按原约定执行首次检查与最终复核。准备不产生独立文件状态或 checkpoint，`preparation_state_captured` 为 `false`；首个实际快照包含准备与首步的文件净效果，不能单独恢复准备结束时的文件状态。
-
-报告的 `execution_status` 为 `completed / stopped / failed / cancelled`，对应退出码 `0 / 2 / 1 / 130`；框架或清理故障优先于取消，取消与故障证据均保留，最终报告、进度和 CLI 使用同一结果。新记录要求 Store 内 `store-receipt-v1` 收尾回执，绑定最终结论及报告发布、资源关闭结果；缺少回执时 inspect 显示收尾 `unconfirmed`，已有持久故障仍为 `failed`，旧记录标为 `legacy`。Store 的工具统计使用 `dispatched_tool_calls` 表示已派发数，未知结果单列调用身份；会话实际执行计数仍从执行器入口采集。`completed` 仅表示所选范围执行完成，CLI 明确显示“完整一致性校验未执行”。完整一致性校验是后续独立 Verify 工作，当前没有已实现的 Verify 命令。`--validation` 和 Python API 的 `validation_mode` 已移除，也没有继续执行开关。
-
-本次配置使用 `palinreplay.replay.v2`，报告使用 `palinreplay.replay-report.v2`，声明 `source-reference-v1`、`source-index-v1` 和 `historical-exit-code-v1`。`record inspect` 单列源 C20 引用；它不是本次 `--node C20` 可选的节点。本次完整性检查和导出仍依赖来源 Record Store、材料及保留的文件快照，仅复制 Replay 输出不能得到自包含记录，也不支持此类运行的便携 bundle。不修改历史命令、不自动重试历史工具、不修复文件、不用来源快照覆盖实际结果。完整参数和状态说明见[命令参考](docs/命令参考.md#replay)。
-
-### 4. Preprocess（生成服务清单）
-
-Preprocess 只需一条完整 Record 和一份独立的模型配置，不指定 Replay 起止节点：
+复制[预处理模型配置模板](config/llm/preprocess_llm.toml.example)：
 
 ```bash
 cp -n config/llm/preprocess_llm.toml.example config/llm/preprocess_llm.toml
-# 在 preprocess_llm.toml 中填写 model、base_url 和 api_key
-.venv/bin/palin preprocess "$PALIN_RUN" --run "$PALIN_RUN_ID"
 ```
 
-默认写入 `outputs/preprocess/YYMMDD_HHMMSS_任务名/`，包含 `services.json` 和分析报告。v2 清单记录从哪些节点恢复时需要尝试启动服务。识别到启动指令就从该节点打开区间，即使原调用返回非零。成功停止服务时关闭区间。C1 出现启动指令、C3 成功停止对应 `[1,3)`，到 C3 仍无成功停止则为 `[1,4)`。复合命令只提取可独立执行的启动片段，整条调用的退出码保存在分析报告中。清单绑定来源摘要，并保存启动命令、工作目录、环境变量和准备超时。无法提取独立启动命令时，preprocess 会报错。所有分块合并后，只有启动的区间覆盖到录制末尾，成功停止却没有匹配启动时也报错。Replay 按 `--from` 选择服务，并在连接 Docker 前核对来源与证据。实际模型配置保存在本地，格式见[配置模板](config/llm/preprocess_llm.toml.example)。
+在配置中填写 `model`、`base_url` 和 `api_key`，将 `PALIN_RUN` 设为上一步的录制结果目录：
+
+```bash
+PALIN_RUN="/path/to/record"
+.venv/bin/palin preprocess "$PALIN_RUN"
+```
+
+清单与分析报告默认保存到 `outputs/preprocess/YYMMDD_HHMMSS_任务名/`，终端会显示输出路径。
+
+### 4. Replay
+
+从已保存节点恢复环境，沿原轨迹真实执行后续操作，保存新的结果与快照，保留原始录制，不调用模型。将 `PALIN_SERVICES` 设为上一步生成的 `services.json` 路径：
+
+```bash
+PALIN_SERVICES="/path/to/services.json"
+.venv/bin/palin replay "$PALIN_RUN" --from C0 \
+  --services-config "$PALIN_SERVICES"
+```
+
+示例从 C0 执行到录制末尾，可用 `--from`、`--to` 选择区间。结果默认保存到 `outputs/replay/YYMMDD_HHMMSS_任务名/`；退出码与历史不一致时停止并保留结果。完整参数和恢复范围见[命令参考](docs/命令参考.md#replay)。
 
 ### 5. Resume（待实现）
 
@@ -95,6 +95,8 @@ PALIN_RAW="outputs/download/${PALIN_STAMP}_swebench_lite"
 PALIN_TASKS="outputs/convert/${PALIN_STAMP}_swebench_lite"
 PALIN_PRELOAD="outputs/preload/${PALIN_STAMP}_astropy__astropy-12907"
 PALIN_RUN="outputs/record/${PALIN_STAMP}_astropy__astropy-12907"
+PALIN_PREPROCESS="outputs/preprocess/${PALIN_STAMP}_astropy__astropy-12907"
+PALIN_REPLAY="outputs/replay/${PALIN_STAMP}_astropy__astropy-12907"
 ```
 
 各命令也可省略 `--output`，自动在当前目录下的 `outputs/<类型>/` 生成带时间戳的路径，并在终端打印。显式指定 `--output` 时使用原样路径，保留已有结果。
@@ -196,6 +198,46 @@ PALIN_RUN="outputs/record/${PALIN_STAMP}_astropy__astropy-12907"
 
 底部“自动播放”支持暂停、从头播放、倍速和循环，按记录顺序联动时间轴与详情。页面播放用于浏览已保存记录，不执行 Agent 或恢复容器。
 
+### 8. preprocess：生成服务清单
+
+分析已完成的 Record，提取后台服务的启动命令和启停区间，生成清单，供 Replay 及后续 Resume 恢复环境时使用。
+
+复制专用[模型配置模板](config/llm/preprocess_llm.toml.example)：
+
+```bash
+cp -n config/llm/preprocess_llm.toml.example config/llm/preprocess_llm.toml
+```
+
+在配置中填写 `model`、`base_url` 和 `api_key`，然后执行：
+
+```bash
+.venv/bin/palin preprocess "$PALIN_RUN" \
+  --output "$PALIN_PREPROCESS"
+```
+
+此过程会调用模型，生成 `$PALIN_PREPROCESS/services.json` 和分析报告，不启动任务服务。同一份清单可供不同 Replay 起点复用。
+
+### 9. replay：恢复并重执行历史
+
+使用原录制和上一步的服务清单，从 C0 恢复并执行到录制末尾：
+
+```bash
+.venv/bin/palin replay "$PALIN_RUN" \
+  --from C0 \
+  --services-config "$PALIN_PREPROCESS/services.json" \
+  --output "$PALIN_REPLAY"
+```
+
+用 `--from`、`--to` 可选择其他已保存区间；服务清单按起点选择需要准备的服务。Replay 不调用模型，将本次真实结果和快照保存到 `$PALIN_REPLAY`，原录制保持不变。退出码与历史不一致时停止，并保留已执行结果。
+
+查看本次结果和材料完整性：
+
+```bash
+.venv/bin/palin record inspect "$PALIN_REPLAY" --check
+```
+
+本次只保存实际执行产生的节点，从源 C0 开始时首个新节点为 C1。完整参数与恢复范围见[命令参考](docs/命令参考.md#replay)。
+
 ## 项目结构
 
 ```text
@@ -214,6 +256,7 @@ outputs/             按类型和时间戳分类的本地产物（Git 忽略）
 - [x] Replay MVP：从已提交的来源节点恢复，通过 R1 与显式服务准备后沿固定历史真实执行工具，不调用模型；引用源起点，只保存实际完成步骤，按确定的历史退出码控制继续或停止并保留真实证据。
 - [ ] Verify：独立检查 Replay 实际结果与固定来源的一致性；当前尚无已实现的 Verify 命令。
 - [ ] Resume：恢复 Agent 上下文与可运行环境，从历史节点产生独立分支，保留原轨迹。
+- [ ] Rewrite：为指定历史区间生成并实际执行替代流程，校验出口与上下文衔接，保存独立派生轨迹并保留原 Record。
 - [ ] 增量整理：合并、拆分存储增量并保留历史节点。
 - [ ] 便携备份与跨机器迁移。
 - [ ] Btrfs 存储池扩容与引用回收。
