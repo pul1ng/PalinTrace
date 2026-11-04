@@ -1,11 +1,19 @@
 """Select a committed Resume source without restoring its materials."""
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from palinreplay.cli.record import store_path
 from palinreplay.core.models import Node, Run, State
 from palinreplay.record.inspect import resolve_node
 from palinreplay.storage.store import RecordStore
+
+
+@dataclass(frozen=True)
+class _ResumeStart:
+    source_store: Path
+    node: Node
+    model: str
 
 
 def _select_source(

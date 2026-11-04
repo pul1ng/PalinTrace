@@ -1,10 +1,15 @@
 import sqlite3
+from dataclasses import FrozenInstanceError
+from unittest.mock import Mock
 
 import pytest
 
 from palinreplay.core.errors import IntegrityError, RecordUsageError
+from palinreplay.core.interfaces import BoundaryAdapter, Payload
 from palinreplay.core.models import Node, Run, State
-from palinreplay.resume.start import _select_source
+from palinreplay.llm import OpenAIChatClient
+from palinreplay.record.recorder import Recorder
+from palinreplay.resume.start import _ResumeStart, _select_source
 from palinreplay.storage.store import RecordStore
 from tests.helpers import recorder_smoke as fake
 
@@ -137,3 +142,32 @@ def test_missing_source_record_fails_and_closes_reader(record, metadata_only, mo
         _select_source(path, "C20")
     assert len(readers) == 1
     assert readers[0].read_only and readers[0]._closed
+
+
+def test_start_keeps_callers_model_without_requests_or_api_key(tmp_path, monkeypatch):
+    path = tmp_path / "record"
+    agent, backend = fake.FakeAgent(), fake.FakeStateBackend()
+    with RecordStore.create(path) as store:
+        with Recorder(
+            store, task_id="resume-model", agent_name="fixture-agent", agent_version="1",
+            config=Payload.json({"model": "A"}),
+            boundary=BoundaryAdapter(agent.export, backend.capture),
+        ) as rec:
+            fake.answer(rec, agent, ())
+            rec.commit_step()
+            rec.finish()
+        assert store.read_json(rec.run.config) == {"model": "A"}
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    model_request = Mock(side_effect=AssertionError("Resume selection requested a model"))
+    monkeypatch.setattr(OpenAIChatClient, "complete", model_request)
+
+    source, node = _select_source(path, "C1")
+    start = _ResumeStart(source_store=source, node=node, model="B")
+    assert start.source_store == path
+    assert start.node is node
+    assert start.node.context is node.context
+    assert start.node.input_position is node.input_position
+    assert start.model == "B"
+    model_request.assert_not_called()
+    with pytest.raises(FrozenInstanceError):
+        start.model = "A"
