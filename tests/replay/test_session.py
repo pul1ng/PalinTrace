@@ -870,3 +870,97 @@ def test_corrupt_material_stops_before_restore(tmp_path, replay_session):
     report = run_replay(state.source, "C0", "C3", output=tmp_path / "output")
     assert report["execution_status"] == "failed" and report["phase"] == "preflight"
     assert not state.restored and not state.sandbox.calls and not state.closed
+
+
+def _empty_manifest(tmp_path, source_doc, *, unknown=False):
+    from palinreplay.preprocess.manifest import (
+        ManifestSource,
+        ManifestUnknown,
+        ServiceManifest,
+    )
+
+    values = dict(source_doc)
+    manifest = ServiceManifest(
+        schema_version="palinreplay.preprocess-services.v1" if unknown else "palinreplay.preprocess-services.v2",
+        source=ManifestSource(**values),
+        services=(),
+        unknowns=(ManifestUnknown(
+            name="A", start_inclusive=0, end_exclusive=1, kind="state",
+            reason="initial state unknown",
+        ),) if unknown else (),
+    )
+    path = tmp_path / "services.json"
+    path.write_text(manifest.model_dump_json())
+    return path
+
+
+def test_manifest_unknown_at_start_fails_before_docker(tmp_path, monkeypatch):
+    from palinreplay.preprocess.source import pin_source
+
+    source = tmp_path / "source"
+    with RecordStore.create(source) as store:
+        with fake.recorder(store, fake.FakeAgent(), fake.FakeStateBackend()) as rec:
+            rec.finish()
+        with RecordStore.open(source) as reader:
+            document = pin_source(reader).document()
+    manifest = _empty_manifest(tmp_path, document, unknown=True)
+    monkeypatch.setattr(
+        "palinreplay.replay.session.connect_docker",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Docker must not start")),
+    )
+    report = run_replay(source, "C0", output=tmp_path / "out", services_config=manifest)
+    assert report["execution_status"] == "failed" and report["phase"] == "preflight"
+    assert "unknown at C0" in report["error"]
+    assert not (tmp_path / "out" / "record").exists()
+
+
+def test_manifest_digest_mismatch_fails_before_docker(tmp_path, monkeypatch):
+    from palinreplay.preprocess.source import pin_source
+
+    source = tmp_path / "source"
+    with RecordStore.create(source) as store:
+        with fake.recorder(store, fake.FakeAgent(), fake.FakeStateBackend()) as rec:
+            rec.finish()
+        with RecordStore.open(source) as reader:
+            document = pin_source(reader).document()
+    document["selection_sha256"] = "0" * 64
+    manifest = _empty_manifest(tmp_path, document)
+    monkeypatch.setattr(
+        "palinreplay.replay.session.connect_docker",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Docker must not start")),
+    )
+    report = run_replay(source, "C0", output=tmp_path / "out", services_config=manifest)
+    assert report["execution_status"] == "failed" and report["phase"] == "preflight"
+    assert "source digest" in report["error"]
+
+
+@pytest.mark.parametrize("fault", [None, "exit", "timeout"])
+def test_start_only_preparation_controls_whether_original_history_runs(tmp_path, replay_session, fault):
+    state = replay_session
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [{"name": "A", "start_command": "start A", "timeout_sec": 10}]}))
+    commands = []
+
+    def execute(command, **kwargs):
+        assert not state.sandbox.calls and state.captures == 0
+        commands.append(command)
+        if fault == "timeout":
+            raise SandboxTimeout("startup timed out")
+        return ExecResult(command, b"", 17 if fault == "exit" else 0, 0.1)
+
+    state.executor.exec = execute
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C1", "C3", output=output, services_config=config)
+    assert commands == ["start A"]
+    assert report["execution_status"] == ("failed" if fault else "completed")
+    assert report["preparation"]["status"] == ("failed" if fault else "ready")
+    service, = report["preparation"]["services"]
+    assert "readiness" not in service and "final_readiness" not in service
+    if fault:
+        assert report["phase"] == "service-preparation"
+        assert not state.sandbox.calls and state.captures == 0
+        assert not (output / "record").exists()
+    else:
+        assert [m["source_index"] for m in report["mappings"]] == [2, 3]
+        assert state.sandbox.calls and state.captures == 2
+    assert report["cleanup_confirmed"]

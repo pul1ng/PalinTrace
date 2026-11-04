@@ -14,7 +14,7 @@ from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.report import exception_evidence, execution_facts, final_execution_status
 from palinreplay.replay.run import replay_range
-from palinreplay.replay.service_config import load_services
+from palinreplay.replay.service_config import load_service_input, resolve_services
 from palinreplay.replay.services import PreparationJournal, prepare_services
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.sandbox.client import connect_docker, docker_endpoint
@@ -29,7 +29,7 @@ def run_replay(
     source, start, end=None, *, run_id=None, output, client=None,
     progress: ProgressCallback | None = None, services_config: str | Path | None = None,
 ):
-    services = load_services(services_config) if services_config is not None else None
+    service_input = load_service_input(services_config) if services_config is not None else None
     source, output = Path(source).absolute(), Path(output).absolute()
     outside_store(source, output)
     if source.resolve().is_relative_to(output.resolve()):
@@ -112,6 +112,13 @@ def run_replay(
         notify(ProgressEvent("preparing"))
         with RecordStore.open(source) as origin, origin.snapshot():
             plan = pin_replay(origin, start, end, run_id=run_id)
+            services = resolve_services(service_input, origin, plan)
+            if service_input is not None and service_input.manifest is not None:
+                report["services_manifest"] = {
+                    "path": str(service_input.path),
+                    "source": service_input.manifest.source.model_dump(mode="json"),
+                    "selected": [service.name for service in services.services],
+                }
             notify(ProgressEvent("preparing", total_steps=len(plan.nodes) - 1))
             materials = load_replay_materials(origin, plan)
             baseline = load_restore_materials(origin, plan.start.node_id)
