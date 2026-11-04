@@ -11,7 +11,9 @@ from palinreplay.storage.store import RecordStore
 
 
 @dataclass(frozen=True)
-class _ResumeStart:
+class ResumeStart:
+    """Pinned source references and settings for new decisions after that node."""
+
     source_store: Path
     node: Node
     model: str
@@ -31,3 +33,16 @@ def _select_source(
             source.get(Run, node.run_id)
             source.get(State, node.state_id)
             return source.root, node
+
+
+def select_resume_start(
+    store: str | Path,
+    selector: str,
+    *,
+    model: str,
+    max_steps: int,
+    run_id: str | None = None,
+) -> ResumeStart:
+    """Select one committed node using metadata only; budget counts new decisions."""
+    source_store, node = _select_source(store, selector, run_id=run_id)
+    return ResumeStart(source_store=source_store, node=node, model=model, max_steps=max_steps)

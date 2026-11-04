@@ -9,7 +9,11 @@ from palinreplay.core.interfaces import BoundaryAdapter, Payload
 from palinreplay.core.models import Node, Run, State
 from palinreplay.llm import OpenAIChatClient
 from palinreplay.record.recorder import Recorder
-from palinreplay.resume.start import _ResumeStart, _select_source
+from palinreplay.resume import ResumeStart, select_resume_start
+from palinreplay.resume.start import _select_source
+from palinreplay.sandbox.btrfs import BtrfsSandbox, BtrfsWorkspace
+from palinreplay.sandbox.docker import DockerSDKSandbox
+from palinreplay.storage.btrfs.pool import BtrfsPool
 from palinreplay.storage.store import RecordStore
 from tests.helpers import recorder_smoke as fake
 
@@ -59,6 +63,8 @@ def test_c20_requires_run_only_when_selector_is_ambiguous(record):
         _select_source(path, "C20")
     for node in (first, second):
         assert _select_source(path, "C20", run_id=node.run_id) == (path, node)
+        selected = select_resume_start(path, "C20", model="M", max_steps=2, run_id=node.run_id)
+        assert selected.node == node
         assert _select_source(path, node.node_id) == (path, node)
     with pytest.raises(RecordUsageError, match="no committed node"):
         _select_source(path, first.node_id, run_id=second.run_id)
@@ -67,7 +73,7 @@ def test_c20_requires_run_only_when_selector_is_ambiguous(record):
 @pytest.mark.parametrize("selector,run_id", [("C21", None), ("unknown", None), ("C20", "unknown")])
 def test_missing_node_is_rejected(record, selector, run_id):
     with pytest.raises(RecordUsageError, match="no committed node"):
-        _select_source(record[0], selector, run_id=run_id)
+        select_resume_start(record[0], selector, model="M", max_steps=2, run_id=run_id)
 
 
 def test_uncommitted_step_is_not_selectable(tmp_path):
@@ -108,7 +114,8 @@ def test_source_references_share_one_read_only_snapshot(record, metadata_only, m
         return value
 
     monkeypatch.setattr(RecordStore, "get", track_get)
-    source_path, node = _select_source(path, "C20")
+    selected = select_resume_start(path, "C20", model="M", max_steps=2)
+    source_path, node = selected.source_store, selected.node
     assert source_path == path
     assert node == expected
     assert node.context == expected.context
@@ -139,7 +146,7 @@ def test_missing_source_record_fails_and_closes_reader(record, metadata_only, mo
 
     monkeypatch.setattr(RecordStore, "open", classmethod(track_open))
     with pytest.raises(IntegrityError, match=f"missing record: {model.__name__}"):
-        _select_source(path, "C20")
+        select_resume_start(path, "C20", model="M", max_steps=2)
     assert len(readers) == 1
     assert readers[0].read_only and readers[0]._closed
 
@@ -162,12 +169,13 @@ def test_start_keeps_callers_model_without_requests_or_api_key(tmp_path, monkeyp
     monkeypatch.setattr(OpenAIChatClient, "complete", model_request)
 
     source, node = _select_source(path, "C1")
-    start = _ResumeStart(source_store=source, node=node, model="B", max_steps=2)
+    start = ResumeStart(source_store=source, node=node, model="B", max_steps=2)
     assert start.source_store == path
     assert start.node is node
     assert start.node.context is node.context
     assert start.node.input_position is node.input_position
     assert start.model == "B"
+    assert select_resume_start(path, "C1", model="B", max_steps=2).model == "B"
     model_request.assert_not_called()
     with pytest.raises(FrozenInstanceError):
         start.model = "A"
@@ -175,9 +183,8 @@ def test_start_keeps_callers_model_without_requests_or_api_key(tmp_path, monkeyp
 
 @pytest.mark.parametrize("max_steps", [0, -1, True, False, 2.0, "2", None])
 def test_new_budget_requires_a_positive_integer(record, max_steps):
-    path, node = record
     with pytest.raises(RecordUsageError, match="max_steps must be a positive integer"):
-        _ResumeStart(source_store=path, node=node, model="M", max_steps=max_steps)
+        select_resume_start(record[0], "C20", model="M", max_steps=max_steps)
 
 
 @pytest.mark.parametrize("finished", [False, True])
@@ -187,8 +194,7 @@ def test_c1_accepts_two_new_decisions_without_a_historical_c2(tmp_path, finished
         rec, _ = history(store, count=1)
         if finished:
             rec.finish()
-        source, node = _select_source(path, "C1")
-        start = _ResumeStart(source_store=source, node=node, model="M", max_steps=2)
+        start = select_resume_start(path, "C1", model="M", max_steps=2)
         assert start.node == rec.current_node
         assert start.node.index == 1
         assert start.max_steps == 2
@@ -196,3 +202,28 @@ def test_c1_accepts_two_new_decisions_without_a_historical_c2(tmp_path, finished
             _select_source(path, "C2")
         if not finished:
             rec.finish()
+
+
+def test_public_entrypoint_delivers_start_without_runtime_calls(record, metadata_only, monkeypatch):
+    path, node = record
+    docker_start = Mock(side_effect=AssertionError("Resume selection started Docker"))
+    model_request = Mock(side_effect=AssertionError("Resume selection requested a model"))
+    native_init = Mock(side_effect=AssertionError("Resume selection initialized native mini"))
+    for owner, method in (
+        (DockerSDKSandbox, "start"), (BtrfsSandbox, "start"),
+        (BtrfsWorkspace, "start"), (BtrfsPool, "__enter__"),
+    ):
+        monkeypatch.setattr(owner, method, docker_start)
+    monkeypatch.setattr(OpenAIChatClient, "complete", model_request)
+    monkeypatch.setattr("palinreplay.agents.mini.load_native", native_init)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    start = select_resume_start(path.parent, "C20", model="M", max_steps=2)
+    assert isinstance(start, ResumeStart)
+    assert start.source_store == path
+    assert start.node == node
+    assert start.model == "M"
+    assert start.max_steps == 2
+    docker_start.assert_not_called()
+    model_request.assert_not_called()
+    native_init.assert_not_called()
