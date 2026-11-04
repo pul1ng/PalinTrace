@@ -1,4 +1,6 @@
 import hashlib
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -184,7 +186,14 @@ def test_empty_timeline_produces_no_chunks(tmp_path):
     assert plan_chunks(timeline, CharCounter(), PromptTemplate(system="", user_prefix="")) == ()
 
 
-def test_tokenizer_resolution_requires_an_explicit_mapping_for_unknown_models():
+def test_tokenizer_resolution_requires_an_explicit_mapping_for_unknown_models(monkeypatch):
+    import tiktoken
+
+    model_lookup = Mock(return_value=SimpleNamespace(name="test-encoding"))
+    encoding_lookup = Mock(side_effect=ValueError("unknown encoding"))
+    monkeypatch.setattr(tiktoken, "encoding_for_model", model_lookup)
+    monkeypatch.setattr(tiktoken, "get_encoding", encoding_lookup)
+
     settings = PreprocessSettings(tokenizer_model="gpt-4o")
     config = PreprocessConfig(
         llm={
@@ -195,7 +204,9 @@ def test_tokenizer_resolution_requires_an_explicit_mapping_for_unknown_models():
         preprocess=settings,
     )
     counter = make_token_counter(config)
-    assert isinstance(counter, TiktokenCounter) and counter.name
+    assert isinstance(counter, TiktokenCounter) and counter.name == "test-encoding"
+    model_lookup.assert_called_once_with("gpt-4o")
+    encoding_lookup.assert_not_called()
 
     bad_encoding = "definitely-not-a-real-encoding"
     config = PreprocessConfig(
@@ -208,3 +219,4 @@ def test_tokenizer_resolution_requires_an_explicit_mapping_for_unknown_models():
     )
     with pytest.raises(RecordUsageError, match="tokenizer"):
         make_token_counter(config)
+    encoding_lookup.assert_called_once_with(bad_encoding)
