@@ -17,7 +17,7 @@ from palinreplay.resume import select_resume_start
 from palinreplay.sandbox.btrfs import BtrfsSandbox, BtrfsWorkspace
 from palinreplay.sandbox.docker import DockerSDKSandbox
 from palinreplay.storage.btrfs.pool import BtrfsPool
-from palinreplay.storage.io import write_json
+from palinreplay.storage.io import outside_store, write_json
 from palinreplay.storage.store import RecordStore
 
 EXPECTED_NODE_ID = "c18d313c6bb04ac98b1ebba48f145ba3"
@@ -35,6 +35,7 @@ def forbidden(counts, name):
 
 def main(source: Path, output: Path) -> dict:
     source, output = source.absolute(), output.absolute()
+    outside_store(source, output)
     output.mkdir(parents=True, exist_ok=False)
     counts = {
         "docker_starts": 0, "model_requests": 0,
@@ -119,6 +120,9 @@ def main(source: Path, output: Path) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, type=Path, help="recording or record/ directory")
-    parser.add_argument("--output", required=True, type=Path, help="new acceptance output directory")
+    parser.add_argument(
+        "--output", required=True, type=Path,
+        help="new acceptance directory outside the source (e.g. outputs/resume/DATE_start-validation)",
+    )
     args = parser.parse_args()
     main(args.source, args.output)
