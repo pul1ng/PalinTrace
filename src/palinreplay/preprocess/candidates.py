@@ -12,7 +12,7 @@ from palinreplay.core.schema import Spec
 from palinreplay.preprocess.chunks import CallChunk, PromptTemplate
 from palinreplay.preprocess.timeline import Timeline, TimelineCall
 
-CANDIDATE_PROMPT_VERSION = "palinreplay.preprocess-candidates.v2"
+CANDIDATE_PROMPT_VERSION = "palinreplay.preprocess-candidates.v3"
 
 CANDIDATE_SYSTEM_PROMPT = """You analyze a recorded coding-agent trajectory and identify background services.
 Return exactly one JSON object with one key, "candidates", and no prose or Markdown.
@@ -20,8 +20,11 @@ Each candidate describes one service in one recorded tool call:
 {"name": string, "node_index": integer, "execution_id": string,
  "actions": array of "start"|"probe"|"stop", "candidate_state": "up"|"down"|"unknown"}.
 Only use node_index and execution_id values copied from the supplied calls. At most one
-candidate per service per call. List actions in the order observed within the call. A start
-attempt alone means "unknown": a zero exit status does not prove the service became ready.
+candidate per service per call. List actions in the order observed within the call.
+Always propose a service-specific start/stop attempt, including background launches with
+exit code 0 and empty output, even when no later probe exists. candidate_state is only
+an availability hint, not the binary Replay state. A start attempt can remain unknown
+here; the next pass checks its result to decide whether Replay must prepare the service.
 Use "up" only when the actual result demonstrates availability, and "down" only when it
 demonstrates unavailability or a completed stop. Ignore comments, echo text and expectations
 inside commands; judge from the actual recorded command and result. Return a candidate only

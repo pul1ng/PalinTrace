@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from palinreplay.core.models import ArtifactRef
@@ -59,6 +61,7 @@ def event(call, quote, action, state="up", output_quote=None, executable=True, d
         execution_id=call.execution_id,
         action=action,
         observed_state=state,
+        action_result="succeeded" if action != "probe" else "unattributed",
         request_span=make_span(call.request.command, quote) if quote else None,
         output_span=make_span(call.request.command, output_quote) if output_quote else None,
         executable=executable,
@@ -114,162 +117,80 @@ def timeline(*calls):
     )
 
 
-def test_c19_compound_command_extracts_only_b_service_fragments():
-    call = make_call(
-        "ff86-19",
-        "/srv/B/lifecycle.py start && /srv/A/request.py && /srv/B/request.py",
-    )
-    life, service = lifecycle(
-        "B", call, "/srv/B/lifecycle.py start", call, "/srv/B/request.py",
-        ("program:/srv/B/lifecycle.py",),
-    )
-    other = ServiceEvidence(
-        name="A", aliases=("A",), identity_keys=("program:/srv/A/lifecycle.py",),
-        items=(), identity_unknown=False, unknowns=(),
-    )
-    recipe = build_recipes(timeline(call), (life,), (service, other), timeout_sec=30)[0]
+def recipe_for(call, quote, **kwargs):
+    life, service = lifecycle("B", call, quote, call, quote,
+                              ("program:/srv/B/lifecycle.py",), **kwargs)
+    return build_recipes(timeline(call), (life,), (service,), timeout_sec=30)[0]
+
+
+def test_c19_extracts_only_original_start_and_never_generates_readiness():
+    call = make_call("ff86-19", "/srv/B/lifecycle.py start && /srv/A/request.py && /srv/B/request.py")
+    recipe = recipe_for(call, "/srv/B/lifecycle.py start")
     assert recipe.launch.start_command == "/srv/B/lifecycle.py start"
-    assert recipe.launch.readiness_command == "/srv/B/request.py"
     assert recipe.launch.cwd == "/testbed" and recipe.launch.env == {}
     assert recipe.launch.timeout_sec == 30
-    assert recipe.unknowns == ()
+    assert "readiness_command" not in recipe.launch.model_dump()
 
 
-def test_whole_compound_or_embedded_fragment_is_not_an_independent_recipe():
-    call = make_call(
-        "ff86-19",
-        "/srv/B/lifecycle.py start && /srv/B/request.py",
-    )
-    for quote in (
-        "/srv/B/lifecycle.py start && /srv/B/request.py",
-        "lifecycle.py start",
-    ):
-        life, service = lifecycle(
-            "B", call, quote, call, "/srv/B/request.py", ("program:/srv/B/lifecycle.py",)
-        )
-        recipe = build_recipes(timeline(call), (life,), (service,), timeout_sec=30)[0]
-        assert recipe.launch is None
-        assert "complete top-level" in recipe.unknowns[0].reason
-
-
-def test_other_service_references_and_unsafe_readiness_are_rejected():
-    call = make_call("ff86-19", "/srv/B/lifecycle.py start && /srv/A/request.py")
-    life, service = lifecycle(
-        "B", call, "/srv/B/lifecycle.py start", call, "/srv/A/request.py",
-        ("program:/srv/B/lifecycle.py",),
-    )
-    other = ServiceEvidence(
-        name="A", aliases=("A",), identity_keys=("program:/srv/A/request.py",),
-        items=(), identity_unknown=False, unknowns=(),
-    )
-    recipe = build_recipes(timeline(call), (life,), (service, other), timeout_sec=30)[0]
-    assert recipe.launch is None and "another service" in recipe.unknowns[0].reason
-
-    same = make_call("ff86-19", "/srv/B/lifecycle.py start")
-    life, service = lifecycle(
-        "B", same, "/srv/B/lifecycle.py start", same, "/srv/B/lifecycle.py start",
-        ("program:/srv/B/lifecycle.py",),
-    )
-    recipe = build_recipes(timeline(same), (life,), (service,), timeout_sec=30)[0]
-    assert recipe.launch is None and "not safe to repeat" in recipe.unknowns[0].reason
-
-
-def test_cwd_dependencies_and_environment_must_be_complete():
-    start = make_call("e-5", "/srv/B/lifecycle.py start", cwd="/testbed")
-    probe = make_call("e-6", "/srv/B/request.py", cwd="/other")
-    life, service = lifecycle(
-        "B", start, "/srv/B/lifecycle.py start", probe, "/srv/B/request.py",
-        ("program:/srv/B/lifecycle.py",),
-    )
-    recipe = build_recipes(timeline(start, probe), (life,), (service,), timeout_sec=30)[0]
-    assert recipe.launch is None and "working directories" in recipe.unknowns[0].reason
-
-    start = make_call(
-        "e-5", "/srv/B/lifecycle.py start", env={"PORT": "9999"}, cwd="/testbed"
-    )
-    probe = make_call("e-6", "/srv/B/request.py $PORT", env={"PORT": "9999"}, cwd="/testbed")
-    life, service = lifecycle(
-        "B", start, "/srv/B/lifecycle.py start", probe, "/srv/B/request.py $PORT",
-        ("program:/srv/B/lifecycle.py",),
-    )
-    recipe = build_recipes(timeline(start, probe), (life,), (service,), timeout_sec=30)[0]
-    assert recipe.launch.env == {"PORT": "9999"}
-
-    missing = make_call("e-5", "/srv/B/lifecycle.py start", env={})
-    missing_probe = make_call("e-6", "/srv/B/request.py $PORT", env={}, cwd="/testbed")
-    life, service = lifecycle(
-        "B", missing, "/srv/B/lifecycle.py start", missing_probe,
-        "/srv/B/request.py $PORT", ("program:/srv/B/lifecycle.py",),
-    )
-    recipe = build_recipes(
-        timeline(missing, missing_probe), (life,), (service,), timeout_sec=30
-    )[0]
-    assert recipe.launch is None and "environment" in recipe.unknowns[0].reason
-
-
-def test_unresolved_dependencies_and_unsupported_shell_remain_unknown():
-    call = make_call("e-5", "/srv/B/lifecycle.py start")
-    life, service = lifecycle(
-        "B", call, "/srv/B/lifecycle.py start", call, "/srv/B/lifecycle.py start",
-        ("program:/srv/B/lifecycle.py",), start_deps=("database",),
-    )
+def test_background_start_preserves_redirections_and_needs_no_probe():
+    call = make_call("e-1", "./start-A.sh >a.log 2>&1 &", output="")
+    life, service = lifecycle("A", call, call.request.command, call, call.request.command)
+    interval = life.intervals[0]
+    interval = replace(interval, probe_event=None, events=(interval.start_event,))
+    life = ServiceLifecycle(service, (interval,), ())
     recipe = build_recipes(timeline(call), (life,), (service,), timeout_sec=30)[0]
-    assert recipe.launch is None and "dependencies" in recipe.unknowns[0].reason
-
-    unsupported = make_call("e-5", "echo $(/srv/B/start)")
-    life, service = lifecycle(
-        "B", unsupported, "echo $(/srv/B/start)", unsupported, "echo $(/srv/B/start)",
-        ("program:/srv/B/start",),
-    )
-    recipe = build_recipes(timeline(unsupported), (life,), (service,), timeout_sec=30)[0]
-    assert recipe.launch is None
+    assert recipe.launch.start_command == call.request.command
+    assert "readiness_command" not in recipe.document()["launch"]
 
 
-def test_recipe_skips_unsafe_earlier_probe_and_uses_later_dedicated_one():
-    start_call = make_call(
-        "e-5", "/srv/B/lifecycle.py start && python -c 'check 18765'"
-    )
-    probe_call = make_call("e-6", "/srv/B/request.py")
-    start = event(start_call, "/srv/B/lifecycle.py start", "start", output_quote="READY")
-    checker = event(start_call, "python -c 'check 18765'", "probe", output_quote="READY")
-    dedicated = event(probe_call, "/srv/B/request.py", "probe", output_quote="READY")
-    interval = ServiceInterval(
-        name="B", start_inclusive=5, end_exclusive=10,
-        start_event=start, probe_event=checker, stop_event=None,
-        last_live_event=dedicated, open_end=False, events=(start, checker, dedicated),
-    )
-    item = CandidateEvidence(
-        candidate=Candidate(
-            name="B", node_index=5, execution_id=start_call.execution_id,
-            actions=("start", "probe"), candidate_state="up",
-        ),
-        identity=(), events=(start, checker), unknowns=(),
-    )
-    service = ServiceEvidence(
-        name="B", aliases=("B",), identity_keys=("program:/srv/B/lifecycle.py",),
-        items=(item,), identity_unknown=False, unknowns=(),
-    )
-    other = ServiceEvidence(
-        name="A", aliases=("A",), identity_keys=("endpoint:18765",),
-        items=(), identity_unknown=False, unknowns=(),
-    )
-    recipe = build_recipes(
-        timeline(start_call, probe_call),
-        (ServiceLifecycle(service, (interval,), ()),),
-        (service, other),
-        timeout_sec=30,
-    )[0]
-    assert recipe.launch.readiness_command == "/srv/B/request.py"
-    assert recipe.probe_event is dedicated
+@pytest.mark.parametrize("quote", [
+    "/srv/B/lifecycle.py start && /srv/B/request.py", "lifecycle.py start",
+])
+def test_whole_compound_or_embedded_fragment_fails_publication(quote):
+    call = make_call("e-1", "/srv/B/lifecycle.py start && /srv/B/request.py")
+    with pytest.raises(ValueError, match="complete top-level"):
+        recipe_for(call, quote)
 
 
-def test_split_top_level_ignores_quoted_operators_but_preserves_pipelines():
-    segments = split_top_level("python -c 'a && b' && grep x | wc -l; echo done")
+def test_start_referencing_another_service_is_rejected():
+    call = make_call("e-1", "/srv/B/lifecycle.py start /srv/A/config")
+    life, service = lifecycle("B", call, call.request.command, call, call.request.command)
+    other = ServiceEvidence(name="A", aliases=("A",), identity_keys=("config:/srv/A/config",),
+                            items=(), identity_unknown=False, unknowns=())
+    with pytest.raises(ValueError, match="another service"):
+        build_recipes(timeline(call), (life,), (service, other), timeout_sec=30)
+
+
+def test_all_recorded_environment_overrides_are_kept_even_without_shell_expansion():
+    call = make_call("e-1", "/srv/B/lifecycle.py start", env={"PORT": "9999", "FLAG": "v"})
+    assert recipe_for(call, call.request.command).launch.env == {"PORT": "9999", "FLAG": "v"}
+    missing = make_call("e-1", "/srv/B/lifecycle.py start $PORT")
+    with pytest.raises(ValueError, match="environment"):
+        recipe_for(missing, missing.request.command)
+
+
+def test_only_start_dependencies_and_cwd_affect_recipe():
+    call = make_call("e-1", "/srv/B/lifecycle.py start", cwd="/srv/B")
+    with pytest.raises(ValueError, match="dependencies"):
+        recipe_for(call, call.request.command, start_deps=("database",))
+    probe = make_call("e-2", "/srv/B/request.py $MISSING", cwd="/other")
+    life, service = lifecycle("B", call, call.request.command, probe, probe.request.command,
+                              probe_deps=("unrelated",))
+    recipe = build_recipes(timeline(call, probe), (life,), (service,), timeout_sec=30)[0]
+    assert recipe.launch.cwd == "/srv/B"
+    assert recipe.launch.env == {}
+
+
+def test_unsupported_shell_start_cannot_be_published_as_a_null_launch():
+    call = make_call("e-1", "echo $(/srv/B/start)")
+    with pytest.raises(ValueError, match="top-level"):
+        recipe_for(call, call.request.command)
+
+
+def test_split_top_level_ignores_quoted_operators_and_keeps_background_launch():
+    segments = split_top_level("python -c 'a && b' && grep x | wc -l; ./start-A.sh >a.log 2>&1 &")
     assert [segment.text for segment in segments] == [
-        "python -c 'a && b'",
-        "grep x | wc -l",
-        "echo done",
-    ]
+        "python -c 'a && b'", "grep x | wc -l", "./start-A.sh >a.log 2>&1 &"]
     with pytest.raises(ValueError, match="command substitution"):
         split_top_level("echo $(date)")
     with pytest.raises(ValueError, match="subshell"):

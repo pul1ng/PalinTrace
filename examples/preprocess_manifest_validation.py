@@ -8,7 +8,7 @@ import argparse
 import json
 from pathlib import Path
 
-from palinreplay.preprocess.manifest import load_manifest, select_services
+from palinreplay.preprocess.manifest import SCHEMA_VERSION, load_manifest, select_services
 from palinreplay.storage.io import write_json
 
 EXPECTED = {"A": (5, 25), "B": (19, 30), "C": (35, 38)}
@@ -37,7 +37,10 @@ def main(manifest_path, output):
         for service in manifest.services:
             assert service.launch is not None, service.name
             assert f"/{service.name}/lifecycle.py" in service.launch.start_command
-            assert f"/{service.name}/request.py" in service.launch.readiness_command
+            if manifest.schema_version == SCHEMA_VERSION:
+                assert service.launch.readiness_command is None
+            else:
+                assert f"/{service.name}/request.py" in service.launch.readiness_command
             assert service.launch.cwd == "/testbed"
             assert service.launch.timeout_sec == 30.0
         selections = {

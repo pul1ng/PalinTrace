@@ -65,7 +65,7 @@ bash scripts/quickstart_record.sh
 
 历史执行期间仅检查工具两边确定的整数退出码是否相同，相同的非零退出码也继续；原始输出和文件状态不做运行时比较。退出码不符时停止后续调用，保存已执行结果：组内非末尾工具不符时留下未完成尾部，末个工具不符时可保存完整实际节点，但即使是范围最后一步也仍报告 `stopped`。无法确定退出码、材料损坏、恢复、准备、执行、快照、录制或清理故障属于失败。
 
-需要恢复服务时，用 `--services-config services.json` 明确指定；也可传入 `palin preprocess` 生成的版本化清单，Replay 会校验来源并按 `--from` 选择服务。旧的人工静态列表继续兼容。Replay 只准备配置中的服务，启动、首次就绪检查与最终就绪复核全部通过后才执行历史。准备不产生独立文件状态或 checkpoint，`preparation_state_captured` 为 `false`；首个实际快照包含准备与首步的文件净效果，不能单独恢复准备结束时的文件状态。
+需要恢复服务时，用 `--services-config services.json` 明确指定；也可传入 `palin preprocess` 生成的版本化清单，Replay 会校验来源并按 `--from` 选择服务。自动清单中的服务只启动一次，启动退出码为 0 后继续历史步骤，失败或超时则报告准备失败；准备阶段不会自动发出业务请求。旧的人工静态列表和 v1 清单继续兼容，显式给出的 `readiness_command` 仍按原约定执行首次检查与最终复核。准备不产生独立文件状态或 checkpoint，`preparation_state_captured` 为 `false`；首个实际快照包含准备与首步的文件净效果，不能单独恢复准备结束时的文件状态。
 
 报告的 `execution_status` 为 `completed / stopped / failed / cancelled`，对应退出码 `0 / 2 / 1 / 130`；框架或清理故障优先于取消，取消与故障证据均保留，最终报告、进度和 CLI 使用同一结果。新记录要求 Store 内 `store-receipt-v1` 收尾回执，绑定最终结论及报告发布、资源关闭结果；缺少回执时 inspect 显示收尾 `unconfirmed`，已有持久故障仍为 `failed`，旧记录标为 `legacy`。Store 的工具统计使用 `dispatched_tool_calls` 表示已派发数，未知结果单列调用身份；会话实际执行计数仍从执行器入口采集。`completed` 仅表示所选范围执行完成，CLI 明确显示“完整一致性校验未执行”。完整一致性校验是后续独立 Verify 工作，当前没有已实现的 Verify 命令。`--validation` 和 Python API 的 `validation_mode` 已移除，也没有继续执行开关。
 
@@ -81,7 +81,7 @@ cp -n config/llm/preprocess_llm.toml.example config/llm/preprocess_llm.toml
 .venv/bin/palin preprocess "$PALIN_RUN" --run "$PALIN_RUN_ID"
 ```
 
-默认写入 `outputs/preprocess/YYMMDD_HHMMSS_任务名/`，包含 `services.json` 和分析报告。清单绑定完整来源摘要，记录每个已确认运行区间、启动/就绪配方和原证据。Replay 的 `--services-config` 可直接读取它，按 `--from` 选择需要准备的服务；来源不一致、起点落在未知区间或缺少配方时会在连接 Docker 前报错。模板见 [`preprocess_llm.toml.example`](config/llm/preprocess_llm.toml.example)，实际配置文件不进入 Git。
+默认写入 `outputs/preprocess/YYMMDD_HHMMSS_任务名/`，包含 `services.json` 和分析报告。新的 v2 自动清单采用有/无二态：初始无，可归因的成功启动打开区间，成功停止关闭区间，其余节点沿用前态；探测结果不改变区间。C1 启动、C3 停止为 `[1,3)`；到 C3 结束仍未停止为 `[1,4)`。“有”表达 Replay 从该节点开始需要准备服务，不承诺后台进程当时已经可用。清单绑定完整来源摘要，只包含有依据且能独立执行的原始启动命令、工作目录、环境与准备超时，不生成 unknowns、空启动配方或 readiness。Replay 按 `--from` 选择需要准备的服务，来源或证据不一致时会在连接 Docker 前报错；无法提取独立启动命令时 preprocess 报错，不发布不完整清单。模板见 [`preprocess_llm.toml.example`](config/llm/preprocess_llm.toml.example)，实际配置文件不进入 Git。
 
 ### 5. Resume（待实现）
 

@@ -18,7 +18,12 @@ from palinreplay.preprocess.evidence import (
     analyze_evidence,
 )
 from palinreplay.preprocess.lifecycle import analyze_lifecycles
-from palinreplay.preprocess.manifest import ServiceManifest, build_manifest, write_manifest
+from palinreplay.preprocess.manifest import (
+    ServiceManifest,
+    build_manifest,
+    manifest_document,
+    write_manifest,
+)
 from palinreplay.preprocess.recipes import build_recipes
 from palinreplay.preprocess.source import PinnedSource, pin_source
 from palinreplay.preprocess.timeline import Timeline, read_timeline
@@ -121,7 +126,7 @@ def analyze(
         },
         "lifecycles": [lifecycle.document() for lifecycle in lifecycles],
         "recipes": [recipe.document() for recipe in recipes],
-        "manifest": manifest.model_dump(mode="json"),
+        "manifest": manifest_document(manifest),
     }
     return manifest, report, timeline, source
 

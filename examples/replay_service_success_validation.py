@@ -8,7 +8,6 @@ Record by preprocess; --llm-config opts into live model analysis instead.
 """
 
 import argparse
-import base64
 import hashlib
 import json
 from contextlib import redirect_stderr, redirect_stdout
@@ -198,7 +197,7 @@ class FixtureAnalysis:
             index = call["node_index"]
             assert call["request"]["command"] == commands()[index - 1]
             events = {
-                1: [("start", fixture.START_COMMAND, "PALIN_SERVICE_A_READY requests=0"),
+                1: [("start", fixture.START_COMMAND, "PALIN_SERVICE_A_STARTED"),
                     ("probe", READY_COMMAND, "PALIN_SERVICE_A_READY requests=0")],
                 2: [("probe", fixture.REQUEST_COMMAND, '"body": "PALIN_SERVICE_OK"')],
                 3: [("stop", fixture.STOP_COMMAND, "PALIN_SERVICE_A_STOPPED requests=1")],
@@ -208,6 +207,7 @@ class FixtureAnalysis:
                 "identity": [{"kind": "program", "value": fixture.DIRECTORY,
                               "quote": fixture.DIRECTORY, "field": "request.command"}],
                 "events": [{"action": action, "observed_state": "down" if index == 3 else "up",
+                            "action_result": "succeeded" if action != "probe" else "unattributed",
                             "request_quote": request, "output_quote": output, "executable": True,
                             "dependencies": [], "reason": "controlled fixture observation"}
                            for action, request, output in events],
@@ -291,7 +291,7 @@ def verify_manifest(source, path, run_id):
     service, = manifest.services
     assert service.launch is not None
     assert service.launch.start_command == fixture.START_COMMAND
-    assert service.launch.readiness_command == READY_COMMAND
+    assert service.launch.readiness_command is None
     assert service.evidence.start.index == service.evidence.probe.index == 1
     assert service.evidence.stop is not None and service.evidence.stop.index == 3
     assert [s.name for s in select_services(manifest, 1)] == ["A"]
@@ -366,9 +366,8 @@ def replay_once(source, output, manifest, run_id):
         service, = report["preparation"]["services"]
         assert service["name"] == "A" and service["status"] == "ready"
         assert service["startup"]["command"] == fixture.START_COMMAND
-        for attempt in [*service["readiness"], service["final_readiness"]]:
-            assert attempt["command"] == READY_COMMAND and attempt["exit_code"] == 0
-            assert base64.b64decode(attempt["output_base64"]) == b"PALIN_SERVICE_A_READY requests=0\n"
+        assert service["startup"]["exit_code"] == 0
+        assert "readiness" not in service and "final_readiness" not in service
         assert facts[0]["request"]["action"]["command"] == fixture.REQUEST_COMMAND
         assert json.loads(facts[0]["output"]) == {"status": 200, "body": fixture.BODY}
         assert "PALIN_SERVICE_A_STOPPED requests=1" in facts[1]["output"]

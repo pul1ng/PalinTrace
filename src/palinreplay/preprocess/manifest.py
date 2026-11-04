@@ -13,7 +13,9 @@ from palinreplay.preprocess.lifecycle import ServiceLifecycle
 from palinreplay.preprocess.recipes import IntervalRecipe
 from palinreplay.preprocess.timeline import Timeline
 
-SCHEMA_VERSION = "palinreplay.preprocess-services.v1"
+LEGACY_SCHEMA_VERSION = "palinreplay.preprocess-services.v1"
+SCHEMA_VERSION = "palinreplay.preprocess-services.v2"
+SUPPORTED_SCHEMA_VERSIONS = (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION)
 
 
 class ManifestSource(Spec):
@@ -44,13 +46,14 @@ class EvidenceRef(Spec):
 
 class ManifestEvidence(Spec):
     start: EvidenceRef
-    probe: EvidenceRef
+    probe: EvidenceRef | None = None
     stop: EvidenceRef | None = None
 
 
 class ManifestLaunch(Spec):
     start_command: StrictStr
-    readiness_command: StrictStr
+    # Only historical v1 manifests can carry an explicitly supplied readiness.
+    readiness_command: StrictStr | None = None
     cwd: StrictStr
     env: dict[StrictStr, StrictStr] = Field(default_factory=dict)
     timeout_sec: float = Field(gt=0, allow_inf_nan=False)
@@ -58,7 +61,7 @@ class ManifestLaunch(Spec):
     @field_validator("start_command", "readiness_command")
     @classmethod
     def commands(cls, value):
-        if not value.strip() or "\x00" in value:
+        if value is not None and (not value.strip() or "\x00" in value):
             raise ValueError("manifest commands must be nonempty without NUL")
         return value
 
@@ -122,13 +125,21 @@ class ManifestUnknown(Spec):
 
 
 class ServiceManifest(Spec):
-    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+    schema_version: Literal[LEGACY_SCHEMA_VERSION, SCHEMA_VERSION] = SCHEMA_VERSION
     source: ManifestSource
     services: tuple[ManifestService, ...] = ()
     unknowns: tuple[ManifestUnknown, ...] = ()
 
     @model_validator(mode="after")
     def ranges(self):
+        if self.schema_version == SCHEMA_VERSION:
+            if self.unknowns:
+                raise ValueError("binary service manifests cannot contain unknown ranges")
+            for service in self.services:
+                if service.launch is None:
+                    raise ValueError("binary service manifests require a launch command")
+                if service.launch.readiness_command is not None:
+                    raise ValueError("binary service manifests do not generate readiness commands")
         for service in self.services:
             if not (
                 self.source.start_index <= service.start_inclusive
@@ -158,9 +169,7 @@ def _ref(event) -> EvidenceRef | None:
     return EvidenceRef(index=event.node_index, execution_id=event.execution_id)
 
 
-def _launch(recipe: IntervalRecipe) -> ManifestLaunch | None:
-    if recipe.launch is None:
-        return None
+def _launch(recipe: IntervalRecipe) -> ManifestLaunch:
     return ManifestLaunch(**recipe.launch.model_dump(mode="json"))
 
 
@@ -183,23 +192,25 @@ def build_manifest(
     recipes: tuple[IntervalRecipe, ...],
     timeline: Timeline,
 ) -> ServiceManifest:
-    """Assemble only confirmed intervals; every missing command remains unknown."""
+    """Publish binary launch-intent intervals, with complete startup recipes."""
     source_model = ManifestSource.model_validate(source)
     recipe_by_key = _recipe_map(lifecycles, recipes)
     by_execution = {
         (call.node_index, call.execution_id) for call in timeline.calls
     }
-    services, unknowns = [], []
+    services = []
     for lifecycle in lifecycles:
         service = lifecycle.service
         for interval in lifecycle.intervals:
             recipe = recipe_by_key[
                 (service.name, interval.start_inclusive, interval.end_exclusive)
             ]
-            launch = None if service.identity_unknown else _launch(recipe)
+            if service.identity_unknown:
+                raise ValueError(f"service {service.name!r} has no resolved source identity")
+            launch = _launch(recipe)
             start_event = interval.start_event
             stop_event = interval.stop_event
-            probe_event = recipe.probe_event or interval.probe_event
+            probe_event = interval.probe_event
             evidence = ManifestEvidence(
                 start=_ref(start_event),
                 probe=_ref(probe_event),
@@ -219,44 +230,9 @@ def build_manifest(
                     evidence=evidence,
                 )
             )
-            reasons = []
-            if service.identity_unknown:
-                reasons.append("service identity is unresolved; the launch cannot be selected safely")
-            for unknown in recipe.unknowns:
-                reasons.append(unknown.reason)
-            if launch is None and not reasons:
-                reasons.append("no verified launch recipe was available")
-            for reason in dict.fromkeys(reasons):
-                unknowns.append(
-                    ManifestUnknown(
-                        name=service.name,
-                        start_inclusive=interval.start_inclusive,
-                        end_exclusive=interval.end_exclusive,
-                        kind="launch",
-                        reason=reason,
-                        evidence=_ref(start_event),
-                    )
-                )
-        for unknown in lifecycle.unknowns:
-            unknowns.append(
-                ManifestUnknown(
-                    name=unknown.name,
-                    start_inclusive=unknown.start_inclusive,
-                    end_exclusive=unknown.end_exclusive,
-                    kind="state",
-                    reason=unknown.reason,
-                    evidence=None,
-                )
-            )
-    unknowns.sort(
-        key=lambda item: (
-            item.name, item.start_inclusive, item.end_exclusive, item.kind, item.reason
-        )
-    )
     return ServiceManifest(
         source=source_model,
         services=tuple(services),
-        unknowns=tuple(unknowns),
     )
 
 
@@ -265,7 +241,14 @@ def load_manifest(path: str | Path) -> ServiceManifest:
 
 
 def manifest_document(manifest: ServiceManifest) -> dict:
-    return manifest.model_dump(mode="json")
+    document = manifest.model_dump(mode="json")
+    if manifest.schema_version == SCHEMA_VERSION:
+        document.pop("unknowns")
+        for service in document["services"]:
+            service["launch"].pop("readiness_command")
+            if service["evidence"]["probe"] is None:
+                service["evidence"].pop("probe")
+    return document
 
 
 def write_manifest(path: str | Path, manifest: ServiceManifest) -> None:

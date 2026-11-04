@@ -881,6 +881,7 @@ def _empty_manifest(tmp_path, source_doc, *, unknown=False):
 
     values = dict(source_doc)
     manifest = ServiceManifest(
+        schema_version="palinreplay.preprocess-services.v1" if unknown else "palinreplay.preprocess-services.v2",
         source=ManifestSource(**values),
         services=(),
         unknowns=(ManifestUnknown(
@@ -931,3 +932,35 @@ def test_manifest_digest_mismatch_fails_before_docker(tmp_path, monkeypatch):
     report = run_replay(source, "C0", output=tmp_path / "out", services_config=manifest)
     assert report["execution_status"] == "failed" and report["phase"] == "preflight"
     assert "source digest" in report["error"]
+
+
+@pytest.mark.parametrize("fault", [None, "exit", "timeout"])
+def test_start_only_preparation_controls_whether_original_history_runs(tmp_path, replay_session, fault):
+    state = replay_session
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps({"services": [{"name": "A", "start_command": "start A", "timeout_sec": 10}]}))
+    commands = []
+
+    def execute(command, **kwargs):
+        assert not state.sandbox.calls and state.captures == 0
+        commands.append(command)
+        if fault == "timeout":
+            raise SandboxTimeout("startup timed out")
+        return ExecResult(command, b"", 17 if fault == "exit" else 0, 0.1)
+
+    state.executor.exec = execute
+    output = tmp_path / "output"
+    report = run_replay(state.source, "C1", "C3", output=output, services_config=config)
+    assert commands == ["start A"]
+    assert report["execution_status"] == ("failed" if fault else "completed")
+    assert report["preparation"]["status"] == ("failed" if fault else "ready")
+    service, = report["preparation"]["services"]
+    assert "readiness" not in service and "final_readiness" not in service
+    if fault:
+        assert report["phase"] == "service-preparation"
+        assert not state.sandbox.calls and state.captures == 0
+        assert not (output / "record").exists()
+    else:
+        assert [m["source_index"] for m in report["mappings"]] == [2, 3]
+        assert state.sandbox.calls and state.captures == 2
+    assert report["cleanup_confirmed"]

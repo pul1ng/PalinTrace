@@ -12,9 +12,10 @@ from pydantic import Field, StrictInt, StrictStr, field_validator, model_validat
 from palinreplay.core.schema import Spec
 from palinreplay.preprocess.candidates import Candidate
 from palinreplay.preprocess.chunks import TokenCounter
+from palinreplay.preprocess.shell import exact_segment, exit_code_applies
 from palinreplay.preprocess.timeline import Timeline, TimelineCall
 
-EVIDENCE_PROMPT_VERSION = "palinreplay.preprocess-evidence.v2"
+EVIDENCE_PROMPT_VERSION = "palinreplay.preprocess-evidence.v3"
 
 EVIDENCE_SYSTEM_PROMPT = """You extract verifiable evidence for exactly one candidate service from one recorded tool call.
 Return exactly one JSON object and no prose or Markdown:
@@ -24,6 +25,7 @@ Return exactly one JSON object and no prose or Markdown:
                "field": "request.command"|"result.output_text"}],
  "events": [{"action": "start"|"probe"|"stop",
              "observed_state": "up"|"down"|"unknown",
+             "action_result": "succeeded"|"failed"|"unattributed",
              "request_quote": string|null, "output_quote": string|null,
              "executable": boolean, "dependencies": [string],
              "reason": string}],
@@ -39,8 +41,17 @@ fragment that performs only that action for this service; it must not include re
 for other services. Set executable true only when that fragment is complete; list
 unresolved dependencies. output_quote must quote the actual result that demonstrates the
 observed state. Use up only for demonstrated availability, down only for demonstrated
-unavailability or a confirmed stop, and unknown otherwise. A start attempt, a zero exit
-status, or an expected value written in the command is not proof of readiness. Ignore
+unavailability or a confirmed stop, and unknown otherwise. Availability is diagnostic;
+the binary Replay state means "prepare this service from this node", not readiness.
+action_result describes only the start/stop action, independently of availability.
+For a complete standalone start/stop call, its actual returned exit code is checked by
+the program: 0 succeeds, nonzero fails, even with empty output and no health probe.
+For a subcommand in a compound call, set action_result to succeeded/failed only when
+output_quote is an actual result attributable to that action (e.g. its start/stop
+receipt). A whole-call exit code, unrelated file result, later probe, expected value,
+or echo cannot establish a subcommand's result. Use unattributed otherwise. Do not add
+a probe event unless a probe actually ran. Preserve action order and copy the original
+startup redirections and trailing background & in request_quote. Ignore
 comments, echo text and expected values; use only the recorded command and actual result.
 Identity clues must identify this service instance across calls, not merely repeat a
 common directory or a shared status summary. When the call shows a service-specific
@@ -75,6 +86,7 @@ class RawIdentityClue(Spec):
 class RawEvidenceEvent(Spec):
     action: Literal["start", "probe", "stop"]
     observed_state: Literal["up", "down", "unknown"]
+    action_result: Literal["succeeded", "failed", "unattributed"] = "unattributed"
     request_quote: StrictStr | None = None
     output_quote: StrictStr | None = None
     executable: bool
@@ -150,6 +162,9 @@ class VerifiedEvent(Spec):
     execution_id: StrictStr
     action: Literal["start", "probe", "stop"]
     observed_state: Literal["up", "down", "unknown"]
+    action_result: Literal["succeeded", "failed", "unattributed"] = "unattributed"
+    result_basis: Literal["call-exit", "action-output"] | None = None
+    exit_code: StrictInt | None = None
     request_span: VerifiedSpan | None = None
     output_span: VerifiedSpan | None = None
     executable: bool
@@ -300,29 +315,50 @@ def _build_candidate_evidence(
         )
         for clue in raw.identity
     )
-    events = tuple(
-        VerifiedEvent(
+    events = []
+    seen = set()
+    for event in raw.events:
+        if event.action not in candidate.actions:
+            raise ValueError("evidence action was not proposed by the candidate")
+        request_span = (
+            _span(call, "request.command", event.request_quote)
+            if event.request_quote is not None else None
+        )
+        output_span = (
+            _span(call, "result.output_text", event.output_quote)
+            if event.output_quote is not None else None
+        )
+        key = (event.action, request_span.start if request_span else None)
+        if key in seen:
+            raise ValueError("duplicate evidence action for the same command fragment")
+        seen.add(key)
+        action_result, basis, exit_code = "unattributed", None, None
+        if (event.action in ("start", "stop") and request_span is not None
+                and exact_segment(call.request.command, request_span.quote) is not None):
+            if call.result.outcome == "returned" and exit_code_applies(
+                call.request.command, request_span.quote
+            ) and call.result.exit_code is not None:
+                exit_code = call.result.exit_code
+                action_result = "succeeded" if exit_code == 0 else "failed"
+                basis = "call-exit"
+            elif (call.result.outcome == "returned" and output_span is not None
+                  and event.action_result != "unattributed"):
+                action_result, basis = event.action_result, "action-output"
+        events.append(VerifiedEvent(
             node_index=call.node_index,
             tool_ordinal=call.tool_ordinal,
             execution_id=call.execution_id,
             action=event.action,
             observed_state=event.observed_state,
-            request_span=(
-                _span(call, "request.command", event.request_quote)
-                if event.request_quote is not None
-                else None
-            ),
-            output_span=(
-                _span(call, "result.output_text", event.output_quote)
-                if event.output_quote is not None
-                else None
-            ),
+            action_result=action_result,
+            result_basis=basis,
+            exit_code=exit_code,
+            request_span=request_span,
+            output_span=output_span,
             executable=event.executable,
             dependencies=event.dependencies,
             reason=event.reason,
-        )
-        for event in raw.events
-    )
+        ))
     unknowns = [
         EvidenceUnknown(
             kind=unknown.kind, reason=unknown.reason, node_index=call.node_index,
@@ -351,7 +387,7 @@ def _build_candidate_evidence(
     return CandidateEvidence(
         candidate=candidate,
         identity=identity,
-        events=events,
+        events=tuple(events),
         unknowns=tuple(unknowns),
     )
 

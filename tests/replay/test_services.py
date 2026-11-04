@@ -230,3 +230,29 @@ def test_final_readiness_rechecks_earlier_service_after_slow_b(tmp_path, clock, 
         assert b["final_readiness"]["exit_code"] == 0
     else:
         assert "final_readiness" not in b
+
+
+@pytest.mark.parametrize("fault", [None, "exit", "timeout", "late-success"])
+def test_start_only_preparation_runs_once_without_any_readiness_command(tmp_path, clock, fault):
+    spec, journal = setup(tmp_path, readiness_command=None, timeout_sec=1)
+    calls = []
+
+    def execute(command, **kwargs):
+        calls.append(command)
+        if fault == "timeout":
+            raise SandboxTimeout("start timed out")
+        if fault == "late-success":
+            clock[0] += 2
+        return ExecResult(command, b"", 17 if fault == "exit" else 0, 0.1)
+
+    executor = SimpleNamespace(exec=execute, runtime=SimpleNamespace(launch=SimpleNamespace(workdir="/")))
+    if fault:
+        with pytest.raises(SandboxTimeout if fault == "timeout" else PreparationError):
+            prepare_services(executor, ServicesConfig(services=(spec,)), journal)
+    else:
+        prepare_services(executor, ServicesConfig(services=(spec,)), journal)
+    assert calls == [spec.start_command]
+    saved = json.loads(journal.path.read_text())
+    assert saved["status"] == ("failed" if fault else "ready")
+    entry, = saved["services"]
+    assert "readiness" not in entry and "final_readiness" not in entry

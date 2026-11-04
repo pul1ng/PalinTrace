@@ -34,8 +34,7 @@ def execute(args) -> int:
                 source, run_id=args.run_id, config=config, output=output
             )
         manifest = result.manifest
-        print(f"Preprocess: {len(manifest.services)} service intervals, "
-              f"{len(manifest.unknowns)} unknowns -> {result.output}")
+        print(f"Preprocess: {len(manifest.services)} service intervals -> {result.output}")
         print(f"  Manifest: {result.output / 'services.json'}")
         print(f"  Report: {result.output / 'report.json'}")
         print(f"  Config: {config_path}; model={config.llm.model}")

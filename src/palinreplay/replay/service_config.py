@@ -10,7 +10,7 @@ from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.models import Node
 from palinreplay.core.schema import Spec
 from palinreplay.preprocess.manifest import (
-    SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
     ServiceManifest,
     select_services,
 )
@@ -21,7 +21,7 @@ from palinreplay.storage.store import RecordStore
 class ServiceSpec(Spec):
     name: StrictStr
     start_command: StrictStr
-    readiness_command: StrictStr
+    readiness_command: StrictStr | None = None
     timeout_sec: float = Field(strict=True, gt=0, allow_inf_nan=False)
     cwd: StrictStr | None = None
     env: dict[StrictStr, StrictStr] = Field(default_factory=dict)
@@ -29,7 +29,7 @@ class ServiceSpec(Spec):
     @field_validator("name", "start_command", "readiness_command")
     @classmethod
     def nonempty(cls, value):
-        if not value.strip() or "\x00" in value:
+        if value is not None and (not value.strip() or "\x00" in value):
             raise ValueError("service names and commands must be nonempty and contain no NUL")
         return value
 
@@ -86,10 +86,10 @@ def load_service_input(path: str | Path) -> ServiceInput:
         raise RecordUsageError("service configuration must be a JSON object")
     if "schema_version" in document:
         version = document["schema_version"]
-        if version != SCHEMA_VERSION:
+        if version not in SUPPORTED_SCHEMA_VERSIONS:
             raise RecordUsageError(
                 f"unsupported service manifest schema_version {version!r}; "
-                f"expected {SCHEMA_VERSION!r}"
+                f"expected one of {SUPPORTED_SCHEMA_VERSIONS!r}"
             )
         try:
             manifest = ServiceManifest.model_validate(document)

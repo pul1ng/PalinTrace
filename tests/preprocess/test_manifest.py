@@ -4,6 +4,7 @@ import pytest
 
 from palinreplay.core.errors import RecordUsageError
 from palinreplay.preprocess.manifest import (
+    LEGACY_SCHEMA_VERSION,
     SCHEMA_VERSION,
     EvidenceRef,
     ManifestEvidence,
@@ -37,7 +38,7 @@ def service(name, start, end, *, with_launch=True):
 
 def manifest(*services, unknown=()):
     return ServiceManifest(
-        schema_version=SCHEMA_VERSION,
+        schema_version=LEGACY_SCHEMA_VERSION,
         source=ManifestSource(
             run_id="run", start_index=0, end_index=40,
             digest_scheme="sha256-canonical-selection-json-v1", selection_sha256="0" * 64,
@@ -100,5 +101,21 @@ def test_manifest_round_trip_and_unknown_shape():
         ),),
     )
     document = value.model_dump(mode="json")
-    assert document["schema_version"] == SCHEMA_VERSION
+    assert document["schema_version"] == LEGACY_SCHEMA_VERSION
     assert json.loads(value.model_dump_json()) == document
+
+
+@pytest.mark.parametrize("bad", ["unknowns", "null-launch", "readiness"])
+def test_new_binary_schema_rejects_legacy_tristate_or_generated_probe(bad):
+    value = manifest(service("A", 1, 4)).model_dump(mode="json")
+    value["schema_version"] = SCHEMA_VERSION
+    value["services"][0]["launch"].pop("readiness_command")
+    if bad == "unknowns":
+        value["unknowns"] = [{"name": "A", "start_inclusive": 1, "end_exclusive": 4,
+                              "kind": "state", "reason": "unproven"}]
+    elif bad == "null-launch":
+        value["services"][0]["launch"] = None
+    else:
+        value["services"][0]["launch"]["readiness_command"] = "probe A"
+    with pytest.raises(ValueError, match="binary"):
+        ServiceManifest.model_validate(value)

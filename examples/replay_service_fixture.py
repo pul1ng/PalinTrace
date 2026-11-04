@@ -237,7 +237,8 @@ def tool_fact(store, node):
     }
 
 
-def record_source(preload, output, client, *, decisions=None, files=None):
+def record_source(preload, output, client, *, decisions=None, files=None,
+                  initial_command=None, expected_exit_codes=None):
     """Record real tools/snapshots; optional decisions/files support independent fixtures."""
     decisions = commands() if decisions is None else list(decisions)
     files = fixture_files() if files is None else files
@@ -273,6 +274,13 @@ def record_source(preload, output, client, *, decisions=None, files=None):
                     actual_image_id=runtime.bootstrap_image_id, workdir=launch.workdir,
                     environment=launch.environment, shell=launch.shell,
                 )
+                if initial_command is not None:
+                    initial = sandbox.exec(initial_command)
+                    assert initial.exit_code == 0, initial.output
+                    report["initial_setup"] = {
+                        "command": initial_command, "exit_code": initial.exit_code,
+                        "output": initial.output.decode("utf-8"),
+                    }
                 backend = BtrfsStateBackend(sandbox, public_env_keys=launch.environment,
                                             runtime=runtime)
                 replies = iter(fixed_response(cmd, i) for i, cmd in enumerate(decisions, 1))
@@ -299,10 +307,14 @@ def record_source(preload, output, client, *, decisions=None, files=None):
                     assert [node.index for node in nodes] == list(range(len(decisions) + 1))
                     assert report["fixed_response_supplies"] == len(decisions)
                     facts = [tool_fact(store, node) for node in nodes[1:]]
-                    assert all(fact["definitive"] and fact["exit_code"] == 0 for fact in facts), facts
-                    request = next(fact for fact in facts
-                                   if fact["request"]["action"]["command"] == REQUEST_COMMAND)
-                    assert json.loads(request["output"]) == {"status": 200, "body": BODY}
+                    expected = expected_exit_codes or [0] * len(decisions)
+                    assert len(expected) == len(facts)
+                    assert all(fact["definitive"] and fact["exit_code"] == code
+                               for fact, code in zip(facts, expected, strict=True)), facts
+                    if REQUEST_COMMAND in decisions:
+                        request = next(fact for fact in facts
+                                       if fact["request"]["action"]["command"] == REQUEST_COMMAND)
+                        assert json.loads(request["output"]) == {"status": 200, "body": BODY}
                     assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in facts[-1]["output"]
                     c2 = load_restore_materials(store, nodes[2].node_id)
                     check = pool.container.exec_run(["python3", "-B", "-c",

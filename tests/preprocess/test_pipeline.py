@@ -2,6 +2,8 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
 from palinreplay.preprocess.config import PreprocessConfig, PreprocessSettings
 from palinreplay.preprocess.manifest import load_manifest, select_services
@@ -20,7 +22,7 @@ def request(command):
     }
 
 
-def adapter(output):
+def adapter(output, exit_code=0):
     return CallAdapter(
         name="mini.bash",
         execute=lambda _: None,
@@ -28,29 +30,31 @@ def adapter(output):
         capture_result=lambda _: ResultCapture(
             Payload(output.encode(), "application/octet-stream"),
             "fixture-merged-output-bytes",
-            details={"decoded": {"returncode": 0}},
+            details={"decoded": {"returncode": exit_code}},
         ),
     )
 
 
-def make_record(tmp_path):
+def make_record(tmp_path, rows=None):
     root = tmp_path / "record"
-    rows = [
-        ("/srv/A/lifecycle.py start && /srv/A/request.py", "A_READY\n"),
+    rows = rows if rows is not None else [
+        ("/srv/A/lifecycle.py start && /srv/A/request.py", "A_STARTED\nA_READY\n"),
         ("/srv/A/request.py", "A_OK\n"),
         ("/srv/A/lifecycle.py stop", "A_STOPPED\n"),
     ]
     with RecordStore.create(root) as store:
         agent = fake.FakeAgent()
         with fake.recorder(store, agent, fake.FakeStateBackend()) as rec:
-            for index, (command, output) in enumerate(rows, 1):
+            for index, row in enumerate(rows, 1):
+                command, output = row[:2]
+                exit_code = row[2] if len(row) == 3 else 0
                 step = rec.begin_step()
                 tool_id = f"tool-{index}"
                 model = step.model(fake.model_adapter(), {"tool_calls": [tool_id]})
                 response = model.invoke()
                 fake.adopt(agent, model, response)
                 step.declare_tools(model, (tool_id,))
-                call = step.tool(adapter(output), request(command), tool_call_id=tool_id)
+                call = step.tool(adapter(output, exit_code), request(command), tool_call_id=tool_id)
                 value = call.invoke()
                 fake.adopt(agent, call, {"role": "tool", "tool_call_id": tool_id, "value": value})
                 rec.commit_step()
@@ -105,9 +109,9 @@ class FakeModels:
         }]
         if "lifecycle.py start" in command:
             events = [
-                {"action": "start", "observed_state": "up",
+                {"action": "start", "observed_state": "unknown", "action_result": "succeeded",
                  "request_quote": "/srv/A/lifecycle.py start",
-                 "output_quote": "A_READY", "executable": True,
+                 "output_quote": "A_STARTED", "executable": True,
                  "dependencies": [], "reason": "started"},
                 {"action": "probe", "observed_state": "up",
                  "request_quote": "/srv/A/request.py",
@@ -164,12 +168,12 @@ def test_end_to_end_pipeline_writes_manifest_and_report(tmp_path):
         client=FakeModels(), counter=CharCounter(),
     )
     manifest = load_manifest(result.output / "services.json")
-    assert manifest.schema_version == "palinreplay.preprocess-services.v1"
+    assert manifest.schema_version == "palinreplay.preprocess-services.v2"
     assert [(s.name, s.start_inclusive, s.end_exclusive) for s in manifest.services] == [
         ("A", 1, 3)
     ]
     assert manifest.services[0].launch.start_command == "/srv/A/lifecycle.py start"
-    assert manifest.services[0].launch.readiness_command == "/srv/A/request.py"
+    assert manifest.services[0].launch.readiness_command is None
     assert manifest.unknowns == ()
     assert [s.name for s in select_services(manifest, 1)] == ["A"]
     assert select_services(manifest, 3) == ()
@@ -196,3 +200,71 @@ def test_failed_analysis_leaves_no_services_file(tmp_path):
             counter=CharCounter(),
         )
     assert not (tmp_path / "out" / "services.json").exists()
+
+
+class BinaryModels(FakeModels):
+    """Fixed responses for offline Record fixtures; not live recognition evidence."""
+
+    @staticmethod
+    def candidate(payload):
+        candidates = []
+        for call in payload["calls"]:
+            command = call["request"]["command"]
+            if "start-A.sh" not in command:
+                continue
+            action = "stop" if "--stop" in command else "start"
+            candidates.append({"name": "A", "node_index": call["node_index"],
+                "execution_id": call["execution_id"], "actions": [action],
+                "candidate_state": "unknown"})
+        return {"candidates": candidates}
+
+    @staticmethod
+    def evidence(payload):
+        call = payload["call"]
+        command = call["request"]["command"]
+        action = "stop" if "--stop" in command else "start"
+        return {"service_name": "A", "identity": [{
+            "kind": "program", "value": "./start-A.sh", "quote": "./start-A.sh",
+            "field": "request.command"}], "events": [{
+                "action": action, "observed_state": "unknown", "request_quote": command,
+                "output_quote": None, "executable": True, "dependencies": [],
+                "reason": "fixed launch candidate; code checks actual source exit"}], "unknowns": []}
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("start", [("A", 1, 4)]), ("failed", []), ("stop", [("A", 1, 3)]), ("files", []),
+])
+def test_binary_record_pipeline_and_replay_adapter_without_probes(tmp_path, case, expected):
+    from palinreplay.core.models import Node
+    from palinreplay.replay.plan import pin_replay
+    from palinreplay.replay.service_config import load_service_input, resolve_services
+
+    rows = [
+        ({"files": "touch first.txt", "failed": "./start-A.sh --fail"}.get(
+            case, "./start-A.sh >a.log 2>&1 &"), "", 17 if case == "failed" else 0),
+        ("cp first.txt second.txt", "", 0),
+        ("./start-A.sh --stop" if case == "stop" else "touch last.txt", "", 0),
+    ]
+    root, run_id = make_record(tmp_path, rows=rows)
+    before = digest_tree(root)
+    result = run_preprocess(root, run_id=run_id, output=tmp_path / "out", client=BinaryModels(),
+        counter=CharCounter(), config=PreprocessConfig(
+            llm={"base_url": "https://api.example.test/v1", "model": "fixed-binary-fixture", "api_key": "key"},
+            preprocess={"request_token_budget": 100000, "response_token_reserve": 1000}))
+    path = result.output / "services.json"
+    document = json.loads(path.read_text())
+    assert "unknowns" not in document
+    assert [(s.name, s.start_inclusive, s.end_exclusive) for s in result.manifest.services] == expected
+    for item in document["services"]:
+        assert item["launch"] is not None and "readiness_command" not in item["launch"]
+        assert "probe" not in item["evidence"]
+    with RecordStore.open(root) as store:
+        nodes = sorted(store.list(Node), key=lambda n: n.index)
+        for node in nodes:
+            selected = resolve_services(load_service_input(path), store,
+                                        pin_replay(store, f"C{node.index}", "C3"))
+            active = bool(expected and expected[0][1] <= node.index < expected[0][2])
+            assert [s.name for s in selected.services] == (["A"] if active else [])
+        if expected:
+            assert result.manifest.services[0].evidence.start.execution_id == nodes[1].tool_execution_ids[0]
+    assert digest_tree(root) == before

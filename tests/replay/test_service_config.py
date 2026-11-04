@@ -32,7 +32,7 @@ def test_two_services_preserve_order_and_explicit_overrides(tmp_path):
     assert config.services[1].env == {}
 
 
-@pytest.mark.parametrize("field", ["name", "start_command", "readiness_command", "timeout_sec"])
+@pytest.mark.parametrize("field", ["name", "start_command", "timeout_sec"])
 def test_missing_required_field_fails_without_creating_runtime_resources(tmp_path, field):
     item = service()
     del item[field]
@@ -91,6 +91,7 @@ def _manifest(tmp_path, **source_overrides):
     record, source, index, execution = _manifest_source(tmp_path)
     source.update(source_overrides)
     manifest = ServiceManifest(
+        schema_version="palinreplay.preprocess-services.v1",
         source=ManifestSource(**source),
         services=(ManifestService(
             name="A", start_inclusive=index, end_exclusive=index + 2,
@@ -168,3 +169,23 @@ def test_manifest_source_and_evidence_are_verified_before_runtime(tmp_path):
         with pytest.raises(Exception, match="evidence"):
             resolve_services(ServiceInput(None, bad, tmp_path / "m.json"), store,
                              pin_replay(store, "C1", "C3"))
+
+
+def test_static_config_without_readiness_and_binary_manifest_resolve_without_probe(tmp_path):
+    from palinreplay.preprocess.manifest import SCHEMA_VERSION, manifest_document
+    from palinreplay.replay.plan import pin_replay
+    from palinreplay.replay.service_config import ServiceInput, resolve_services
+    from palinreplay.storage.store import RecordStore
+
+    assert load(tmp_path, [{"name": "A", "start_command": "start A", "timeout_sec": 10}]).services[0].readiness_command is None
+    record, legacy = _manifest(tmp_path)
+    document = legacy.model_dump(mode="json")
+    document["schema_version"] = SCHEMA_VERSION
+    document["services"][0]["launch"].pop("readiness_command")
+    document["services"][0]["evidence"].pop("probe")
+    binary = type(legacy).model_validate(document)
+    assert "unknowns" not in manifest_document(binary)
+    with RecordStore.open(record) as store:
+        config = resolve_services(ServiceInput(None, binary, tmp_path / "m.json"), store,
+                                  pin_replay(store, "C1", "C3"))
+    assert config.services[0].readiness_command is None

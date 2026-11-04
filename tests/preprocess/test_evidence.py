@@ -289,3 +289,60 @@ def test_shared_weak_key_does_not_invalidate_unique_identity_keys():
     assert all(not service.identity_unknown for service in by_name.values())
     assert by_name["A"].identity_keys == ("program:/srv/A",)
     assert by_name["B"].identity_keys == ("program:/srv/B",)
+
+
+def launch_evidence(command, quote, *, exit_code=0, outcome="returned", output="",
+                    action="start", action_result="unattributed", output_quote=None):
+    call = make_call(node=1, execution="launch", command=command, output=output)
+    call = call.model_copy(update={"result": TimelineResult(
+        outcome=outcome, exit_code=exit_code, output_text=output)})
+    answer = raw(service_name="A", identity=[{
+        "kind": "program", "value": "./start-A.sh", "quote": "./start-A.sh",
+        "field": "request.command"}], events=[{
+            "action": action, "observed_state": "unknown", "action_result": action_result,
+            "request_quote": quote, "output_quote": output_quote,
+            "executable": True, "dependencies": [], "reason": "fixture action attribution"}])
+    batch = analyze_evidence(make_timeline(call),
+        (candidate("A", 1, "launch", (action,), "unknown"),), CharCounter(),
+        EvidenceTemplate(request_token_budget=100000), FakeClient({("A", "launch"): answer}),
+        concurrency=1)
+    return batch.items[0].events[0]
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+@pytest.mark.parametrize("exit_code,expected", [(0, "succeeded"), (17, "failed"), (None, "unattributed")])
+def test_whole_call_exit_is_action_result_with_empty_output_and_no_readiness(action, exit_code, expected):
+    command = "./start-A.sh >a.log 2>&1 &" if action == "start" else "./start-A.sh --stop"
+    event = launch_evidence(command, command, action=action, exit_code=exit_code,
+                            action_result="succeeded")
+    assert event.action_result == expected
+    assert event.exit_code == exit_code
+    assert event.result_basis == ("call-exit" if exit_code is not None else None)
+    assert event.output_span is None
+
+
+@pytest.mark.parametrize("command,quote,exit_code", [
+    ("./start-A.sh; true", "./start-A.sh", 0),
+    ("true && ./start-A.sh", "./start-A.sh", 0),
+    ("./start-A.sh && false", "./start-A.sh", 1),
+    ("./start-A.sh & printf done", "./start-A.sh &", 0),
+    ("./start-A.sh | true", "./start-A.sh | true", 0),
+    ("! ./start-A.sh", "! ./start-A.sh", 0),
+])
+def test_compound_exit_cannot_be_assigned_to_an_action_without_its_own_result(command, quote, exit_code):
+    event = launch_evidence(command, quote, exit_code=exit_code, action_result="succeeded")
+    assert event.action_result == "unattributed"
+    assert event.exit_code is None and event.result_basis is None
+
+
+def test_compound_action_result_uses_quoted_receipt_instead_of_overall_failure():
+    event = launch_evidence("./start-A.sh && false", "./start-A.sh", exit_code=1,
+                            output="A_STARTED\n", output_quote="A_STARTED", action_result="succeeded")
+    assert event.action_result == "succeeded"
+    assert event.result_basis == "action-output" and event.exit_code is None
+
+
+@pytest.mark.parametrize("outcome", ["unknown", "error"])
+def test_uncertain_tool_result_does_not_adopt_its_exit(outcome):
+    event = launch_evidence("./start-A.sh", "./start-A.sh", outcome=outcome)
+    assert event.action_result == "unattributed"

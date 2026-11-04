@@ -76,6 +76,8 @@ def start_service(executor, service: ServiceSpec, journal: PreparationJournal) -
                           entry["startup"], journal)
         if result.exit_code != 0:
             raise PreparationError(f"{service.name}: startup exited with code {result.exit_code}")
+        if time.monotonic() > started.deadline:
+            raise PreparationError(f"{service.name}: startup deadline exceeded")
         entry["status"] = "started"
         journal.save()
         return started
@@ -85,14 +87,15 @@ def start_service(executor, service: ServiceSpec, journal: PreparationJournal) -
 
 
 def prepare_services(executor, config: ServicesConfig, journal: PreparationJournal):
-    """Prepare declared services in order, then confirm each before publishing ready."""
+    """Start once; run readiness only where the configuration explicitly supplies it."""
     started_services = []
     for service in config.services:
         started = start_service(executor, service, journal)
         wait_ready(executor, started, journal)
         started_services.append(started)
     for started in started_services:
-        _confirm_ready(executor, started, journal)
+        if started.spec.readiness_command is not None:
+            _confirm_ready(executor, started, journal)
     journal.data["status"] = "ready"
     journal.save()
     return journal.data
@@ -120,6 +123,10 @@ def _confirm_ready(executor, started: StartedService, journal: PreparationJourna
 def wait_ready(executor, started: StartedService, journal: PreparationJournal):
     """Poll only the supplied readiness command within the startup deadline."""
     service, entry = started.spec, started.entry
+    if service.readiness_command is None:
+        entry["status"] = "ready"
+        journal.save()
+        return entry
     entry.update(status="checking", readiness=[])
     journal.save()
     try:
