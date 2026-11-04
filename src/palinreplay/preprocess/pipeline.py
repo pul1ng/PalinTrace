@@ -4,18 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from palinreplay.llm import OpenAIChatClient
-from palinreplay.preprocess.candidates import (
-    CANDIDATE_PROMPT_VERSION,
-    candidate_template,
-    evidence_candidates,
-    recognize_candidates,
-)
 from palinreplay.preprocess.chunks import TokenCounter, make_token_counter, plan_chunks
 from palinreplay.preprocess.config import PreprocessConfig
-from palinreplay.preprocess.evidence import (
-    EVIDENCE_PROMPT_VERSION,
-    EvidenceTemplate,
-    analyze_evidence,
+from palinreplay.preprocess.extraction import (
+    EXTRACTION_PROMPT_VERSION,
+    extract_services,
+    extraction_template,
 )
 from palinreplay.preprocess.lifecycle import analyze_lifecycles
 from palinreplay.preprocess.manifest import (
@@ -30,7 +24,7 @@ from palinreplay.preprocess.timeline import Timeline, read_timeline
 from palinreplay.storage.io import outside_store, write_json
 from palinreplay.storage.store import RecordStore
 
-REPORT_SCHEMA = "palinreplay.preprocess-report.v1"
+REPORT_SCHEMA = "palinreplay.preprocess-report.v2"
 
 
 @dataclass(frozen=True)
@@ -48,44 +42,25 @@ def analyze(
     client,
     counter: TokenCounter | None = None,
 ) -> tuple[ServiceManifest, dict, Timeline, PinnedSource]:
-    """Read the Record once, then run candidate and evidence passes."""
+    """Read the Record once and extract controls with one request per chunk."""
     with RecordStore.open(source_path) as store, store.snapshot():
         source = pin_source(store, run_id)
         timeline = read_timeline(store, source)
     counter = counter or make_token_counter(config)
     settings = config.preprocess
-    chunks = plan_chunks(
-        timeline,
-        counter,
-        candidate_template(
-            request_token_budget=settings.request_token_budget,
-            response_token_reserve=settings.response_token_reserve,
-        ),
-    )
-    candidate_prompt = candidate_template(
+    template = extraction_template(
         request_token_budget=settings.request_token_budget,
         response_token_reserve=settings.response_token_reserve,
     )
-    candidates = recognize_candidates(
-        timeline, chunks, candidate_prompt, client, concurrency=settings.concurrency,
+    chunks = plan_chunks(timeline, counter, template)
+    extraction = extract_services(
+        timeline, chunks, template, client, concurrency=settings.concurrency,
     )
-    evidence_selection = evidence_candidates(candidates.candidates)
-    evidence = analyze_evidence(
-        timeline,
-        evidence_selection,
-        counter,
-        EvidenceTemplate(
-            request_token_budget=settings.request_token_budget,
-            response_token_reserve=settings.response_token_reserve,
-        ),
-        client,
-        concurrency=settings.concurrency,
-    )
-    lifecycles = analyze_lifecycles(evidence.services, source.start_index, source.end_index)
+    lifecycles = analyze_lifecycles(extraction.services, source.start_index, source.end_index)
     recipes = build_recipes(
         timeline,
         lifecycles,
-        evidence.services,
+        extraction.services,
         timeout_sec=settings.preparation_timeout_sec,
     )
     manifest = build_manifest(source.document(), lifecycles, recipes, timeline)
@@ -93,10 +68,7 @@ def analyze(
         "schema_version": REPORT_SCHEMA,
         "source": source.document(),
         "model": {"model": config.llm.model, "base_url": config.llm.base_url},
-        "prompt_versions": {
-            "candidates": CANDIDATE_PROMPT_VERSION,
-            "evidence": EVIDENCE_PROMPT_VERSION,
-        },
+        "prompt_versions": {"extraction": EXTRACTION_PROMPT_VERSION},
         "tokenizer": counter.name,
         "budget": {
             "request_tokens": settings.request_token_budget,
@@ -109,20 +81,12 @@ def analyze(
             "last_node": timeline.calls[-1].node_index if timeline.calls else None,
             "chunks": [chunk.document() for chunk in chunks],
         },
-        "candidates": {
-            "count": len(candidates.candidates),
-            "items": [candidate.model_dump(mode="json") for candidate in candidates.candidates],
-            "diagnostics": [
-                diagnostic.model_dump(mode="json") for diagnostic in candidates.diagnostics
-            ],
-            "evidence_requested": len(evidence_selection),
-            "evidence_skipped": len(candidates.candidates) - len(evidence_selection),
-        },
-        "evidence": {
-            "services": [service.document() for service in evidence.services],
-            "diagnostics": [
-                diagnostic.model_dump(mode="json") for diagnostic in evidence.diagnostics
-            ],
+        "extraction": {
+            "model_requests": len(chunks),
+            "event_count": len(extraction.events),
+            "events": [event.model_dump(mode="json") for event in extraction.events],
+            "diagnostics": list(extraction.diagnostics),
+            "services": [service.document() for service in extraction.services],
         },
         "lifecycles": [lifecycle.document() for lifecycle in lifecycles],
         "recipes": [recipe.document() for recipe in recipes],

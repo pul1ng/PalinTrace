@@ -173,52 +173,31 @@ def commands():
 
 
 class FixtureAnalysis:
-    """Explicit acceptance oracle, not an LLM or a source of tool results.
-
-    Preprocess still verifies source quotes, identities, lifecycle and recipes.
-    No usage is invented, and every selected call must match this fixture.
-    """
+    """Single-pass extraction oracle using the recorded fixture commands."""
 
     def complete(self, messages, **parameters):
         payload = json.loads(messages[1]["content"].split("\n\n", 1)[1])
-        if "calls" in payload:
-            candidates = []
-            for call in payload["calls"]:
-                index = call["node_index"]
-                assert call["request"]["command"] == commands()[index - 1]
-                candidates.append({
-                    "name": "A", "node_index": index, "execution_id": call["execution_id"],
-                    "actions": {1: ["start", "probe"], 2: ["probe"], 3: ["stop"]}[index],
-                    "candidate_state": "down" if index == 3 else "up",
-                })
-            content = {"candidates": candidates}
-        else:
-            call = payload["call"]
+        events = []
+        for call in payload["calls"]:
             index = call["node_index"]
             assert call["request"]["command"] == commands()[index - 1]
-            events = {
-                1: [("start", fixture.START_COMMAND, "PALIN_SERVICE_A_STARTED"),
-                    ("probe", READY_COMMAND, "PALIN_SERVICE_A_READY requests=0")],
-                2: [("probe", fixture.REQUEST_COMMAND, '"body": "PALIN_SERVICE_OK"')],
-                3: [("stop", fixture.STOP_COMMAND, "PALIN_SERVICE_A_STOPPED requests=1")],
-            }[index]
-            content = {
-                "service_name": "A",
-                "identity": [{"kind": "program", "value": fixture.DIRECTORY,
-                              "quote": fixture.DIRECTORY, "field": "request.command"}],
-                "events": [{"action": action, "observed_state": "down" if index == 3 else "up",
-                            "action_result": "succeeded" if action != "probe" else "unattributed",
-                            "request_quote": request, "output_quote": output, "executable": True,
-                            "dependencies": [], "reason": "controlled fixture observation"}
-                           for action, request, output in events],
-                "unknowns": [],
-            }
+            if index == 1:
+                action, command, quote = "start", fixture.START_COMMAND, "PALIN_SERVICE_A_STARTED"
+            elif index == 3:
+                action, command, quote = "stop", fixture.STOP_COMMAND, "PALIN_SERVICE_A_STOPPED requests=1"
+            else:
+                continue
+            events.append({
+                "name": "A", "service_key": fixture.DIRECTORY + "/lifecycle.py",
+                "node_index": index, "execution_id": call["execution_id"],
+                "action": action, "command": command,
+                "action_result": "succeeded", "output_quote": quote,
+            })
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(
-                content=json.dumps(content), refusal=None), finish_reason="stop")],
+                content=json.dumps({"events": events}), refusal=None), finish_reason="stop")],
             usage=None,
         )
-
 
 def preprocess_source(source, output, run_id, llm_config=None):
     if llm_config is not None:

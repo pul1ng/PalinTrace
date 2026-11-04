@@ -111,47 +111,33 @@ def commands(case):
 
 
 class FixtureAnalysis:
-    """Fixed responses, checked against source facts; no claimed model usage."""
+    """One fixed response per chunk; real tool results remain unchanged."""
 
-    def __init__(self, case, *, legacy=False):
-        self.case, self.legacy = case, legacy
+    def __init__(self, case):
+        self.case = case
 
     def complete(self, messages, **parameters):
         payload = json.loads(messages[1]["content"].split("\n\n", 1)[1])
-        if "calls" in payload:
-            candidates = []
-            for call in payload["calls"]:
-                node = call["node_index"]
-                assert call["request"]["command"] == commands(self.case)[node - 1]
-                if node == 1 and self.case != "files-only":
-                    actions = ["start"]
-                elif node == 3 and self.case == "stop-C3":
-                    actions = ["stop"]
-                else:
-                    continue
-                candidates.append({"name": "A", "node_index": node,
-                                   "execution_id": call["execution_id"], "actions": actions,
-                                   "candidate_state": "unknown"})
-            content = {"candidates": candidates}
-        else:
-            call = payload["call"]
+        events = []
+        for call in payload["calls"]:
             node = call["node_index"]
             assert call["request"]["command"] == commands(self.case)[node - 1]
-            action = "stop" if node == 3 else "start"
-            event = {"action": action, "observed_state": "unknown",
-                     "request_quote": STOP if action == "stop" else commands(self.case)[0],
-                     "output_quote": "A_STOPPED" if action == "stop" else None,
-                     "executable": True, "dependencies": [], "reason": "source launch/stop action"}
-            if not self.legacy:
-                event["action_result"] = "succeeded" if action == "stop" else "unattributed"
-            content = {"service_name": "A", "identity": [{
-                "kind": "program", "value": "./start-A.sh", "quote": "./start-A.sh",
-                "field": "request.command"}], "events": [event], "unknowns": []}
+            if node == 1 and self.case != "files-only":
+                action, command, quote = "start", commands(self.case)[0], None
+            elif node == 3 and self.case == "stop-C3":
+                action, command, quote = "stop", STOP, "A_STOPPED"
+            else:
+                continue
+            events.append({
+                "name": "A", "service_key": "./start-A.sh",
+                "node_index": node, "execution_id": call["execution_id"],
+                "action": action, "command": command, "output_quote": quote,
+                "action_result": "succeeded" if action == "stop" else "unattributed",
+            })
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
-            content=json.dumps(content), refusal=None), finish_reason="stop")], usage=None)
+            content=json.dumps({"events": events}), refusal=None), finish_reason="stop")], usage=None)
 
-
-def preprocess(source, output, run_id, case, llm_config=None, *, legacy=False):
+def preprocess(source, output, run_id, case, llm_config=None):
     if llm_config:
         assert cli_main(["preprocess", str(source / "record"), "--run", run_id,
                          "--llm-config", str(llm_config), "--output", str(output)]) == 0
@@ -160,7 +146,7 @@ def preprocess(source, output, run_id, case, llm_config=None, *, legacy=False):
         llm={"base_url": "http://fixture.invalid/v1", "api_key": "unused",
              "model": "controlled-no-probe-evidence"},
         preprocess={"tokenizer_model": "gpt-4o"}),
-        client=FixtureAnalysis(case, legacy=legacy))
+        client=FixtureAnalysis(case))
     return "fixed-analysis-oracle"
 
 
