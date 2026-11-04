@@ -162,7 +162,7 @@ def test_start_keeps_callers_model_without_requests_or_api_key(tmp_path, monkeyp
     monkeypatch.setattr(OpenAIChatClient, "complete", model_request)
 
     source, node = _select_source(path, "C1")
-    start = _ResumeStart(source_store=source, node=node, model="B")
+    start = _ResumeStart(source_store=source, node=node, model="B", max_steps=2)
     assert start.source_store == path
     assert start.node is node
     assert start.node.context is node.context
@@ -171,3 +171,28 @@ def test_start_keeps_callers_model_without_requests_or_api_key(tmp_path, monkeyp
     model_request.assert_not_called()
     with pytest.raises(FrozenInstanceError):
         start.model = "A"
+
+
+@pytest.mark.parametrize("max_steps", [0, -1, True, False, 2.0, "2", None])
+def test_new_budget_requires_a_positive_integer(record, max_steps):
+    path, node = record
+    with pytest.raises(RecordUsageError, match="max_steps must be a positive integer"):
+        _ResumeStart(source_store=path, node=node, model="M", max_steps=max_steps)
+
+
+@pytest.mark.parametrize("finished", [False, True])
+def test_c1_accepts_two_new_decisions_without_a_historical_c2(tmp_path, finished):
+    path = tmp_path / "record"
+    with RecordStore.create(path) as store:
+        rec, _ = history(store, count=1)
+        if finished:
+            rec.finish()
+        source, node = _select_source(path, "C1")
+        start = _ResumeStart(source_store=source, node=node, model="M", max_steps=2)
+        assert start.node == rec.current_node
+        assert start.node.index == 1
+        assert start.max_steps == 2
+        with pytest.raises(RecordUsageError, match="no committed node"):
+            _select_source(path, "C2")
+        if not finished:
+            rec.finish()
