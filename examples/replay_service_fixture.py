@@ -577,6 +577,10 @@ def check_resources(source, replays, client):
             f"{[item['workspace'] for item in resources]!r})"])
         assert check.exit_code == 0, check.output
         for directory in [source, *map(Path, replays)]:
+            if directory != source and not (directory / "record").exists():
+                report = json.loads((directory / "report.json").read_text())
+                assert report["execution_status"] == "failed" and report["phase"] == "service-preparation"
+                continue
             with RecordStore.open(directory / "record") as store:
                 for node in sorted(store.list(Node), key=lambda node: node.index):
                     materials = load_restore_materials(store, node.node_id)

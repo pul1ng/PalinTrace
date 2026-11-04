@@ -166,13 +166,12 @@ def preprocess(source, output, run_id, case, llm_config=None, *, legacy=False):
 
 def check_manifest(path, case):
     manifest = load_manifest(path)
-    expected = [("A", 1, 3 if case == "stop-C3" else 4)] if case in (
-        "no-probe", "stop-C3") else []
+    expected = [] if case == "files-only" else [("A", 1, 3 if case == "stop-C3" else 4)]
     assert [(s.name, s.start_inclusive, s.end_exclusive) for s in manifest.services] == expected
     raw = json.loads(path.read_text())
     assert "unknowns" not in raw
     for service in raw["services"]:
-        assert service["launch"]["start_command"] == START
+        assert service["launch"]["start_command"] == (FAILED_START if case == "failed-start" else START)
         assert service["launch"]["cwd"] == "/testbed"
         assert "readiness_command" not in service["launch"]
         assert "probe" not in service["evidence"]
@@ -185,6 +184,8 @@ def check_manifest(path, case):
 def snapshot_rows(client, source, replay):
     materials, labels = [], []
     for prefix, directory in (("source", source), ("actual", replay)):
+        if directory is None:
+            continue
         with RecordStore.open(directory / "record") as store:
             for node in sorted(store.list(Node), key=lambda node: node.index):
                 materials.append(load_restore_materials(store, node.node_id))
@@ -236,13 +237,26 @@ def replay_once(source, output, manifest_path, run_id, case, *, start="C1"):
     (output / "cli.stdout.txt").write_text(stdout.getvalue())
     (output / "cli.stderr.txt").write_text(stderr.getvalue())
     report = json.loads((output / "report.json").read_text())
-    assert code == 0 and report["execution_status"] == "completed", report.get("error")
     assert report["r1"]["status"] == "passed" and report["r1"]["files"]["equal"]
     assert report["cleanup_confirmed"] and not report["cleanup_errors"]
-    active = case in ("no-probe", "stop-C3") and start == "C1"
+    active = case != "files-only" and start == "C1"
     assert report["services_manifest"]["selected"] == (["A"] if active else [])
-    assert preparation == ([START] if active else []), preparation
+    expected_start = FAILED_START if case == "failed-start" else START
+    assert preparation == ([expected_start] if active else []), preparation
     journal = report["preparation"]
+    evidence = {"cli_args": args, "cli_exit_code": code, "run_id": report.get("run_id"),
+                "selected": report["services_manifest"]["selected"], "preparation_commands": preparation,
+                "historical_tools": [], "execution_status": report["execution_status"], "r1_passed": True}
+    if active and case == "failed-start":
+        assert code == 1 and report["execution_status"] == "failed", report
+        assert report["phase"] == "service-preparation" and journal["status"] == "failed"
+        service, = journal["services"]
+        assert service["startup"]["exit_code"] == 17
+        assert historical == [] and report["statistics"]["actual_tool_executions"] == 0
+        assert not (output / "record").exists()
+        write_json(output / "execution-check.json", evidence)
+        return evidence
+    assert code == 0 and report["execution_status"] == "completed", report.get("error")
     assert journal["status"] == "ready"
     for service in journal["services"]:
         assert service["status"] == "ready" and service["startup"]["exit_code"] == 0
@@ -252,7 +266,6 @@ def replay_once(source, output, manifest_path, run_id, case, *, start="C1"):
     assert len(historical) == report["statistics"]["actual_tool_executions"] == len(indexes)
     assert report["statistics"]["actual_model_calls"] == 0
     with RecordStore.open(source / "record") as origin, RecordStore.open(output / "record") as actual:
-        facts = []
         for mapping, request in zip(report["mappings"], historical, strict=True):
             old = fixture.tool_fact(origin, load_restore_materials(origin, f"C{mapping['source_index']}").node)
             new = fixture.tool_fact(actual, actual.get(Node, mapping["node_id"]))
@@ -260,11 +273,7 @@ def replay_once(source, output, manifest_path, run_id, case, *, start="C1"):
             assert old["definitive"] and new["definitive"]
             assert old["exit_code"] == new["exit_code"] == 0
             assert old["output"] == new["output"]
-            facts.append(new)
-    evidence = {"cli_args": args, "cli_exit_code": code, "run_id": report["run_id"],
-                "selected": report["services_manifest"]["selected"],
-                "preparation_commands": preparation, "historical_tools": facts,
-                "execution_status": report["execution_status"], "r1_passed": True}
+            evidence["historical_tools"].append(new)
     write_json(output / "execution-check.json", evidence)
     return evidence
 
@@ -300,7 +309,7 @@ def main(preload, output, llm_config=None):
             replays = []
             evidence = replay_once(source, target / "replay", path, recording["run_id"], case)
             replays.append(target / "replay")
-            rows = snapshot_rows(client, source, target / "replay")
+            rows = snapshot_rows(client, source, None if case == "failed-start" else target / "replay")
             write_json(target / "snapshot-check.json", rows)
             assert all(row["requests"] == [] for row in rows.values()), rows
             if case in ("no-probe", "stop-C3"):

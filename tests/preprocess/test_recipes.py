@@ -181,6 +181,14 @@ def test_only_start_dependencies_and_cwd_affect_recipe():
     assert recipe.launch.env == {}
 
 
+def test_invoked_script_is_the_recipe_even_if_model_lists_it_as_a_dependency():
+    call = make_call("e-1", "./start-A.sh || echo A_STARTED", cwd="/testbed")
+    recipe = recipe_for(call, "./start-A.sh", start_deps=("/testbed/start-A.sh",))
+    assert recipe.launch.start_command == "./start-A.sh"
+    with pytest.raises(ValueError, match="dependencies: database"):
+        recipe_for(call, "./start-A.sh", start_deps=("/testbed/start-A.sh", "database"))
+
+
 def test_unsupported_shell_start_cannot_be_published_as_a_null_launch():
     call = make_call("e-1", "echo $(/srv/B/start)")
     with pytest.raises(ValueError, match="top-level"):

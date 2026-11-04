@@ -70,6 +70,7 @@ def _event_document(event: VerifiedEvent) -> dict:
         "observed_state": event.observed_state,
         "action_result": event.action_result,
         "result_basis": event.result_basis,
+        "call_exit_code": event.call_exit_code,
         "exit_code": event.exit_code,
         "request_quote": event.request_span.quote if event.request_span else None,
         "output_quote": event.output_span.quote if event.output_span else None,
@@ -108,16 +109,19 @@ def _lifecycle(
     for event in _ordered_events(service):
         if not start_index <= event.node_index <= end_index:
             raise ValueError("service event lies outside the analyzed node range")
-        if event.action == "start" and event.action_result == "succeeded":
-            if current is None:
-                current = [event]
-            else:
-                current.append(event)
+        if event.action == "start" and event.request_span is not None and current is None:
+            current = [event]
         elif event.action == "stop" and event.action_result == "succeeded":
+            if current is None:
+                command = event.request_span.quote if event.request_span else None
+                raise ValueError(
+                    f"{service.name} ({', '.join(service.identity_keys)}) "
+                    f"C{event.node_index}/{event.execution_id}: successful stop {command!r} "
+                    "has no matching recorded start; missing original startup command"
+                )
             finish(event.node_index, event)
             current = None
         elif current is not None:
-            # Failed/unattributed actions and all probes leave the prior state intact.
             current.append(event)
     finish(end_index + 1, None)
     return ServiceLifecycle(service=service, intervals=tuple(intervals), unknowns=())

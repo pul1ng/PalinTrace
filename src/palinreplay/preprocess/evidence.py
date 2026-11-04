@@ -15,7 +15,7 @@ from palinreplay.preprocess.chunks import TokenCounter
 from palinreplay.preprocess.shell import exact_segment, exit_code_applies
 from palinreplay.preprocess.timeline import Timeline, TimelineCall
 
-EVIDENCE_PROMPT_VERSION = "palinreplay.preprocess-evidence.v3"
+EVIDENCE_PROMPT_VERSION = "palinreplay.preprocess-evidence.v4"
 
 EVIDENCE_SYSTEM_PROMPT = """You extract verifiable evidence for exactly one candidate service from one recorded tool call.
 Return exactly one JSON object and no prose or Markdown:
@@ -37,9 +37,12 @@ shell escape sequences. Never normalize, reformat, re-quote or reconstruct shell
 or JSON syntax, and never quote a whole dictionary, expression or code snippet. Copy a
 short fragment instead: an absolute path, a bare port number, or a stable output token.
 For an action, request_quote is the smallest complete independently runnable command
-fragment that performs only that action for this service; it must not include requests
-for other services. Set executable true only when that fragment is complete; list
-unresolved dependencies. output_quote must quote the actual result that demonstrates the
+fragment that performs only that action for this service. For a start in an && or ||
+list, quote the startup command alone, preserving its arguments and redirections.
+Include the start event even if it failed or its result is unattributed. Set executable
+true when the fragment can be run independently, regardless of its recorded outcome.
+List only unresolved prerequisites outside the fragment. The invoked program itself
+is the startup command. output_quote must quote the actual result that demonstrates the
 observed state. Use up only for demonstrated availability, down only for demonstrated
 unavailability or a confirmed stop, and unknown otherwise. Availability is diagnostic;
 the binary Replay state means "prepare this service from this node", not readiness.
@@ -164,6 +167,7 @@ class VerifiedEvent(Spec):
     observed_state: Literal["up", "down", "unknown"]
     action_result: Literal["succeeded", "failed", "unattributed"] = "unattributed"
     result_basis: Literal["call-exit", "action-output"] | None = None
+    call_exit_code: StrictInt | None = None  # Whole tool call, including any other commands.
     exit_code: StrictInt | None = None
     request_span: VerifiedSpan | None = None
     output_span: VerifiedSpan | None = None
@@ -335,13 +339,16 @@ def _build_candidate_evidence(
         action_result, basis, exit_code = "unattributed", None, None
         if (event.action in ("start", "stop") and request_span is not None
                 and exact_segment(call.request.command, request_span.quote) is not None):
-            if call.result.outcome == "returned" and exit_code_applies(
-                call.request.command, request_span.quote
-            ) and call.result.exit_code is not None:
-                exit_code = call.result.exit_code
+            code = call.result.exit_code
+            # mini records a normal nonzero shell exit as an error outcome.
+            has_exit = code is not None and (
+                call.result.outcome == "returned" or (call.result.outcome == "error" and code != 0)
+            )
+            if has_exit and exit_code_applies(call.request.command, request_span.quote):
+                exit_code = code
                 action_result = "succeeded" if exit_code == 0 else "failed"
                 basis = "call-exit"
-            elif (call.result.outcome == "returned" and output_span is not None
+            elif (has_exit and output_span is not None
                   and event.action_result != "unattributed"):
                 action_result, basis = event.action_result, "action-output"
         events.append(VerifiedEvent(
@@ -352,6 +359,7 @@ def _build_candidate_evidence(
             observed_state=event.observed_state,
             action_result=action_result,
             result_basis=basis,
+            call_exit_code=call.result.exit_code,
             exit_code=exit_code,
             request_span=request_span,
             output_span=output_span,

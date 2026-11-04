@@ -1,7 +1,9 @@
 """Extract evidenced, independently executable original startup commands."""
 
 import re
+import shlex
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from pydantic import Field, StrictStr, field_validator
 
@@ -114,7 +116,13 @@ def build_recipes(
             if command is None:
                 fail("the start quote is not a complete top-level command fragment")
             if event.dependencies:
-                fail("the start fragment has unresolved dependencies: " + ", ".join(event.dependencies))
+                program = shlex.split(command)[0]
+                program_names = {program}
+                if "/" in program:
+                    program_names.add(str(PurePosixPath(call.request.cwd, program)))
+                unresolved = [dep for dep in event.dependencies if dep not in program_names]
+                if unresolved:
+                    fail("the start fragment has unresolved dependencies: " + ", ".join(unresolved))
             other = _mentions_other_service(command, service, services)
             if other is not None:
                 fail(f"the start fragment references another service ({other})")

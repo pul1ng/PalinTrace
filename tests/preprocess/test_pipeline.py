@@ -31,6 +31,7 @@ def adapter(output, exit_code=0):
             Payload(output.encode(), "application/octet-stream"),
             "fixture-merged-output-bytes",
             details={"decoded": {"returncode": exit_code}},
+            outcome="error" if exit_code else "returned",
         ),
     )
 
@@ -232,7 +233,7 @@ class BinaryModels(FakeModels):
 
 
 @pytest.mark.parametrize("case,expected", [
-    ("start", [("A", 1, 4)]), ("failed", []), ("stop", [("A", 1, 3)]), ("files", []),
+    ("start", [("A", 1, 4)]), ("failed", [("A", 1, 4)]), ("stop", [("A", 1, 3)]), ("files", []),
 ])
 def test_binary_record_pipeline_and_replay_adapter_without_probes(tmp_path, case, expected):
     from palinreplay.core.models import Node

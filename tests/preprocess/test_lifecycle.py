@@ -77,9 +77,15 @@ def test_stop_success_closes_half_open_boundary():
     assert result.intervals[0].stop_event.node_index == 3
 
 
+def test_output_only_start_hint_does_not_preempt_a_recorded_start_command():
+    hint = event(1, "start", "up").model_copy(update={"request_span": None, "executable": False})
+    assert ranges(lifecycle(hint, event(2, "start", result="failed"), end=3)) == [(2, 4)]
+
+
 @pytest.mark.parametrize("result", ["failed", "unattributed"])
-def test_unadopted_actions_leave_both_absent_and_present_state_unchanged(result):
-    assert ranges(lifecycle(event(1, "start", result=result), end=3)) == []
+def test_start_opens_interval_regardless_of_result_but_only_successful_stop_closes_it(result):
+    assert ranges(lifecycle(event(1, "start", result=result), end=3)) == [(1, 4)]
+    assert ranges(lifecycle(event(1, "start", result=result), event(3, "stop"), end=3)) == [(1, 3)]
     observed = lifecycle(event(1, "start"), event(2, "start", result=result),
                          event(3, "stop", result=result), end=3)
     assert ranges(observed) == [(1, 4)]
@@ -109,8 +115,8 @@ def test_repeated_successful_start_keeps_boolean_state_and_original_recipe():
 def test_same_node_tools_settle_in_original_call_order_even_if_supplied_reversed():
     result = lifecycle(event(1, "stop", ordinal=2), event(1, "start", ordinal=1), end=3)
     assert ranges(result) == []
-    result = lifecycle(event(1, "start", ordinal=2), event(1, "stop", ordinal=1), end=3)
-    assert ranges(result) == [(1, 4)]
+    with pytest.raises(ValueError, match="no matching recorded start"):
+        lifecycle(event(1, "start", ordinal=2), event(1, "stop", ordinal=1), end=3)
 
 
 def test_compound_actions_settle_by_verified_fragment_offset():
