@@ -5,7 +5,7 @@ Execution trace recording, environment restoration, and historical replay for co
 PalinTrace links an agent's model interactions, tool calls, execution results, context, and task environment state. The goal is to let users select any saved node, restore its associated environment, and replay recorded interactions from that point, keeping playback and environment state aligned with the same position in history.
 
 - **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and future replay.
-- **Preprocess · Service manifest (MVP implemented)**: analyze one complete Record, chunk complete tool calls, recognize services concurrently, verify source evidence, and write a reusable `services.json` without starting task containers.
+- **Preprocess · Service manifest (MVP implemented)**: analyze one complete Record with one model request per complete-call chunk, directly extract service controls and original commands, then validate source references and merge intervals into a reusable `services.json`.
 - **Replay · Historical re-execution (MVP implemented)**: Restore a committed source node and execute subsequent tools from a fixed history without model requests or credentials. Save actual results and snapshots; stop on a definite exit-code mismatch or a framework failure. Full consistency checking is planned as separate Verify work.
 - **Resume · Fork and continue (planned)**: Restore the agent context and task environment at any saved node, optionally provide new instructions, and continue on an independent trajectory while preserving the original history.
 
@@ -79,7 +79,7 @@ cp -n config/llm/preprocess_llm.toml.example config/llm/preprocess_llm.toml
 .venv/bin/palin preprocess "$PALIN_RUN" --run "$PALIN_RUN_ID"
 ```
 
-The default output is `outputs/preprocess/YYMMDD_HHMMSS_TASK/`, containing `services.json` and an analysis report. The manifest binds the complete source digest and records confirmed intervals, launch/readiness recipes, and source evidence. `palin replay --services-config` accepts it directly and selects services for its `--from`; source mismatches, unknown start ranges, or missing recipes fail before Docker is connected. The actual config file is ignored by Git; see [`preprocess_llm.toml.example`](config/llm/preprocess_llm.toml.example).
+The default output is `outputs/preprocess/YYMMDD_HHMMSS_TASK/`, containing `services.json` and an analysis report. The v2 manifest records which services Replay should try to start at a given node. A recorded startup command opens an interval even if the call exited with an error. A successful stop closes it. For a compound command, the manifest keeps only the independently executable startup fragment. The report preserves the exit code of the entire call. The manifest binds the source digest and includes the working directory, environment and preparation timeout. Preprocess reports an error if it cannot extract an independent startup command. After all chunks are merged, a start without a successful stop covers the last recorded node. A successful stop without a matching start is an error. `palin replay --services-config` selects services at `--from` and checks the source and evidence before connecting to Docker. Git ignores the local model configuration. See the [configuration template](config/llm/preprocess_llm.toml.example).
 
 ### 5. Resume (not yet implemented)
 
