@@ -1,11 +1,19 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
-from palinreplay.resume import ResumeDecisionError, decide_resume_start
+from palinreplay.core.errors import RecordUsageError
+from palinreplay.resume import (
+    ResumeDecisionError,
+    ResumeSession,
+    decide_resume_start,
+    restore_resume_start,
+)
 from palinreplay.resume.context import ResumePrefix
 from palinreplay.resume.decision import (
     build_resume_messages,
@@ -38,13 +46,13 @@ def session(tmp_path):
     materials.context["config"] = {"model": {
         "model_name": "parent-A", "model_kwargs": {"max_tokens": 128},
     }}
-    return SimpleNamespace(
+    return ResumeSession(
         prefix=ResumePrefix(materials),
         start=SimpleNamespace(model="M", max_steps=2, source_store=tmp_path / "source",
                               node=SimpleNamespace(run_id="parent-run", node_id="source-C20",
                                                    index=20, state_id="state-C20")),
-        report={"restore_status": "passed", "preparation": {"status": "ready"}},
-        report_path=tmp_path / "report.json", executor=Mock(),
+        report={"phase": "caller", "restore_status": "passed", "preparation": {"status": "ready"}},
+        materials=materials, restored=SimpleNamespace(), output=tmp_path, executor=Mock(state="running"),
     )
 
 
@@ -314,8 +322,6 @@ def test_decision_failures_preserve_preparation_evidence_and_cleanup(
     prepared, session, llm_config, response, monkeypatch, category,
 ):
     from palinreplay.agents.mini import load_native
-    from palinreplay.resume import restore_resume_start
-
     restored = prepared.session
     restored.materials.context.update(deepcopy(session.prefix.context))
     restored.materials.input_position.update(next_message=42)
@@ -381,3 +387,60 @@ def test_http_failure_is_not_retried(session, llm_config, monkeypatch):
     assert len(requests) == 1 and raised.value.category == "request"
     assert raised.value.decision["error"]["status_code"] == 500
     assert not session.executor.mock_calls
+
+
+def test_overlapping_first_decisions_share_one_attempt(session, llm_config, response, monkeypatch):
+    session.start.max_steps = 1
+    entered, release = Event(), Event()
+
+    def respond(*args):
+        entered.set()
+        assert release.wait(10)
+        return response
+
+    transport = Mock(side_effect=respond)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(decide_resume_start, session, instruction="keep me", llm_config=llm_config)
+        try:
+            assert entered.wait(10)
+            second = pool.submit(decide_resume_start, session, instruction="overwrite",
+                                 llm_config=llm_config)
+            with pytest.raises(RecordUsageError, match="already attempted"):
+                second.result(timeout=5)
+        finally:
+            release.set()
+        assert first.result(timeout=10).accounting["remaining_steps"] == 0
+    saved = session.report_path.read_bytes()
+    with pytest.raises(RecordUsageError, match="already attempted"):
+        decide_resume_start(session, instruction="another", llm_config=llm_config)
+    assert session.report_path.read_bytes() == saved
+    assert json.loads(saved)["decision"]["instruction"] == "keep me"
+    transport.assert_called_once()
+
+
+def test_closed_unused_session_rejects_first_decision(setup, monkeypatch):
+    resolve = Mock()
+    transport = Mock()
+    monkeypatch.setattr("palinreplay.resume.decision.resolve_resume_model", resolve)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    with restore_resume_start(setup.start, setup.output) as live:
+        pass
+    saved = live.report_path.read_bytes()
+    assert json.loads(saved)["status"] == "passed" and "decision" not in json.loads(saved)
+    with pytest.raises(RecordUsageError, match="active session"):
+        decide_resume_start(live)
+    resolve.assert_not_called()
+    transport.assert_not_called()
+    assert live.report_path.read_bytes() == saved
+
+
+@pytest.mark.parametrize("state", ["closed", "failed"])
+def test_inactive_executor_cannot_send_a_decision(session, monkeypatch, state):
+    session.executor.state = state
+    transport = Mock()
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    with pytest.raises(RecordUsageError, match="active session"):
+        decide_resume_start(session)
+    assert "decision" not in session.report
+    transport.assert_not_called()

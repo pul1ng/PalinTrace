@@ -1,5 +1,6 @@
 """One model decision from a restored boundary, without execution or node commits."""
 
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 
@@ -11,6 +12,7 @@ from palinreplay.agents.mini import (
     parse_decision_actions,
     prepare_decision_request,
 )
+from palinreplay.core.errors import RecordUsageError
 from palinreplay.llm import LLMConfig, mini_model_name
 from palinreplay.resume.report import exception_evidence
 from palinreplay.storage.io import write_json
@@ -51,7 +53,11 @@ def _failed_decision(session, category, error):
 
 def decide_resume_start(session, *, instruction=None, llm_config=None):
     """Ask the selected model once from a service-ready Resume boundary."""
-    prepared = prepare_resume_decision(session, instruction=instruction, llm_config=llm_config)
+    with _first_attempt(session, instruction, llm_config) as prepared:
+        return _request_decision(session, prepared)
+
+
+def _request_decision(session, prepared):
     evidence = session.report["decision"]
     evidence.update(status="requesting", model_requests=1,
                     remaining_steps=session.start.max_steps - 1)
@@ -90,6 +96,26 @@ class PreparedResumeDecision:
 
 def prepare_resume_decision(session, *, instruction=None, llm_config=None):
     """Persist the exact public model input before it can be sent."""
+    with _first_attempt(session, instruction, llm_config) as prepared:
+        return prepared
+
+
+@contextmanager
+def _first_attempt(session, instruction, llm_config):
+    already_attempted = "The first decision for this Resume session was already attempted"
+    if not session._decision_lock.acquire(blocking=False):
+        raise RecordUsageError(already_attempted)
+    try:
+        if session.report["phase"] != "caller" or session.executor.state != "running":
+            raise RecordUsageError("Resume decisions require an active session")
+        if "decision" in session.report:
+            raise RecordUsageError(already_attempted)
+        yield _prepare_decision(session, instruction, llm_config)
+    finally:
+        session._decision_lock.release()
+
+
+def _prepare_decision(session, instruction, llm_config):
     node = session.start.node
     evidence = session.report["decision"] = {
         "status": "configuring",

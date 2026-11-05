@@ -1,9 +1,10 @@
 """Managed restoration at a saved boundary, before any new Agent decisions."""
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 
 from palinreplay.record.restore import RestoredNode, RestoreMaterials
 from palinreplay.replay.environment import RestoredExecutor
@@ -28,6 +29,7 @@ class ResumeSession:
     prefix: ResumePrefix
     output: Path
     report: dict
+    _decision_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     @property
     def report_path(self):
@@ -106,7 +108,12 @@ def restore_resume_start(start: ResumeStart, output=None, client=None, *, servic
         write_json(output / "report.json", report, replace=True)
         delivered = True
         report.update(phase="caller", caller={"status": "running"})
-        yield ResumeSession(start, materials, restored, executor, prefix, output, report)
+        session = ResumeSession(start, materials, restored, executor, prefix, output, report)
+        try:
+            yield session
+        finally:
+            with session._decision_lock:
+                report["phase"] = "closing"
         report["caller"] = {"status": "completed"}
     except BaseException as error:
         primary = error

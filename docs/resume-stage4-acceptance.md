@@ -13,7 +13,7 @@ with restore_resume_start(start, services_config=services_path) as session:
     # Stage 5 can consume these actions in this same session.
 ```
 
-The optional instruction is appended to a deep copy of the saved messages. The selected `start.model` overrides the parent/configured model. A public LiteLLM request is persisted before calling the connection layer; API credentials are excluded. The same response supplies the assistant, ordered full tool arguments and usage. `ResumeDecisionError.category` distinguishes `config`, `request` and `tool_format`; the exception's `decision` and the session report retain acquired evidence.
+Each open session accepts one first-decision attempt. The optional instruction is appended to a deep copy of the saved messages. The selected `start.model` overrides the parent/configured model. A public LiteLLM request is persisted before calling the connection layer; API credentials are excluded. The same response supplies the assistant, ordered full tool arguments and usage. `ResumeDecisionError.category` distinguishes `config`, `request` and `tool_format`; the exception's `decision` and the session report retain acquired evidence.
 
 Source fixture: Run `a9261e45064b44029fa21e2cd2c3635e`, C20 Node `c18d313c6bb04ac98b1ebba48f145ba3`, State `1379ebee3b81426494c547ce5676c1a7`, from `261102_150636_service-overlap-40`. The existing v2 service manifest selects A and B. The source has 41 complete nodes (C0–C40), a 42-message C20 prefix, and 20 inherited model calls.
 

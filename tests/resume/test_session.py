@@ -22,7 +22,7 @@ def setup(tmp_path, monkeypatch):
     materials.context["counters"] = {"n_calls": 0}
     materials.input_position["next_message"] = 1
     restored = Mock(report={"cleanup_confirmed": True, "cleanup_errors": []})
-    executor = Mock()
+    executor = Mock(state="running")
     executor.exec.return_value = SimpleNamespace(text="/testbed\n", exit_code=0)
     connect = Mock()
     restore = Mock(return_value=(restored, executor))

@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 
 from examples import resume_decision_validation as validation
@@ -24,7 +22,7 @@ class Container:
 
 @pytest.fixture
 def boundary_session(session):
-    session.restored = SimpleNamespace(container=Container())
+    session.restored.container = Container()
     return session
 
 
