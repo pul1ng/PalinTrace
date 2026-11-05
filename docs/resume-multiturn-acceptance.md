@@ -32,7 +32,8 @@ The worktree began clean on `stage-5-5` at `284582b`. Each row was verified and 
 | 7. Native nonzero and task-submission semantics | `becc5e9` | 54 passed; ordinary exit 7 continues; single-tool submission complete; multi-tool submission incomplete; no later model request |
 | 8. Failure/interruption and publication reconciliation | `dbdc7ab` | 157 passed; second-round faults and post-publication RunEnd recovery across Resume/Recorder/Replay |
 | 9. Cumulative branch report | `d9c3785` | Resume 302 passed; final progress/report-stage assertions 9 passed; variable tool counts and unknown costs retained |
-| 10. Real C20 four-round execution | This task's commit | Passed in 45.56 s; 4 model requests, 4 real tools, 4 Btrfs captures, C21–C24, one budget-paused RunEnd |
+| 10. Real C20 four-round execution | `074e2f4` | Passed in 45.56 s; 4 model requests, 4 real tools, 4 Btrfs captures, C21–C24, one budget-paused RunEnd |
+| 11. Independent branch-node recovery | This task's commit | C21/C24 both passed in new containers after execution-container deletion; exact files, messages and input positions; 46.63 s |
 
 Ruff and `git diff --check` passed for each completed task. The implementation checks observed existing LiteLLM/Pydantic warnings; final regression totals will be recorded separately.
 
@@ -67,3 +68,18 @@ TERM=xterm-256color LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -B \
 ```
 
 Raw outputs are Git-ignored. The runner saves each actual public request, SDK response and tool result, plus an acceptance JSON containing the source and branch references, node chain, recording summary, service/container observations and immutable-source audit.
+
+## Task 11: independent C21 and C24 recovery
+
+The recovery command opens the persisted branch Store after independently confirming that the execution container is absent. It restores each selected node in a new container and compares the exact saved context and input position as well as the marker file. Evidence is written separately to `outputs/resume/261106_004858_multiturn/main4-recovery/`.
+
+```bash
+TERM=xterm-256color LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -B \
+  -m examples.resume_multiturn_validation \
+  --output outputs/resume/NEW-multiturn/main4-recovery \
+  --recover-from outputs/resume/261106_004858_multiturn/main4
+```
+
+Both recoveries passed. C21 used container `b2908a7600b5784478c049855185f75599ed2939014808f2091e6be5875cb408` and contained only the first UUID marker, with 45 messages and `next_message=45`. C24 used container `d79be49d3cfab8fcdc98549c1a76319053a5a2be4a2e347a2dff9582b2abbdf9` and contained all four ordered markers, with 51 messages and `next_message=51`.
+
+Each recovered context and complete input-position record exactly matched its node's saved payload. Both restorations identified Run `db1f191d188d4c89983c563d8c7cbc4c` as their branch, and both containers differed from the removed execution container and from each other. Cleanup was independently checked; the branch material inventory was unchanged after both reads. Total recovery time was 46.63 seconds.

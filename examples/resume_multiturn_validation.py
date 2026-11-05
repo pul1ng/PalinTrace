@@ -237,6 +237,68 @@ def run_controlled_case(spec, output, client, llm_config, entry, *, max_steps, s
     entry.update(recording=recording, cleanup_confirmed=True, status="passed")
 
 
+def recover_nodes(case_output, output, *, indices=None):
+    """Restore saved branch nodes after the execution container has been removed."""
+    case_output, output = Path(case_output).absolute(), Path(output).absolute()
+    case = json.loads((case_output / "acceptance.json").read_text())
+    branch_store = case_output / "session/record"
+    outside_store(branch_store.parent, output)
+    outside_store(Path(case["source_store"]).parent, output)
+    output.mkdir(parents=True, mode=0o700, exist_ok=False)
+    if indices is None:
+        indices = (case["nodes"][0]["index"], case["nodes"][-1]["index"])
+    result = {"status": "in_progress", "case_output": str(case_output), "output": str(output),
+              "branch_run_id": case["branch_run_id"], "source_run_id": case["source_run_id"],
+              "source_node_id": case["source_node_id"], "recoveries": []}
+    started, client = time.monotonic(), None
+    try:
+        before = restoration.file_inventory(branch_store.parent)
+        client = connect_docker(600)
+        restoration.assert_absent(client.containers, case["container_id"])
+        result["execution_container_absent"] = True
+        containers = {case["container_id"]}
+        for index in indices:
+            node = next(item for item in case["nodes"] if item["index"] == index)
+            destination = output / f"C{index}"
+            start = select_resume_start(branch_store, node["node_id"], run_id=case["branch_run_id"],
+                                        model="M", max_steps=1)
+            with RecordStore.open(branch_store, read_only=True) as store:
+                saved_context = store.read_json(start.node.context)
+                saved_position = store.read_json(start.node.input_position)
+            item = {"index": index, "node_id": node["node_id"], "probes": []}
+            with restore_resume_start(start, destination, client=client) as restored:
+                container = restored.executor._container.id
+                assert container not in containers
+                containers.add(container)
+                assert restored.materials.run.run_id == case["branch_run_id"]
+                assert restored.prefix.messages == saved_context["messages"]
+                assert restored.context == saved_context and restored.input_position == saved_position
+                assert saved_position["next_message"] == len(saved_context["messages"])
+                text = probe(restored, item["probes"], "cat " + shlex.quote(case["marker"]))
+                expected = case["marker_lines"][:index - case["source_index"]]
+                assert text.splitlines() == expected
+                item.update(status="passed", container_id=container, file_lines=expected,
+                            message_count=len(saved_context["messages"]), input_position=saved_position,
+                            branch_run_id=restored.materials.run.run_id)
+            report = restoration.checked_report(client, destination)
+            assert report["status"] == "passed"
+            item["cleanup_confirmed"] = True
+            result["recoveries"].append(item)
+            write_json(output / f"C{index}-recovery.json", item)
+        assert restoration.file_inventory(branch_store.parent) == before
+        result.update(status="passed", branch_materials_unchanged=True, cleanup_confirmed=True)
+    except BaseException as error:
+        result.update(status="failed", error_type=type(error).__name__, error=str(error))
+        raise
+    finally:
+        if client is not None:
+            client.close()
+        result["duration_sec"] = time.monotonic() - started
+        write_json(output / "recovery.json", result)
+    print(json.dumps({"status": result["status"], "recovered": list(indices), "output": str(output)}))
+    return result
+
+
 def main(output, services_config):
     spec = SOURCES[0]
     output, services_config = Path(output).absolute(), Path(services_config).resolve()
@@ -286,6 +348,12 @@ def main(output, services_config):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--services-config", type=Path, required=True)
+    parser.add_argument("--services-config", type=Path)
+    parser.add_argument("--recover-from", type=Path)
     args = parser.parse_args()
-    main(args.output, args.services_config)
+    if args.recover_from is not None:
+        recover_nodes(args.recover_from, args.output)
+    else:
+        if args.services_config is None:
+            parser.error("--services-config is required for the C20 execution")
+        main(args.output, args.services_config)
