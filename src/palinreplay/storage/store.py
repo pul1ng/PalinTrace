@@ -442,7 +442,18 @@ class RecordStore:
         return max(self.list(Node, run_id=run_id), key=lambda n: n.index, default=None)
 
     def replay_source(self, run_id: str) -> SourceReference | None:
-        """Read the protected declaration, without treating external IDs as local relations."""
+        return self._recording_source(run_id, "replay")
+
+    def resume_source(self, run_id: str) -> SourceReference | None:
+        return self._recording_source(run_id, "resume")
+
+    def recording_source(self, run_id: str) -> SourceReference | None:
+        """Read the external start for either a fixed Replay or an open-ended Resume."""
+        return self._recording_source(run_id, None)
+
+    def _recording_source(self, run_id, mode):
+        """Read protected config without treating external IDs as local relations."""
+        from palinreplay.core.resume_contract import resume_source_reference
         from palinreplay.storage.codec import JSON_TYPES, decode
 
         with self._snapshot():
@@ -457,9 +468,10 @@ class RecordStore:
                     except (ValueError, UnicodeError):
                         pass  # Ordinary Record configurations may be opaque payloads.
                     else:
-                        source = source_reference(config)
+                        source = resume_source_reference(config) or source_reference(config)
                 self._source_cache[key] = source
-            return self._source_cache[key]
+            source = self._source_cache[key]
+            return source if source is None or mode is None or source.mode == mode else None
 
     def replay_finalization(self, run_id: str):
         """Freeze sidecar presence/bytes alongside one catalog read operation."""
@@ -526,12 +538,13 @@ class RecordStore:
         elif isinstance(record, Step):
             attempt = self.get(Attempt, record.attempt_id)
             self._same_run(record.run_id, attempt)
-            source = self.replay_source(record.run_id)
-            if source is not None and not source.start.index < record.index <= source.end.index:
+            source = self.recording_source(record.run_id)
+            if (source is not None and source.mode == "replay"
+                    and not source.start.index < record.index <= source.end.index):
                 raise IntegrityError("step index is outside the pinned Replay range")
             if record.parent_node_id is None:
                 if source is None or record.index != source.start.index + 1:
-                    raise IntegrityError("parentless step requires the first Replay source index")
+                    raise IntegrityError("parentless step requires the first external source index")
             else:
                 parent = self.get(Node, record.parent_node_id)
                 self._same_run(record.run_id, parent)
@@ -943,8 +956,8 @@ class RecordStore:
         if len(captures) > 1:
             raise IntegrityError("multiple captures for one boundary")
         records.extend(captures)
-        if node.index == 0 and self.replay_source(node.run_id) is not None:
-            raise IntegrityError("source-reference Replay cannot contain a local C0")
+        if node.index == 0 and self.recording_source(node.run_id) is not None:
+            raise IntegrityError("source-reference recording cannot contain a local C0")
         if node.index:
             step = self.get(Step, node.step_id)
             self._relations(step)

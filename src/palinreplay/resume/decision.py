@@ -90,6 +90,8 @@ def _request_decision(session, prepared):
         "inherited_counters", "max_steps", "model_requests", "decisions", "remaining_steps",
         "usage", "cost", "cost_known",
     )}
+    session._decision_evidence.update(deepcopy(evidence))
+    session._decision_evidence["accounting"] = deepcopy(accounting)
     return ResumeDecision(prepared.messages, deepcopy(assistant), deepcopy(raw), actions, accounting)
 
 

@@ -7,7 +7,7 @@ from palinreplay.storage.store import RecordStore
 
 
 def source_dependency(store, run_id, *, check=False):
-    source = store.replay_source(run_id)
+    source = store.recording_source(run_id)
     if source is None:
         return None
     document = {
@@ -18,6 +18,8 @@ def source_dependency(store, run_id, *, check=False):
         "required": True, "checked": False,
         "materials": "source Record artifacts and retained filesystem snapshots",
     }
+    if source.mode == "resume":
+        document["mode"] = "resume"
     if check:
         try:
             with (
@@ -32,6 +34,7 @@ def source_dependency(store, run_id, *, check=False):
                     if origin.get_node(node.node_id) != node or origin.get(State, state.state_id) != state:
                         raise IntegrityError("source boundary differs from the pinned reference")
         except (OSError, ValueError, IntegrityError) as error:
-            raise IntegrityError(f"required Replay source unavailable: {source.source_store}: {error}") from error
+            mode = "Resume" if document.get("mode") == "resume" else "Replay"
+            raise IntegrityError(f"required {mode} source unavailable: {source.source_store}: {error}") from error
         document["checked"] = True
     return document

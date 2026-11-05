@@ -8,7 +8,7 @@ PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文�
 
 - **Record · 轨迹录制（已实现 MVP）**：记录 Agent 的模型交互、工具调用与结果，关联当时的上下文、任务文件和运行配置，为历史查看、环境恢复与后续回放提供依据。
 - **Replay · 历史重执行（已实现 MVP）**：从已提交的来源节点恢复环境，按固定历史真实执行后续工具，不调用模型、不需要模型凭据；保存真实结果与快照，确定的退出码不符或框架故障会停止执行。完整一致性校验另列为后续 Verify 工作。
-- **Resume · 分叉续跑（分阶段实现）**：已支持选定历史节点、校验恢复对话与可写环境，并按清单准备起点所需的后台服务；新决策和独立分支录制待后续实现。
+- **Resume · 分叉续跑（分阶段实现）**：可恢复已保存节点、校验上下文与可写环境、准备所需服务，再取得一次新决策并将其整组工具录制为独立分支节点。
 
 ## 演示视频
 
@@ -83,17 +83,21 @@ PALIN_SERVICES="/path/to/services.json"
 
 示例从 C0 执行到录制末尾，可用 `--from`、`--to` 选择区间。结果默认保存到 `outputs/replay/YYMMDD_HHMMSS_任务名/`；退出码与历史不一致时停止并保留结果。完整参数和恢复范围见[命令参考](docs/命令参考.md#replay)。
 
-### 5. Resume：恢复分叉起点
+### 5. Resume：恢复起点并录制一轮分支
 
-Python 入口可选择已保存节点，恢复原始对话前缀和可写任务环境，在同一容器通过完整 R1 文件校验，并准备可选清单中的起点服务后交付：
+Python 入口可恢复原始对话前缀和可写环境，通过 R1 文件校验并准备可选服务，然后在同一容器执行一份新决策、保存分支节点：
 
 ```python
-from palinreplay.resume import select_resume_start, restore_resume_start
+from palinreplay.resume import (
+    select_resume_start, restore_resume_start, decide_resume_start, record_resume_step,
+)
 
-start = select_resume_start("outputs/record/来源录制", "C20", model="M", max_steps=2)
+start = select_resume_start("outputs/record/来源录制", "C20", model="openai/M", max_steps=1)
 with restore_resume_start(start, services_config="outputs/preprocess/来源清单/services.json") as session:
-    result = session.executor.exec("pwd")
-    print(result.text)
+    decision = decide_resume_start(session, llm_config="config/llm/llm.toml")
+    node = record_resume_step(session, decision)
+    if node is not None:
+        print(node.run_id, node.node_id, node.index)  # 独立分支 C21
 ```
 
 `session` 提供 `start`、`materials`、`restored`、`executor`、`prefix`、`context`、
@@ -110,7 +114,16 @@ with restore_resume_start(start, services_config="outputs/preprocess/来源清�
 各执行一次启动命令，不添加 readiness 或业务请求；旧配置显式提供的 readiness 继续兼容。
 准备失败不交付会话，保留已完成的恢复和准备证据并清理资源。调用方之后抛错不会改写先前结论。
 
-当前阶段不初始化模型、重执行历史工具或建立分支录制。
+`decide_resume_start()` 取得一次回答，可通过 `instruction=` 在来源前缀之后追加引导。
+`record_resume_step()` 消费这份已保存的回答。即使决策预算已用完，本轮工具也会继续执行，新增模型请求数为零。
+两者须使用同一个打开的会话，修改决策、重复消费或关闭后调用会在执行前被拒绝。
+工具逐条保存实际输出和退出码，全部接纳后才在 `session.output / "record"` 提交一个新节点。
+mini 收到任务提交标记时，会接纳提交工具的 `exit` 消息。单工具提交会保存节点。多工具组因此提前结束时，
+函数返回 `None`，录制和会话报告记为 `incomplete`，已执行工具的真实返回保存在 Store 中。
+普通非零退出照实接纳；中断和录制故障保留已发生的调用，并在 `report.json.recording` 中报告实际完整节点数。
+来源前缀仍由 `session.context` 保留，分支更新后的消息与输入位置保存在新节点中。
+当前入口完成一轮；自动请求下一轮决策的循环留待后续。验收与重跑方式见[第五步验收记录](docs/resume-stage5-acceptance.md)。
+
 R1 范围是 `rootfs-files-v1`，完整排除项、属性和限制保存在报告中；它不恢复进程内存，后台服务由清单重新启动。
 明确包含 `exit` 消息的终止前缀会被拒绝，父 Run 已结束不妨碍恢复中间节点。
 
