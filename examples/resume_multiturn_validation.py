@@ -299,26 +299,30 @@ def recover_nodes(case_output, output, *, indices=None):
     return result
 
 
-def main(output, services_config):
-    spec = SOURCES[0]
-    output, services_config = Path(output).absolute(), Path(services_config).resolve()
+def main(output, services_config=None, *, source_name="c20"):
+    spec = next(source for source in SOURCES if source.name == source_name)
+    max_steps = 4 if source_name == "c20" else 2
+    output = Path(output).absolute()
+    services_config = Path(services_config).resolve() if services_config is not None else None
     outside_store(spec.store.parent, output)
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     llm_config = output / "controlled-llm.toml"
     llm_config.write_text('[llm]\nmodel="openai/resume-controlled"\napi_key="controlled-no-network"\n'
                           'base_url="https://controlled.invalid/v1"\n')
-    entry = {"status": "in_progress", "services_config": str(services_config)}
+    entry = {"status": "in_progress", "case": source_name,
+             "services_config": str(services_config) if services_config is not None else None}
     started, client = time.monotonic(), None
     try:
         before = restoration.file_inventory(spec.store.parent)
         nodes_before = restoration.node_inventory(spec.store)
         materials = load_resume_materials(select_resume_start(spec.store, spec.node_id,
-                                                               model="M", max_steps=4))
-        manifest_digest = hashlib.sha256(services_config.read_bytes()).hexdigest()
+                                                               model="M", max_steps=max_steps))
+        manifest_digest = hashlib.sha256(services_config.read_bytes()).hexdigest() if services_config is not None else None
         client = connect_docker(600)
         pool_before = restoration.pool_audit(client, materials.snapshot)
-        run_controlled_case(spec, output, client, llm_config, entry, max_steps=4,
-                            services=services_config, expected_services=("A", "B"))
+        run_controlled_case(spec, output, client, llm_config, entry, max_steps=max_steps,
+                            services=services_config,
+                            expected_services=("A", "B") if source_name == "c20" else ())
         pool_after = restoration.pool_audit(client, materials.snapshot)
         after = restoration.file_inventory(spec.store.parent)
         nodes_after = restoration.node_inventory(spec.store)
@@ -328,11 +332,12 @@ def main(output, services_config):
                                  "pool_before": pool_before, "pool_after": pool_after,
                                  "files_unchanged": before == after,
                                  "nodes_unchanged": nodes_before == nodes_after,
-                                 "manifest_unchanged": manifest_digest == hashlib.sha256(services_config.read_bytes()).hexdigest()}
+                                 "manifest_unchanged": (manifest_digest == hashlib.sha256(services_config.read_bytes()).hexdigest()
+                                                        if services_config is not None else None)}
         assert before == after and nodes_before == nodes_after
         assert pool_before["source"] == pool_after["source"]
         assert pool_before["workspaces"] == pool_after["workspaces"]
-        assert entry["source_audit"]["manifest_unchanged"]
+        assert services_config is None or entry["source_audit"]["manifest_unchanged"]
     except BaseException as error:
         entry.update(status="failed", error_type=type(error).__name__, error=str(error))
         raise
@@ -350,10 +355,11 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--services-config", type=Path)
     parser.add_argument("--recover-from", type=Path)
+    parser.add_argument("--case", choices=[source.name for source in SOURCES], default="c20")
     args = parser.parse_args()
     if args.recover_from is not None:
         recover_nodes(args.recover_from, args.output)
     else:
-        if args.services_config is None:
+        if args.case == "c20" and args.services_config is None:
             parser.error("--services-config is required for the C20 execution")
-        main(args.output, args.services_config)
+        main(args.output, args.services_config, source_name=args.case)

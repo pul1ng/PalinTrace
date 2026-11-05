@@ -33,7 +33,8 @@ The worktree began clean on `stage-5-5` at `284582b`. Each row was verified and 
 | 8. Failure/interruption and publication reconciliation | `dbdc7ab` | 157 passed; second-round faults and post-publication RunEnd recovery across Resume/Recorder/Replay |
 | 9. Cumulative branch report | `d9c3785` | Resume 302 passed; final progress/report-stage assertions 9 passed; variable tool counts and unknown costs retained |
 | 10. Real C20 four-round execution | `074e2f4` | Passed in 45.56 s; 4 model requests, 4 real tools, 4 Btrfs captures, C21–C24, one budget-paused RunEnd |
-| 11. Independent branch-node recovery | This task's commit | C21/C24 both passed in new containers after execution-container deletion; exact files, messages and input positions; 46.63 s |
+| 11. Independent branch-node recovery | `8ea2792` | C21/C24 both passed in new containers after execution-container deletion; exact files, messages and input positions; 46.63 s |
+| 12. Cross-source multi-turn regression | This task's commit | All 3 sources passed; 2 requests/tools/nodes per source; all 6 new nodes independently restored |
 
 Ruff and `git diff --check` passed for each completed task. The implementation checks observed existing LiteLLM/Pydantic warnings; final regression totals will be recorded separately.
 
@@ -83,3 +84,27 @@ TERM=xterm-256color LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -B \
 Both recoveries passed. C21 used container `b2908a7600b5784478c049855185f75599ed2939014808f2091e6be5875cb408` and contained only the first UUID marker, with 45 messages and `next_message=45`. C24 used container `d79be49d3cfab8fcdc98549c1a76319053a5a2be4a2e347a2dff9582b2abbdf9` and contained all four ordered markers, with 51 messages and `next_message=51`.
 
 Each recovered context and complete input-position record exactly matched its node's saved payload. Both restorations identified Run `db1f191d188d4c89983c563d8c7cbc4c` as their branch, and both containers differed from the removed execution container and from each other. Cleanup was independently checked; the branch material inventory was unchanged after both reads. Total recovery time was 46.63 seconds.
+
+## Task 12: three additional source Records
+
+The same controlled-model path now accepts the three other pinned sources from `examples/resume_record_validation.py::SOURCES`. Each runs two rounds, audits the complete source prefix and local parent chain, and independently restores both new nodes after removing its execution container. No service manifest is needed for these source cases.
+
+All three cases passed under `outputs/resume/261106_004858_multiturn/`, with separate execution and recovery directories for `astropy_initial`, `django_middle` and `astropy_long`.
+
+| Source / start | Branch Run | New nodes | Request messages | Saved messages | Restored nodes |
+| --- | --- | --- | --- | --- | --- |
+| Astropy 14182 / C0 | `30e9d5845cad494597dffcb4db7d862e` | C1 → C2 | 3, 5 | 5, 7 | C1, C2 passed |
+| Django 10914 / C1 | `3bceb31baa45449e96ec75b3837be52e` | C2 → C3 | 5, 7 | 7, 9 | C2, C3 passed |
+| Astropy 12907 / C22 | `35e1b2a7e84b4e3180126383ffdd80aa` | C23 → C24 | 50, 52 | 52, 54 | C23, C24 passed |
+
+The node IDs are respectively `4e39033ee2164929814bd34af4982c88` → `bfef29816bdd4bc68c20b4d942bf9d74`, `df981c150a08416caf630f3b36f9dfb7` → `44519025a4b7409596b4209a6e6dee78`, and `aac77b820bf64bc3b023a33072d4fa93` → `3745468afdc14d44b1eb9483837c0de7`.
+
+Each case made exactly two model requests and two real tool calls, captured two Btrfs boundaries, and saved two complete nodes with one budget-paused RunEnd. Source references, complete conversation prefixes and local parent links passed. All six nodes recovered the expected marker prefix, exact saved context and input position after their execution containers were removed. All three source file/node inventories remained unchanged, and execution/recovery cleanup was confirmed. Execution plus recovery took 69.28, 66.98 and 77.00 seconds respectively.
+
+```bash
+TERM=xterm-256color LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -B \
+  -m examples.resume_multiturn_validation --case astropy_initial \
+  --output outputs/resume/NEW-multiturn/astropy_initial
+```
+
+Use `--case django_middle` or `--case astropy_long` for the other two sources; use `--recover-from` with a fresh output directory to restore the two nodes.
