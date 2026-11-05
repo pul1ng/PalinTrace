@@ -38,7 +38,11 @@ def _claim_decision(session, decision):
             raise RecordUsageError("Resume decision differs from the saved fourth-step evidence")
         attempt = session._record_attempt
         attempt.update(status="consuming", source=deepcopy(source), model_requests=0,
-                       tool_executions=0, complete_nodes=0)
+                       tool_executions=0, tool_results=0, complete_nodes=0, decisions=1,
+                       max_steps=session.start.max_steps,
+                       inherited_counters=deepcopy(saved["accounting"]["inherited_counters"]),
+                       request_accounting=[{key: deepcopy(saved["accounting"][key]) for key in
+                                            ("model_requests", "usage", "cost", "cost_known")}])
         session.report["recording"] = attempt
         try:
             write_json(session.report_path, session.report, replace=True)
@@ -159,7 +163,8 @@ def _execute_tools(session, step, actions):
         call = step.tool(adapter, request, tool_call_id=action["tool_call_id"])
         calls.append(call)
         results.append(call.invoke())
-        session._record_attempt["tool_results"] = len(results)
+        attempt = session._record_attempt
+        attempt["tool_results"] += 1
         write_json(session.report_path, session.report, replace=True)
         try:
             native.DockerEnvironment._check_finished(

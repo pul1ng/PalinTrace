@@ -130,6 +130,9 @@ def record_branch_decision(session, step, context, *, llm_config=None):
 
     def execute(request):
         session._record_attempt["model_requests"] += 1
+        accounting.update(model_requests=1, usage=None, cost=None, cost_known=False,
+                          execution_id=call.execution_id, step_id=step.step.step_id)
+        session._record_attempt["request_accounting"].append(accounting)
         response = complete_decision_request(request, prepared.credentials)
         raw = response.model_dump(mode="json")
         call.observe("response", Payload.json(raw))
@@ -153,6 +156,7 @@ def record_branch_decision(session, step, context, *, llm_config=None):
     raw = response.model_dump(mode="json")
     assistant = deepcopy(raw["choices"][0]["message"])
     actions = parse_decision_actions(prepared.native_model, response)
+    session._record_attempt["decisions"] += 1
     context.accept_response(step, call, assistant, actions)
     return ResumeDecision(prepared.messages, assistant, raw, actions, accounting)
 

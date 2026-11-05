@@ -59,6 +59,8 @@ def test_second_round_failure_preserves_published_progress_and_stops(
         run_resume_steps(case.session, case.decision, llm_config=llm_config)
     attempt = case.session.report["recording"]
     assert attempt["status"] == ("interrupted" if interrupted else "failed")
+    assert attempt["stop_reason"] == attempt["status"]
+    assert attempt["total_model_requests"] == 2
     assert attempt["complete_nodes"] == (2 if fault == "after_publication" else 1)
     assert attempt["stage"] == ("model" if fault.startswith("model") else
                                 "tools" if fault.startswith("tool") else "commit")

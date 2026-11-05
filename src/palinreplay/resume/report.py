@@ -25,6 +25,30 @@ def new_report(start, output, own_client):
     return report
 
 
+def summarize_recording(attempt):
+    """Separate branch activity from inherited counters and preserve unknown costs."""
+    accounting = attempt["request_accounting"]
+    total_requests = sum(item["model_requests"] for item in accounting)
+    known_cost = sum(item["cost"] for item in accounting if item["cost_known"])
+    cost_known = all(item["cost_known"] for item in accounting)
+    attempt.update(total_model_requests=total_requests,
+                   recording_model_requests=attempt["model_requests"],
+                   remaining_steps=attempt["max_steps"] - total_requests,
+                   known_cost=known_cost, cost_known=cost_known,
+                   cost=known_cost if cost_known else None)
+    status = attempt["status"]
+    if status in ("failed", "interrupted"):
+        attempt.update(stop_reason=status, failure_stage=attempt.get("stage"))
+    else:
+        run_status = attempt.get("run_status")
+        submitted = attempt.get("run_end_details", {}).get("agent_exit_status") == "Submitted"
+        attempt["stop_reason"] = (
+            "budget_exhausted" if run_status == "paused" else
+            "incomplete_tool_group" if run_status == "incomplete" else
+            "submitted" if submitted else "step_completed"
+        )
+
+
 def finish_report(report, output, *, restored, executor, client, own_client, primary):
     errors = report["cleanup_errors"]
     for name, resource in (("executor", executor), ("restore", restored),

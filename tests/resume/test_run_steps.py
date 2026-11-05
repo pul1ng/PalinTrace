@@ -102,6 +102,7 @@ def test_ordinary_nonzero_return_reaches_the_next_model_request(recordable, llm_
         assert result.outcome == "error"
         assert store.read_json(result.details)["backend"]["decoded"]["returncode"] == 7
         assert store.list(RunEnd)[0].status == "paused"
+    assert case.session.report["recording"]["stop_reason"] == "budget_exhausted"
 
 
 @pytest.mark.parametrize("recordable", [{"tools": 1, "max_steps": 5}], indirect=True)
@@ -124,6 +125,7 @@ def test_single_tool_submission_commits_and_stops_before_budget(
         assert details["agent_exit_status"] == "Submitted" and details["record_complete"]
         assert store.read_json(nodes[-1].context)["messages"][-1]["role"] == "exit"
         assert store.check_integrity().ok
+    assert case.session.report["recording"]["stop_reason"] == "submitted"
 
 
 @pytest.mark.parametrize("recordable", [{"tools": 1, "max_steps": 5}], indirect=True)
@@ -154,3 +156,4 @@ def test_multi_tool_submission_keeps_previous_node_and_actual_calls(
             assert trace.phase == ("accepted" if index == submit_index else "result")
         assert store.list(Node) == tuple(nodes) and store.check_integrity().ok
     assert case.session.report["recording"]["status"] == "incomplete"
+    assert case.session.report["recording"]["stop_reason"] == "incomplete_tool_group"

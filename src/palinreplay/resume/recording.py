@@ -10,7 +10,7 @@ from palinreplay.core.models import Event, Execution, Node, Operation, Run, RunE
 from palinreplay.core.serialization import json_bytes
 from palinreplay.record.recorder import Recorder
 from palinreplay.record.state import BtrfsStateBackend
-from palinreplay.resume.report import exception_evidence
+from palinreplay.resume.report import exception_evidence, summarize_recording
 from palinreplay.storage.io import write_json
 from palinreplay.storage.store import RecordStore
 
@@ -102,9 +102,15 @@ def _persisted_progress(session):
             "accepted_tools": sum(event.kind == "accepted" for event in events),
             "run_status": ends[-1].status if ends else "unfinalized",
         }
+        if ends:
+            end = ends[-1]
+            progress.update(run_end=end.model_dump(mode="json"),
+                            run_end_details=store.read_json(end.details))
         if nodes:
-            node = nodes[-1]
-            progress.update(node_id=node.node_id, state_id=node.state_id, index=node.index)
+            node = max(nodes, key=lambda item: item.index)
+            progress.update(node_id=node.node_id, state_id=node.state_id, index=node.index,
+                            last_complete_node=node.model_dump(mode="json"),
+                            message_count=len(store.read_json(node.context)["messages"]))
         return progress
 
 
@@ -116,6 +122,7 @@ def finish_recording(session, primary=None):
     except BaseException as error:
         attempt.update(complete_nodes=None, progress_error=exception_evidence(error))
         if pending is None:
+            attempt["stage"] = "progress"
             pending = error
         else:
             pending.add_note(f"Resume progress could not be read: {type(error).__name__}")
@@ -124,13 +131,16 @@ def finish_recording(session, primary=None):
     else:
         attempt["status"] = "failed" if isinstance(pending, Exception) else "interrupted"
         attempt["error"] = exception_evidence(pending)
+    summarize_recording(attempt)
     try:
         write_json(session.report_path, session.report, replace=True)
     except BaseException as error:
         attempt.update(status="failed", report_error=exception_evidence(error))
         if pending is None:
+            attempt["stage"] = "report"
             pending = error
         else:
             pending.add_note(f"Resume recording report also failed: {type(error).__name__}")
+        summarize_recording(attempt)
     if primary is None and pending is not None:
         raise pending
