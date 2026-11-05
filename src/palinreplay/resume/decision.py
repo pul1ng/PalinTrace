@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from palinreplay.agents.mini import (
     complete_decision_request,
+    decision_cost,
     parse_decision_actions,
     prepare_decision_request,
 )
@@ -22,22 +23,29 @@ class ResumeDecision:
     assistant_message: dict
     raw_response: dict
     actions: list[dict]
+    accounting: dict
 
 
 def decide_resume_start(session, *, instruction=None, llm_config=None):
     """Ask the selected model once from a service-ready Resume boundary."""
     prepared = prepare_resume_decision(session, instruction=instruction, llm_config=llm_config)
     evidence = session.report["decision"]
-    evidence.update(status="requesting", model_requests=1)
+    evidence.update(status="requesting", model_requests=1,
+                    remaining_steps=session.start.max_steps - 1)
     response = complete_decision_request(prepared.request, prepared.credentials)
     raw = response.model_dump(mode="json")
     assistant = deepcopy(raw["choices"][0]["message"])
-    evidence.update(status="returned", raw_response=raw, assistant_message=assistant)
+    evidence.update(status="returned", raw_response=raw, assistant_message=assistant,
+                    usage=deepcopy(raw.get("usage")), **decision_cost(prepared.native_model, response))
     write_json(session.report_path, session.report, replace=True)
     actions = parse_decision_actions(prepared.native_model, response)
-    evidence.update(status="succeeded", actions=deepcopy(actions))
+    evidence.update(status="succeeded", decisions=1, actions=deepcopy(actions))
     write_json(session.report_path, session.report, replace=True)
-    return ResumeDecision(prepared.messages, assistant, raw, actions)
+    accounting = {key: deepcopy(evidence[key]) for key in (
+        "inherited_counters", "max_steps", "model_requests", "decisions", "remaining_steps",
+        "usage", "cost", "cost_known",
+    )}
+    return ResumeDecision(prepared.messages, assistant, raw, actions, accounting)
 
 
 @dataclass
@@ -69,6 +77,10 @@ def prepare_resume_decision(session, *, instruction=None, llm_config=None):
         "request_representation": "public litellm.completion arguments",
         "model_requests": 0, "tool_executions": 0, "task_file_updates": 0,
         "file_snapshots": 0, "complete_nodes": 0,
+        "inherited_counters": deepcopy(session.prefix.counters),
+        "max_steps": session.start.max_steps, "decisions": 0,
+        "remaining_steps": session.start.max_steps, "usage": None,
+        "cost": None, "cost_known": False,
     }
     write_json(session.report_path, session.report, replace=True)
     return PreparedResumeDecision(messages, request, credentials, model)

@@ -276,5 +276,31 @@ def test_invalid_group_delivers_no_partial_actions(session, llm_config, response
         decide_resume_start(session, llm_config=llm_config)
     evidence = json.loads(session.report_path.read_text())["decision"]
     assert evidence["raw_response"] == response.model_dump(mode="json")
+    assert evidence["usage"] == response.model_dump(mode="json")["usage"]
     assert not evidence.get("actions")
     assert transport.call_count == 1 and not session.executor.mock_calls
+
+
+@pytest.mark.parametrize("instruction", [None, "下一步先检查 B 的日志"])
+@pytest.mark.parametrize("known_cost", [None, 0.25])
+def test_new_budget_and_usage_are_independent_of_inherited_history(
+    session, llm_config, response, monkeypatch, instruction, known_cost,
+):
+    from palinreplay.agents.mini import load_native
+
+    history = deepcopy(session.prefix.counters)
+    native = load_native()
+    if known_cost is not None:
+        monkeypatch.setattr(native.LitellmModel, "_calculate_cost",
+                            lambda *args: {"cost": known_cost})
+    transport = Mock(return_value=response)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    result = decide_resume_start(session, instruction=instruction, llm_config=llm_config)
+    accounting = result.accounting
+    assert accounting["inherited_counters"] == history
+    assert history["n_calls"] == 20 and session.prefix.counters == history
+    assert accounting["max_steps"] == 2 and accounting["remaining_steps"] == 1
+    assert accounting["model_requests"] == accounting["decisions"] == transport.call_count == 1
+    assert accounting["usage"] == response.model_dump(mode="json")["usage"]
+    assert accounting["cost"] == known_cost
+    assert accounting["cost_known"] == (known_cost is not None)

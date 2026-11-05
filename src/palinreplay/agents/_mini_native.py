@@ -106,6 +106,12 @@ def parse_decision_actions(model, response):
             for action, call in zip(actions, response.choices[0].message.tool_calls, strict=True)]
 
 
+def decision_cost(model, response):
+    """Native pricing without updating inherited or process-global counters."""
+    cost = model._calculate_cost(response)["cost"]
+    return {"cost": cost if cost > 0 else None, "cost_known": cost > 0}
+
+
 @dataclass
 class ModelReply:
     raw: dict

@@ -80,6 +80,11 @@ def parse_decision_actions(model, response):
     return load_native().parse_decision_actions(model, response)
 
 
+def decision_cost(model, response):
+    """Report known native cost, keeping unknown cost distinct from zero."""
+    return load_native().decision_cost(model, response)
+
+
 def swebench_config() -> dict:
     """Resolved public templates from the pinned upstream package."""
     load_native()
