@@ -75,6 +75,11 @@ def complete_decision_request(request, credentials):
     return load_native().complete_decision_request(request, credentials)
 
 
+def parse_decision_actions(model, response):
+    """Return one complete ordered pending group using the pinned tool parser."""
+    return load_native().parse_decision_actions(model, response)
+
+
 def swebench_config() -> dict:
     """Resolved public templates from the pinned upstream package."""
     load_native()

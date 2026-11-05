@@ -228,3 +228,53 @@ def test_decision_real_sdk_sends_one_offline_http_request(
         result = decide_resume_start(session, llm_config=llm_config)
     assert len(requests) == 1 and result.raw_response["id"] == "resume-response"
     assert not session.executor.mock_calls
+
+
+def test_multiple_actions_preserve_response_order_ids_and_full_arguments(
+    session, llm_config, response, monkeypatch,
+):
+    calls = response.choices[0].message.tool_calls
+    second = calls[0].model_copy(deep=True)
+    second.id = "branch-tool-2"
+    second.function.arguments = '{"command":"tail -20 /tmp/B.log","label":"preserved"}'
+    calls.append(second)
+    transport = Mock(return_value=response)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    result = decide_resume_start(session, llm_config=llm_config)
+    assert result.actions == [
+        {"command": "cat /tmp/B.log", "tool_call_id": "branch-tool-1", "name": "bash",
+         "arguments": {"command": "cat /tmp/B.log"}},
+        {"command": "tail -20 /tmp/B.log", "tool_call_id": "branch-tool-2", "name": "bash",
+         "arguments": {"command": "tail -20 /tmp/B.log", "label": "preserved"}},
+    ]
+    assert result.assistant_message["tool_calls"] == result.raw_response["choices"][0]["message"][
+        "tool_calls"]
+    assert transport.call_count == 1 and not session.executor.mock_calls
+    assert session.report["decision"]["actions"] == result.actions
+    assert session.report["decision"]["complete_nodes"] == 0
+
+
+@pytest.mark.parametrize("fault", ["json", "duplicate_id", "command_type", "no_tools"])
+def test_invalid_group_delivers_no_partial_actions(session, llm_config, response, monkeypatch, fault):
+    from palinreplay.agents.mini import load_native
+
+    calls = response.choices[0].message.tool_calls
+    second = calls[0].model_copy(deep=True)
+    second.id = "branch-tool-2"
+    calls.append(second)
+    if fault == "json":
+        second.function.arguments = "not json"
+    elif fault == "duplicate_id":
+        second.id = calls[0].id
+    elif fault == "command_type":
+        second.function.arguments = '{"command":123}'
+    else:
+        response.choices[0].message.tool_calls = []
+    transport = Mock(return_value=response)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    with pytest.raises((load_native().FormatError, ValueError)):
+        decide_resume_start(session, llm_config=llm_config)
+    evidence = json.loads(session.report_path.read_text())["decision"]
+    assert evidence["raw_response"] == response.model_dump(mode="json")
+    assert not evidence.get("actions")
+    assert transport.call_count == 1 and not session.executor.mock_calls

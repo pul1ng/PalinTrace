@@ -5,7 +5,11 @@ from dataclasses import dataclass, field
 
 from pydantic import ValidationError
 
-from palinreplay.agents.mini import complete_decision_request, prepare_decision_request
+from palinreplay.agents.mini import (
+    complete_decision_request,
+    parse_decision_actions,
+    prepare_decision_request,
+)
 from palinreplay.llm import LLMConfig, mini_model_name
 from palinreplay.storage.io import write_json
 
@@ -17,6 +21,7 @@ class ResumeDecision:
     messages: list[dict]
     assistant_message: dict
     raw_response: dict
+    actions: list[dict]
 
 
 def decide_resume_start(session, *, instruction=None, llm_config=None):
@@ -29,7 +34,10 @@ def decide_resume_start(session, *, instruction=None, llm_config=None):
     assistant = deepcopy(raw["choices"][0]["message"])
     evidence.update(status="returned", raw_response=raw, assistant_message=assistant)
     write_json(session.report_path, session.report, replace=True)
-    return ResumeDecision(prepared.messages, assistant, raw)
+    actions = parse_decision_actions(prepared.native_model, response)
+    evidence.update(status="succeeded", actions=deepcopy(actions))
+    write_json(session.report_path, session.report, replace=True)
+    return ResumeDecision(prepared.messages, assistant, raw, actions)
 
 
 @dataclass

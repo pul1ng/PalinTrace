@@ -92,6 +92,20 @@ def complete_decision_request(request, credentials):
     )
 
 
+def parse_decision_actions(model, response):
+    """Parse the whole native tool group before making any action available."""
+    actions = model._parse_actions(response)
+    ids = [action["tool_call_id"] for action in actions]
+    if any(not isinstance(call_id, str) or not call_id for call_id in ids):
+        raise ValueError("tool calls require nonempty provider tool-call identities")
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate provider tool-call identities in group")
+    if any(not isinstance(action["command"], str) for action in actions):
+        raise ValueError("bash tool command must be a string")
+    return [action | {"name": call.function.name, "arguments": json.loads(call.function.arguments)}
+            for action, call in zip(actions, response.choices[0].message.tool_calls, strict=True)]
+
+
 @dataclass
 class ModelReply:
     raw: dict
