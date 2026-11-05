@@ -8,7 +8,7 @@ PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文�
 
 - **Record · 轨迹录制（已实现 MVP）**：记录 Agent 的模型交互、工具调用与结果，关联当时的上下文、任务文件和运行配置，为历史查看、环境恢复与后续回放提供依据。
 - **Replay · 历史重执行（已实现 MVP）**：从已提交的来源节点恢复环境，按固定历史真实执行后续工具，不调用模型、不需要模型凭据；保存真实结果与快照，确定的退出码不符或框架故障会停止执行。完整一致性校验另列为后续 Verify 工作。
-- **Resume · 分叉续跑（分阶段实现）**：已支持选定历史节点并校验恢复对话与可写环境；新决策和独立分支录制待后续实现。
+- **Resume · 分叉续跑（分阶段实现）**：已支持选定历史节点、校验恢复对话与可写环境，并按清单准备起点所需的后台服务；新决策和独立分支录制待后续实现。
 
 ## 演示视频
 
@@ -54,7 +54,7 @@ bash scripts/quickstart_record.sh
 
 ### 3. Preprocess（生成服务清单）
 
-分析已有 Record，提取后台服务的启动命令和启停区间，生成 `services.json`，供 Replay 及后续 Resume 恢复环境时使用。此过程会调用模型。
+分析已有 Record，提取后台服务的启动命令和启停区间，生成 `services.json`，供 Replay 及 Resume 恢复环境时使用。此过程会调用模型。
 
 复制[预处理模型配置模板](config/llm/preprocess_llm.toml.example)：
 
@@ -85,13 +85,13 @@ PALIN_SERVICES="/path/to/services.json"
 
 ### 5. Resume：恢复分叉起点
 
-Python 入口可选择已保存节点，恢复原始对话前缀和可写任务环境，并在同一容器通过完整 R1 文件校验后交付：
+Python 入口可选择已保存节点，恢复原始对话前缀和可写任务环境，在同一容器通过完整 R1 文件校验，并准备可选清单中的起点服务后交付：
 
 ```python
 from palinreplay.resume import select_resume_start, restore_resume_start
 
 start = select_resume_start("outputs/record/来源录制", "C20", model="M", max_steps=2)
-with restore_resume_start(start) as session:
+with restore_resume_start(start, services_config="outputs/preprocess/来源清单/services.json") as session:
     result = session.executor.exec("pwd")
     print(result.text)
 ```
@@ -100,12 +100,18 @@ with restore_resume_start(start) as session:
 `input_position`、`output`、`report` 和 `report_path`。原始运行配置通过
 `session.materials.config` 访问；本次模型与新增预算留在 `start`，历史计数保持原值。
 默认输出为当前目录的 `outputs/resume/YYMMDD_HHMMSS_C20-restore/`，也可传入来源录制目录之外的
-新 `output` 目录。`report.json` 分别记录恢复、调用方错误及清理结果；`restore-report.json`
-保留底层资源与 R1 证据。退出上下文时清理执行器和恢复资源，自行创建的 Docker 客户端也会关闭；
+新 `output` 目录。`report.json` 分别记录恢复、服务准备、调用方错误及清理结果；`restore-report.json`
+保留底层资源与 R1 证据，提供清单时的 `preparation.json` 保存选中服务的实际命令、返回和耗时。
+退出上下文时清理执行器和恢复资源，自行创建的 Docker 客户端也会关闭；
 传入的 `client` 仍由调用方管理。
 
-当前阶段只恢复起点，不初始化模型、重执行历史工具、准备服务或建立分支录制。
-R1 范围是 `rootfs-files-v1`，完整排除项、属性和限制保存在报告中；它不恢复进程内存和运行中的服务。
+`services_config` 可省略，此时跳过准备；有效清单未选中服务时，记录零项准备完成。
+清单来源、摘要、证据及起点范围在创建任务容器前校验。R1 通过后，v2 清单中的选中服务按顺序
+各执行一次启动命令，不添加 readiness 或业务请求；旧配置显式提供的 readiness 继续兼容。
+准备失败不交付会话，保留已完成的恢复和准备证据并清理资源。调用方之后抛错不会改写先前结论。
+
+当前阶段不初始化模型、重执行历史工具或建立分支录制。
+R1 范围是 `rootfs-files-v1`，完整排除项、属性和限制保存在报告中；它不恢复进程内存，后台服务由清单重新启动。
 明确包含 `exit` 消息的终止前缀会被拒绝，父 Run 已结束不妨碍恢复中间节点。
 
 ## Getting Started

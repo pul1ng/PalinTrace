@@ -12,11 +12,12 @@ def exception_evidence(error):
 def new_report(start, output, own_client):
     report = {
         "schema_version": "palinreplay.resume-restore.v1",
-        "status": "in_progress", "phase": "materials", "restore_status": "in_progress",
+        "status": "in_progress", "phase": "materials", "restore_status": "not_started",
         "source_store": str(start.source_store), "node": start.node.model_dump(mode="json"),
         "new_decisions": {"model": start.model, "max_steps": start.max_steps},
         "output": str(output), "restore_report_path": str(output / "restore-report.json"),
         "caller": {"status": "not_started"}, "r1": {"status": "not_run"},
+        "preparation": {"status": "not_started"}, "preparation_report_path": None,
         "client_ownership": "session" if own_client else "caller",
         "cleanup_confirmed": False, "cleanup_errors": [], "cleanup": {},
     }
@@ -50,6 +51,7 @@ def finish_report(report, output, *, restored, executor, client, own_client, pri
     report["cleanup_confirmed"] = not errors
     report["status"] = (
         "passed" if report["restore_status"] == "passed"
+        and report["preparation"]["status"] in ("ready", "skipped")
         and report["caller"]["status"] == "completed" and not errors else "failed"
     )
     report["phase"] = "complete"

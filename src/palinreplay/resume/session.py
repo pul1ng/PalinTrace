@@ -7,10 +7,12 @@ from pathlib import Path
 
 from palinreplay.record.restore import RestoredNode, RestoreMaterials
 from palinreplay.replay.environment import RestoredExecutor
+from palinreplay.replay.services import PreparationJournal, prepare_services
 from palinreplay.resume.context import ResumePrefix, validate_resume_context
 from palinreplay.resume.environment import restore_environment, saved_execution_config
 from palinreplay.resume.materials import load_resume_materials
 from palinreplay.resume.report import exception_evidence, finish_report, new_report
+from palinreplay.resume.services import load_resume_service_input, resolve_resume_services
 from palinreplay.resume.start import ResumeStart
 from palinreplay.resume.validation import validate_workspace
 from palinreplay.sandbox.client import connect_docker
@@ -54,14 +56,20 @@ def prepare_output(start, output):
 
 
 @contextmanager
-def restore_resume_start(start: ResumeStart, output=None, client=None):
-    """Yield only after R1 passes; own new resources and only an internally created client."""
+def restore_resume_start(start: ResumeStart, output=None, client=None, *, services_config=None):
+    """Yield after R1 and optional service preparation; own only newly created resources."""
     output = prepare_output(start, output)
     own_client = client is None
     report = new_report(start, output, own_client)
-    restored = executor = primary = None
+    restored = executor = journal = primary = None
     delivered = False
     try:
+        if services_config is not None:
+            report["phase"] = "services"
+        services = resolve_resume_services(start, load_resume_service_input(services_config))
+        report.update(phase="materials", restore_status="in_progress")
+        if services is None:
+            report["preparation"] = {"status": "skipped"}
         materials = load_resume_materials(start)
         report["phase"] = "context"
         prefix = validate_resume_context(materials)
@@ -82,7 +90,19 @@ def restore_resume_start(start: ResumeStart, output=None, client=None):
         )
         report["phase"] = "validate_r1"
         report["r1"] = validate_workspace(materials, executor)
-        report.update(restore_status="passed", status="ready", phase="delivery")
+        report["restore_status"] = "passed"
+        if services is not None:
+            report["phase"] = "service_preparation"
+            services = services.model_copy(update={"services": tuple(
+                service.model_copy(update={"cwd": service.cwd or execution["cwd"]})
+                for service in services.services
+            )})
+            report["preparation_report_path"] = str(output / "preparation.json")
+            report["preparation"] = {"status": "preparing"}
+            journal = PreparationJournal(output / "preparation.json", services)
+            report["preparation"] = journal.data
+            prepare_services(executor, services, journal)
+        report.update(status="ready", phase="delivery")
         write_json(output / "report.json", report, replace=True)
         delivered = True
         report.update(phase="caller", caller={"status": "running"})
@@ -92,14 +112,25 @@ def restore_resume_start(start: ResumeStart, output=None, client=None):
         primary = error
         if delivered:
             report["caller"] = {"status": "failed", **exception_evidence(error)}
-        else:
+        elif report["phase"] == "services":
+            report["services_error"] = exception_evidence(error)
+        elif report["phase"] == "service_preparation":
+            report["preparation_error"] = exception_evidence(error)
+            if report["preparation"]["status"] != "failed":
+                report["preparation"]["status"] = "failed"
+                if journal is not None:
+                    journal.save(primary=error)
+        elif report["restore_status"] != "passed":
             report.update(restore_status="failed", restore_error={
                 "phase": report["phase"], **exception_evidence(error),
             })
-        if hasattr(error, "r1_report"):
-            report["r1"] = error.r1_report
-        if hasattr(error, "restore_report"):
-            report["resources"] = error.restore_report
+        else:
+            report["delivery_error"] = exception_evidence(error)
+        if report["restore_status"] == "failed":
+            if hasattr(error, "r1_report"):
+                report["r1"] = error.r1_report
+            if hasattr(error, "restore_report"):
+                report["resources"] = error.restore_report
         raise
     finally:
         finish_report(report, output, restored=restored, executor=executor, client=client,
