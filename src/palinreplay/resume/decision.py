@@ -137,7 +137,13 @@ def _prepare_decision(session, instruction, llm_config):
         credentials = resolve_resume_model(session, llm_config=llm_config)
         config = deepcopy(session.prefix.config["model"])
         config.update(model_name=credentials.model, cost_tracking="ignore_errors")
-        config["model_kwargs"] = config.get("model_kwargs", {}) | {
+        options = config.get("model_kwargs", {})
+        for location, values in (("model_kwargs", options),
+                                 ("model_kwargs.extra_body", options.get("extra_body") or {})):
+            for key in ("model", "messages", "tools"):
+                if key in values:
+                    raise ValueError(f"{location}.{key} cannot override the Resume request")
+        config["model_kwargs"] = options | {
             "timeout": credentials.timeout, "num_retries": 0, "max_retries": 0,
         }
         model, request = prepare_decision_request(messages, config)

@@ -219,6 +219,10 @@ def test_decision_real_sdk_sends_one_offline_http_request(
     from litellm.llms.openai.openai import OpenAIChatCompletion
 
     requests = []
+    instruction = "下一步先检查 B 的日志"
+    session.prefix.config["model"]["model_kwargs"].update(
+        temperature=0.25, extra_body={"metadata": {"branch": "resume"}},
+    )
 
     def respond(request):
         body = json.loads(request.content)
@@ -229,15 +233,18 @@ def test_decision_real_sdk_sends_one_offline_http_request(
             if message.get("content", "") is None:
                 message.pop("content")
         assert body["messages"] == expected_messages
+        assert len(body["messages"]) == 43
+        assert body["messages"][-1] == {"role": "user", "content": instruction}
         assert body["tools"] == evidence["request"]["tools"]
         assert body["model"] == "M"
+        assert body["temperature"] == 0.25 and body["metadata"] == {"branch": "resume"}
         requests.append(body)
         return httpx.Response(200, json=response.model_dump(mode="json"), request=request)
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         monkeypatch.setattr(OpenAIChatCompletion, "_get_sync_http_client",
                             staticmethod(lambda: client))
-        result = decide_resume_start(session, llm_config=llm_config)
+        result = decide_resume_start(session, instruction=instruction, llm_config=llm_config)
     assert len(requests) == 1 and result.raw_response["id"] == "resume-response"
     assert not session.executor.mock_calls
 
@@ -387,6 +394,24 @@ def test_http_failure_is_not_retried(session, llm_config, monkeypatch):
     assert len(requests) == 1 and raised.value.category == "request"
     assert raised.value.decision["error"]["status_code"] == 500
     assert not session.executor.mock_calls
+
+
+@pytest.mark.parametrize("key", ["model", "messages", "tools"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_parent_options_cannot_replace_branch_request(session, llm_config, monkeypatch, key, nested):
+    transport = Mock()
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    override = {key: "parent replacement"}
+    options = session.prefix.config["model"]["model_kwargs"]
+    options.update({"extra_body": override} if nested else override)
+    with pytest.raises(ResumeDecisionError) as raised:
+        decide_resume_start(session, instruction="check B", llm_config=llm_config)
+    location = f"model_kwargs.{'extra_body.' if nested else ''}{key}"
+    assert raised.value.category == "config" and location in str(raised.value)
+    decision = json.loads(session.report_path.read_text())["decision"]
+    assert decision["status"] == "failed" and decision["model_requests"] == 0
+    assert decision["messages"][-1] == {"role": "user", "content": "check B"}
+    transport.assert_not_called()
 
 
 def test_overlapping_first_decisions_share_one_attempt(session, llm_config, response, monkeypatch):
