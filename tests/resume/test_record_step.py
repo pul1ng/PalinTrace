@@ -17,6 +17,9 @@ from palinreplay.resume import (
 )
 from palinreplay.resume.context import ResumePrefix
 from palinreplay.resume.materials import load_resume_materials
+from palinreplay.resume.record import _claim_decision, _execute_and_save_group
+from palinreplay.resume.record_context import ResumeRecordContext
+from palinreplay.resume.recording import open_recording
 from palinreplay.resume.report import finish_report
 from palinreplay.sandbox.base import ExecResult
 from palinreplay.storage.store import RecordStore
@@ -71,6 +74,26 @@ def recordable(tmp_path, session, llm_config, response, execution_config, monkey
     monkeypatch.setattr("palinreplay.resume.recording.BtrfsStateBackend", lambda *a, **kw: backend)
     return SimpleNamespace(session=session, decision=decision, backend=backend,
                            complete=complete, parent_next=parent_next)
+
+
+def test_group_commit_leaves_recording_open_for_its_caller(recordable):
+    case = recordable
+    with _claim_decision(case.session, case.decision) as saved:
+        context = ResumeRecordContext(case.session, saved)
+        with open_recording(case.session, context.export) as (recorder, step):
+            context.accept_decision(step, saved)
+            node, details = _execute_and_save_group(
+                case.session, recorder, step, context, saved["actions"],
+            )
+            assert node.index == case.session.start.node.index + 1
+            assert details is None
+            assert recorder.phase == "ready" and recorder.end is None
+            assert recorder.store.list(Node) == (node,)
+            assert not recorder.store.list(RunEnd)
+            assert case.session.executor.execute.call_count == 2
+            assert case.complete.call_count == 1
+            recorder.finish()
+            assert len(recorder.store.list(RunEnd)) == 1
 
 
 def test_public_entry_commits_one_independent_node_and_does_not_query_again(recordable):
