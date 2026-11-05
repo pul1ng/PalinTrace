@@ -7,6 +7,7 @@ All inspection commands use the delivered executor; source materials stay read-o
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import time
 from contextlib import ExitStack, contextmanager
@@ -250,18 +251,47 @@ def partial_failure(source, services_config, output, client, summary):
                  same_container=True, r1_before_startup=True)
 
 
-def verification_report(path):
-    """Link actual regression outcomes to their unchanged command logs."""
+def _verification_file(directory, reference, output, filename, *, sha256=None):
+    reference = Path(reference)
+    source = directory / reference
+    if reference.is_absolute() and not source.exists():
+        # Legacy reports kept logs beside the JSON or in the sibling checks directory.
+        for candidate in (directory.parent / reference.parent.name / reference.name,
+                          directory / reference.name):
+            if candidate.is_file():
+                source = candidate
+                break
+    data = source.read_bytes()
+    if sha256 is not None and hashlib.sha256(data).hexdigest() != sha256:
+        raise AssertionError(f"regression log digest differs: {source}")
+    if output is None:
+        return os.path.relpath(source, directory)
+    (output / filename).write_bytes(data)
+    return filename
+
+
+def verification_report(path, *, output=None):
+    """Check report-relative evidence and optionally copy it into the acceptance directory."""
     if path is None:
         return {"status": "not_run"}
-    report = json.loads(Path(path).read_text())
+    path = Path(path)
+    report = json.loads(path.read_text())
     assert report["status"] == "passed"
-    for name in ("pytest", "ruff", "diff"):
-        result = report[name]
-        assert result["exit_code"] == 0, result
-        assert hashlib.sha256(Path(result["log"]).read_bytes()).hexdigest() == result["sha256"]
     assert report["pytest"]["passed"] > 0
     assert report["pytest"]["failures"] == report["pytest"]["errors"] == 0
+    logs = {name: report[name] for name in ("pytest", "ruff", "diff")}
+    for result in logs.values():
+        assert result["exit_code"] == 0, result
+    if "targeted_failure_tests" in report:
+        logs["targeted_failure_tests"] = report["targeted_failure_tests"]
+    for name, result in logs.items():
+        result["log"] = _verification_file(
+            path.parent, result["log"], output, f"{name}.log", sha256=result["sha256"],
+        )
+    if "junit" in report["pytest"]:
+        report["pytest"]["junit"] = _verification_file(
+            path.parent, report["pytest"]["junit"], output, "pytest.xml",
+        )
     return report
 
 
@@ -310,7 +340,7 @@ def main(source, services_config, output, *, verification=None):
         summary["manifest"] = {"path": str(Path(services_config).resolve()),
                                "sha256": hashlib.sha256(Path(services_config).read_bytes()).hexdigest(),
                                "source": service_input.manifest.source.model_dump(mode="json")}
-        summary["verification"] = verification_report(verification)
+        summary["verification"] = verification_report(verification, output=output)
         if summary["verification"]["status"] == "passed":
             write_json(output / "verification.json", summary["verification"])
             checks["regressions"] = True
@@ -439,6 +469,7 @@ if __name__ == "__main__":
     parser.add_argument("--services-config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path, help="new directory outside recording")
     parser.add_argument("--verification", type=Path,
-                        help="actual pytest/ruff/diff outcomes and log hashes; required for stage3_complete")
+                        help="regression report required for stage3_complete; relative log paths "
+                             "are resolved beside the report and verified logs are copied into the output")
     arguments = parser.parse_args()
     main(arguments.source, arguments.services_config, arguments.output, verification=arguments.verification)

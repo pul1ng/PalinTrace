@@ -176,7 +176,7 @@ def test_regression_evidence_requires_success_and_matching_actual_logs(tmp_path,
     for name in ("pytest", "ruff", "diff"):
         log = tmp_path / (name + ".log")
         log.write_text(name + " outcome\n")
-        report[name] = {"exit_code": 0, "log": str(log),
+        report[name] = {"exit_code": 0, "log": log.name,
                         "sha256": hashlib.sha256(log.read_bytes()).hexdigest()}
     report["pytest"].update(passed=3, failures=0, errors=0, skipped=1)
     if fault == "exit":
@@ -192,3 +192,48 @@ def test_regression_evidence_requires_success_and_matching_actual_logs(tmp_path,
     else:
         with pytest.raises(AssertionError):
             validation.verification_report(path)
+
+
+def test_verification_is_recheckable_after_archiving_and_removing_the_worktree(tmp_path):
+    worktree = tmp_path / "worktree"
+    checks = worktree / "outputs" / "resume" / "checks"
+    checks.mkdir(parents=True)
+    report = {"status": "passed"}
+    for name in ("pytest", "ruff", "diff", "targeted_failure_tests"):
+        log = checks / f"original-{name}.log"
+        data = f"{name} output\n".encode()
+        log.write_bytes(data)
+        report[name] = {"exit_code": 0, "log": str(log), "sha256": hashlib.sha256(data).hexdigest()}
+    junit = checks / "pytest.xml"
+    junit.write_bytes(b"<testsuite/>")
+    report["pytest"].update(passed=3, errors=0, failures=0, junit=str(junit))
+    source = checks / "verification.json"
+    source.write_text(json.dumps(report))
+    assert validation.verification_report(source)["pytest"]["log"] == "original-pytest.log"
+
+    # Previous acceptance runs also copied this JSON verbatim into a sibling directory.
+    legacy = checks.parent / "legacy"
+    legacy.mkdir()
+    (legacy / source.name).write_bytes(source.read_bytes())
+    archive = tmp_path / "archives" / "stage3"
+    archive.parent.mkdir()
+    worktree.rename(archive)
+    archived_legacy = archive / legacy.relative_to(worktree) / source.name
+    recovered = validation.verification_report(archived_legacy)
+    assert recovered["pytest"]["log"] == "../checks/original-pytest.log"
+
+    # A newly published acceptance can also be moved on its own.
+    final = tmp_path / "new-acceptance"
+    final.mkdir()
+    saved = validation.verification_report(archived_legacy, output=final)
+    (final / source.name).write_text(json.dumps(saved))
+    standalone = tmp_path / "standalone-archive"
+    final.rename(standalone)
+    assert validation.verification_report(standalone / source.name) == saved
+    for name in ("pytest", "ruff", "diff", "targeted_failure_tests"):
+        assert saved[name]["log"] == f"{name}.log"
+        assert (standalone / saved[name]["log"]).read_bytes() == f"{name} output\n".encode()
+    assert (standalone / saved["pytest"]["junit"]).read_bytes() == b"<testsuite/>"
+    (standalone / saved["pytest"]["log"]).write_bytes(b"changed in the archive")
+    with pytest.raises(AssertionError):
+        validation.verification_report(standalone / source.name)
