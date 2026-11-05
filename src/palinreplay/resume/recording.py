@@ -56,11 +56,7 @@ def open_recording(session, export_agent):
                 boundary=BoundaryAdapter(export_agent, backend.capture),
             )
             recorder.start_from_source()
-            step = recorder.begin_step()
-            session._record_attempt.update(status="recording", store=str(store.root),
-                                           run_id=recorder.run.run_id, step_id=step.step.step_id,
-                                           index=step.step.index)
-            write_json(session.report_path, session.report, replace=True)
+            step = begin_recording_step(session, recorder)
             yield recorder, step
         except BaseException as error:
             if recorder is not None:
@@ -68,6 +64,16 @@ def open_recording(session, export_agent):
             raise
         else:
             recorder.close()
+
+
+def begin_recording_step(session, recorder):
+    """Begin another step without recreating the branch or finalizing its Run."""
+    step = recorder.begin_step()
+    session._record_attempt.update(status="recording", store=str(recorder.store.root),
+                                   run_id=recorder.run.run_id, step_id=step.step.step_id,
+                                   index=step.step.index)
+    write_json(session.report_path, session.report, replace=True)
+    return step
 
 
 def _persisted_progress(session):
