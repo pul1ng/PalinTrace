@@ -6,7 +6,7 @@ PalinTrace links an agent's model interactions, tool calls, execution results, c
 
 - **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and historical replay.
 - **Replay · Historical re-execution (MVP implemented)**: Restore a committed source node and execute subsequent tools from a fixed history without model requests or credentials. Save actual results and snapshots; stop on a definite exit-code mismatch or a framework failure. Full consistency checking is planned as separate Verify work.
-- **Resume · Fork and continue (planned)**: Restore the agent context and task environment at any saved node, optionally provide new instructions, and continue on an independent trajectory while preserving the original history.
+- **Resume · Fork and continue (implemented in stages)**: Select a saved node, restore and validate its context and writable environment, and optionally prepare the background services required at that boundary. New model decisions and independent branch recording are planned for later stages.
 
 ## Demo (Chinese)
 
@@ -50,7 +50,7 @@ By default, it calls a real model and runs at most two steps. Outputs are groupe
 
 ### 3. Preprocess (service manifest)
 
-Analyze an existing Record to extract background-service startup commands and lifecycle intervals. The generated `services.json` supports environment restoration for Replay and future Resume. This step calls a model.
+Analyze an existing Record to extract background-service startup commands and lifecycle intervals. The generated `services.json` supports environment restoration for Replay and Resume. This step calls a model.
 
 Copy the [preprocessing model configuration template](config/llm/preprocess_llm.toml.example):
 
@@ -79,7 +79,31 @@ PALIN_SERVICES="/path/to/services.json"
 
 This example runs from C0 to the recorded end. Use `--from` and `--to` to select a range. Results default to `outputs/replay/YYMMDD_HHMMSS_TASK/`; an exit-code mismatch stops execution and preserves actual results. See the [command reference (Chinese)](docs/命令参考.md#replay) for all parameters and restoration scope.
 
-### 5. Resume (not yet implemented)
+### 5. Resume: restore and prepare a starting node
+
+The Python API restores the saved conversation and writable environment, passes R1,
+and prepares optional services in the same container before handing it to the caller:
+
+```python
+from palinreplay.resume import select_resume_start, restore_resume_start
+
+start = select_resume_start("outputs/record/SOURCE", "C20", model="M", max_steps=2)
+with restore_resume_start(start, services_config="outputs/preprocess/SOURCE/services.json") as session:
+    print(session.executor.exec("pwd").text)
+```
+
+Omit `services_config` to skip preparation. A valid manifest selecting no services
+completes preparation with zero items. Manifest source, digest, evidence and range
+checks happen before creating a task container. After R1, v2 startup commands run
+once each without added readiness probes; explicitly configured legacy readiness
+remains supported. Preparation failure prevents delivery and cleans up resources.
+
+Outputs default to `outputs/resume/<timestamp>_C20-restore/`. `report.json` preserves
+restoration, preparation, caller and cleanup outcomes separately; `restore-report.json`
+contains R1 and resource evidence, and `preparation.json` records configured startups.
+The context manager releases the container and writable workspace on normal or
+exceptional exit. A caller-supplied Docker client remains caller-owned. This stage
+makes no model calls, re-executes no historical tools, and records no branch nodes.
 
 ## Getting Started
 
@@ -196,7 +220,7 @@ The playback controls at the bottom support pause, restart, speed selection, and
 
 ### 8. preprocess: Generate a service manifest
 
-Analyze the completed Record to extract background-service startup commands and lifecycle intervals. The manifest supports environment restoration for Replay and future Resume.
+Analyze the completed Record to extract background-service startup commands and lifecycle intervals. The manifest supports environment restoration for Replay and Resume.
 
 Copy the dedicated [model configuration template](config/llm/preprocess_llm.toml.example):
 

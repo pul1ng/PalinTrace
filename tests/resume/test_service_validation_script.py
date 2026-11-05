@@ -1,3 +1,4 @@
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -163,3 +164,31 @@ def test_request_summary_rejects_any_incomplete_or_unsuccessful_request(fault):
         actions[0][field] = value
     with pytest.raises(AssertionError):
         validation.validate_requests(actions, "C20", ["A", "B"] * 3)
+
+
+def test_absent_regression_evidence_is_explicitly_not_run():
+    assert validation.verification_report(None) == {"status": "not_run"}
+
+
+@pytest.mark.parametrize("fault", [None, "exit", "failures", "changed_log"])
+def test_regression_evidence_requires_success_and_matching_actual_logs(tmp_path, fault):
+    report = {"status": "passed"}
+    for name in ("pytest", "ruff", "diff"):
+        log = tmp_path / (name + ".log")
+        log.write_text(name + " outcome\n")
+        report[name] = {"exit_code": 0, "log": str(log),
+                        "sha256": hashlib.sha256(log.read_bytes()).hexdigest()}
+    report["pytest"].update(passed=3, failures=0, errors=0, skipped=1)
+    if fault == "exit":
+        report["ruff"]["exit_code"] = 1
+    elif fault == "failures":
+        report["pytest"]["failures"] = 1
+    elif fault == "changed_log":
+        (tmp_path / "pytest.log").write_text("changed results\n")
+    path = tmp_path / "verification.json"
+    path.write_text(json.dumps(report))
+    if fault is None:
+        assert validation.verification_report(path) == report
+    else:
+        with pytest.raises(AssertionError):
+            validation.verification_report(path)

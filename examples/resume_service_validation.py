@@ -20,11 +20,12 @@ from palinreplay.llm import OpenAIChatClient
 from palinreplay.preprocess.manifest import SCHEMA_VERSION
 from palinreplay.record.recorder import Recorder
 from palinreplay.replay.environment import RestoredExecutor
+from palinreplay.replay.services import PreparationError
 from palinreplay.resume import restore_resume_start, select_resume_start
 from palinreplay.resume import session as session_module
 from palinreplay.resume import validation as validation_module
 from palinreplay.resume.materials import load_resume_materials
-from palinreplay.resume.services import load_resume_service_input
+from palinreplay.resume.services import load_resume_service_input, resolve_resume_services
 from palinreplay.sandbox.client import connect_docker
 from palinreplay.storage.btrfs.pool import BtrfsPool
 from palinreplay.storage.io import outside_store, write_json
@@ -201,14 +202,81 @@ def check_closed_ports(executor, names):
     return result
 
 
-def main(source, services_config, output):
+def partial_failure(source, services_config, output, client, summary):
+    """Keep A's real success and B's controlled failure, then independently inspect cleanup."""
+    document = json.loads(Path(services_config).read_text())
+    for service in document["services"]:
+        if service["name"] == "B":
+            service["launch"]["start_command"] = "printf 'CONTROLLED_B_START_FAILURE\\n'; exit 17"
+    config = output / "partial-failure-services.json"
+    write_json(config, document)
+    destination = output / "partial-failure"
+    group = "C20-partial-failure"
+    entry = {"status": "in_progress", "report": str(destination / "report.json"),
+             "restore_report": str(destination / "restore-report.json"),
+             "preparation_report": str(destination / "preparation.json"),
+             "configuration": str(config), "expected_B_exit_code": 17}
+    summary["failure_cases"][group] = entry
+    start = select_resume_start(source, "C20", model="M", max_steps=2)
+    token = _GROUP.set(group)
+    try:
+        print("Checking real A success / B startup failure and cleanup", flush=True)
+        try:
+            with restore_resume_start(start, destination, client, services_config=config):
+                raise AssertionError("failed service preparation delivered a session")
+        except PreparationError as error:
+            entry["exception"] = {"type": type(error).__name__, "message": str(error)}
+    finally:
+        _GROUP.reset(token)
+    report = restoration.checked_report(client, destination)
+    assert report["status"] == "failed" and report["restore_status"] == "passed"
+    assert report["r1"]["status"] == "passed" and report["caller"]["status"] == "not_started"
+    preparation = report["preparation"]
+    assert preparation["status"] == "failed" and "restore_error" not in report
+    first, second = preparation["services"]
+    assert first["name"] == "A" and first["status"] == "ready" and first["startup"]["exit_code"] == 0
+    assert second["name"] == "B" and second["status"] == "failed"
+    assert second["startup"]["exit_code"] == 17
+    actions = [action for action in summary["actions"] if action["group"] == group]
+    assert [action["service"] for action in actions] == ["A", "B"]
+    assert all(action["category"] == "startup" for action in actions)
+    r1_call, = [call for call in summary["r1_calls"] if call["group"] == group]
+    assert all(action["container_id"] == r1_call["container_id"] for action in actions)
+    assert r1_call["commands_before_r1"] == r1_call["commands_after_r1"]
+    assert r1_call["commands_after_r1"] == summary["actions"].index(actions[0])
+    entry.update(status="passed", actual_preparation_status="failed", restore_status="passed",
+                 caller_status="not_started", cleanup_confirmed=True,
+                 container_id=r1_call["container_id"], startup_counts={"A": 1, "B": 1, "C": 0},
+                 same_container=True, r1_before_startup=True)
+
+
+def verification_report(path):
+    """Link actual regression outcomes to their unchanged command logs."""
+    if path is None:
+        return {"status": "not_run"}
+    report = json.loads(Path(path).read_text())
+    assert report["status"] == "passed"
+    for name in ("pytest", "ruff", "diff"):
+        result = report[name]
+        assert result["exit_code"] == 0, result
+        assert hashlib.sha256(Path(result["log"]).read_bytes()).hexdigest() == result["sha256"]
+    assert report["pytest"]["passed"] > 0
+    assert report["pytest"]["failures"] == report["pytest"]["errors"] == 0
+    return report
+
+
+def main(source, services_config, output, *, verification=None):
     source, output = Path(source).resolve(), Path(output).absolute()
     recording = source.parent if source.name == "record" else source
     outside_store(recording, output)
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     counts = dict.fromkeys((*FORBIDDEN, "startup_commands", "inspection_commands", "request_commands"), 0)
+    checks = dict.fromkeys(("selection", "context_and_budget", "restore_and_handoff", "commands",
+                            "requests", "failure_cleanup", "source_nodes_and_snapshots",
+                            "source_files_and_manifest", "zero_new_work", "regressions"), False)
     summary = {"status": "failed", "source": str(recording), "counts": counts,
-               "actions": [], "r1_calls": [], "sessions": {}}
+               "actions": [], "r1_calls": [], "sessions": {}, "failure_cases": {},
+               "required_checks": checks, "stage3_complete": False}
     write_json(output / "acceptance.json", summary)
     before = restoration.file_inventory(recording)
     write_json(output / "source-files-before.json", before)
@@ -237,10 +305,25 @@ def main(source, services_config, output):
 
     try:
         service_input = load_resume_service_input(services_config)
+        assert service_input.manifest is not None
         assert service_input.manifest.schema_version == SCHEMA_VERSION
         summary["manifest"] = {"path": str(Path(services_config).resolve()),
                                "sha256": hashlib.sha256(Path(services_config).read_bytes()).hexdigest(),
                                "source": service_input.manifest.source.model_dump(mode="json")}
+        summary["verification"] = verification_report(verification)
+        if summary["verification"]["status"] == "passed":
+            write_json(output / "verification.json", summary["verification"])
+            checks["regressions"] = True
+        summary["selection"] = []
+        for index, expected in ((0, []), (5, ["A"]), (19, ["A", "B"]), (20, ["A", "B"]),
+                                (25, ["B"]), (30, []), (35, ["C"]), (38, [])):
+            boundary = select_resume_start(source, f"C{index}", model="M", max_steps=2)
+            services = resolve_resume_services(boundary, service_input)
+            actual = [item.name for item in services.services]
+            assert actual == expected
+            summary["selection"].append({"index": index, "node_id": boundary.node.node_id,
+                                         "services": actual})
+        checks["selection"] = True
         with no_new_work(counts, summary["actions"]), patch.object(BtrfsPool, "command", command), \
                 patch.object(validation_module, "validate_r1", r1):
             start = select_resume_start(source, "C20", model="M", max_steps=2)
@@ -278,6 +361,7 @@ def main(source, services_config, output):
                             entry["commands"] = check_commands(session)
                         request_services(session.executor, summary["actions"], order)
                         entry["closed_ports"] = check_closed_ports(session.executor, closed)
+                        assert entry["prefix"] == restoration.compare_prefix(session)
                 except BaseException as error:
                     entry.update(status="failed", error_type=type(error).__name__, error=str(error))
                     raise
@@ -285,6 +369,8 @@ def main(source, services_config, output):
                     _GROUP.reset(token)
                 report = restoration.checked_report(client, destination)
                 assert report["status"] == "passed"
+                assert report["new_decisions"] == {"model": "M", "max_steps": 2}
+                entry["new_decisions"] = report["new_decisions"]
                 assert [item["name"] for item in report["preparation"]["services"]] == selected
                 actions = [action for action in summary["actions"] if action["group"] == group]
                 startups = [action for action in actions if action["category"] == "startup"]
@@ -308,6 +394,10 @@ def main(source, services_config, output):
                 )
             assert len(summary["r1_calls"]) == 2
             assert summary["sessions"]["C20"]["container_id"] != summary["sessions"]["C35"]["container_id"]
+            checks.update(context_and_budget=True, restore_and_handoff=True, commands=True, requests=True)
+            partial_failure(source, services_config, output, client, summary)
+            checks["failure_cleanup"] = True
+            assert len(summary["r1_calls"]) == 3
             summary["pool_after"] = restoration.pool_audit(client, materials.snapshot)
             assert summary["pool_before"]["source"] == summary["pool_after"]["source"]
             assert summary["pool_before"]["workspaces"] == summary["pool_after"]["workspaces"]
@@ -315,6 +405,7 @@ def main(source, services_config, output):
             write_json(output / "source-nodes-after.json", nodes_after)
             assert nodes_before == nodes_after and len(nodes_before) == 41
             assert all(counts[name] == 0 for name in FORBIDDEN), counts
+            checks.update(source_nodes_and_snapshots=True, zero_new_work=True)
             summary.update(status="passed", source_nodes_unchanged=True,
                            source_snapshot_unchanged=True, temporary_resources_released=True)
     except BaseException as error:
@@ -326,13 +417,19 @@ def main(source, services_config, output):
         after = restoration.file_inventory(recording)
         write_json(output / "source-files-after.json", after)
         summary["source_files_unchanged"] = before == after
-        if before != after:
+        manifest = summary.get("manifest")
+        summary["manifest_unchanged"] = manifest is not None and (
+            hashlib.sha256(Path(services_config).read_bytes()).hexdigest() == manifest["sha256"])
+        checks["source_files_and_manifest"] = before == after and summary["manifest_unchanged"]
+        if not checks["source_files_and_manifest"]:
             summary["status"] = "failed"
+        summary["stage3_complete"] = summary["status"] == "passed" and all(checks.values())
         summary["duration_sec"] = time.monotonic() - started
         write_json(output / "pool-operations.json", operations)
         write_json(output / "acceptance.json", summary, replace=True)
     assert summary["status"] == "passed", summary
-    print(json.dumps({"status": summary["status"], "counts": counts, "output": str(output)}))
+    print(json.dumps({"status": summary["status"], "stage3_complete": summary["stage3_complete"],
+                      "counts": counts, "output": str(output)}))
     return summary
 
 
@@ -341,5 +438,7 @@ if __name__ == "__main__":
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--services-config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path, help="new directory outside recording")
+    parser.add_argument("--verification", type=Path,
+                        help="actual pytest/ruff/diff outcomes and log hashes; required for stage3_complete")
     arguments = parser.parse_args()
-    main(arguments.source, arguments.services_config, arguments.output)
+    main(arguments.source, arguments.services_config, arguments.output, verification=arguments.verification)
