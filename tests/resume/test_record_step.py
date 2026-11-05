@@ -62,14 +62,17 @@ def recordable(tmp_path, session, llm_config, response, execution_config, monkey
                             executor=executor, prefix=ResumePrefix(materials), output=output,
                             report={"phase": "caller", "restore_status": "passed",
                                     "preparation": {"status": "skipped"}})
-    for index in range(2, getattr(request, "param", 2) + 1):
+    options = getattr(request, "param", 2)
+    tools = options["tools"] if isinstance(options, dict) else options
+    instruction = options.get("instruction") if isinstance(options, dict) else None
+    for index in range(2, tools + 1):
         extra = response.choices[0].message.tool_calls[0].model_copy(deep=True)
         extra.id = f"branch-tool-{index}"
         extra.function.arguments = '{"command":"cat /tmp/marker"}'
         response.choices[0].message.tool_calls.append(extra)
     complete = Mock(return_value=response)
     monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", complete)
-    decision = decide_resume_start(session, llm_config=llm_config)
+    decision = decide_resume_start(session, instruction=instruction, llm_config=llm_config)
     backend = fake.FakeStateBackend()
     monkeypatch.setattr("palinreplay.resume.recording.BtrfsStateBackend", lambda *a, **kw: backend)
     return SimpleNamespace(session=session, decision=decision, backend=backend,

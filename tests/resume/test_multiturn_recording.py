@@ -1,5 +1,7 @@
 from copy import deepcopy
 
+import pytest
+
 from palinreplay.core.models import Node, Run, RunEnd, Step
 from palinreplay.resume.record import _claim_decision, _execute_and_save_group
 from palinreplay.resume.record_context import ResumeRecordContext
@@ -62,3 +64,47 @@ def test_two_groups_share_one_recording_and_one_run_end(recordable):
     assert len(case.backend.captures) == 2
     assert case.session.executor.execute.call_count == 4
     case.session.executor.close.assert_not_called()
+
+
+@pytest.mark.parametrize("recordable", [2, {"tools": 2, "instruction": "branch-only guide"}],
+                         indirect=True)
+def test_shared_context_keeps_source_and_each_admitted_round(recordable):
+    case = recordable
+    source = deepcopy(case.session.context)
+    case.session.executor.execute.side_effect = [
+        ExecResult("tool", f"round-{number}-tool-{tool}\n".encode(), 0, .1)
+        for number in (1, 2) for tool in (1, 2)
+    ]
+    with _claim_decision(case.session, case.decision) as saved:
+        context = ResumeRecordContext(case.session, saved)
+        with open_recording(case.session, context.export) as (recorder, step):
+            context.accept_decision(step, saved)
+            first, _ = _execute_and_save_group(case.session, recorder, step, context, saved["actions"])
+            first_messages = deepcopy(context.messages)
+            following = following_evidence(saved, context.messages, 2)
+            context.account_decision(following["accounting"])
+            step = begin_recording_step(case.session, recorder)
+            context.accept_decision(step, following)
+            second, _ = _execute_and_save_group(case.session, recorder, step, context, following["actions"])
+            recorder.pause("controlled two-step budget")
+            messages = context.messages
+            assert messages[:42] == source["messages"]
+            assert messages[:len(first_messages)] == first_messages
+            assert sum(m.get("content") == "branch-only guide" for m in messages) == int(
+                saved["instruction"] is not None
+            )
+            tools = [m for m in messages[42:] if m["role"] == "tool"]
+            assert [m["tool_call_id"] for m in tools] == [
+                a["tool_call_id"] for evidence in (saved, following) for a in evidence["actions"]
+            ]
+            assert [m["content"].split(":", 2)[-1] for m in tools] == [
+                "round-1-tool-1\n", "round-1-tool-2\n", "round-2-tool-1\n", "round-2-tool-2\n",
+            ]
+            assert context.context["counters"]["n_calls"] == source["counters"]["n_calls"] + 2
+            assert context.context["resume"]["recording_model_requests"] == 1
+            for node, expected in ((first, first_messages), (second, messages)):
+                assert recorder.store.read_json(node.context)["messages"] == expected
+                assert recorder.store.read_json(node.input_position)["next_message"] == len(expected)
+            assert context.adoptions[-1]["stop"] == len(messages)
+            assert recorder.store.check_integrity().ok
+    assert case.session.context == source
