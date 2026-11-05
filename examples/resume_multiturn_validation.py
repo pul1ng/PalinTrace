@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
+import httpx
+
 from examples import resume_restore_validation as restoration
 from examples.resume_decision_validation import semantic_messages
 from examples.resume_record_validation import SOURCES, probe
@@ -54,16 +56,18 @@ def controlled_response(marker, number):
 
 
 @contextmanager
-def observe_run(entry, output):
+def observe_run(entry, output, *, controlled=True, fault=None):
     """Count actual boundaries while leaving restoration, tools and snapshots real."""
     native = load_native()
     original_restore, original_start = session_module.restore_environment, service_module.start_service
     original_execute, original_capture = RestoredExecutor.execute, BtrfsStateBackend.capture
     original_commit, original_branch = RecordStore.commit_node, Recorder.start_from_source
+    original_completion, original_send = native.litellm.completion, httpx.Client.send
     holder = {}
     counts = entry["counts"] = dict.fromkeys(("restores", "branch_starts", "model_requests",
                                              "tool_executions", "snapshots", "complete_nodes"), 0)
-    entry.update(requests=[], responses=[], actions=[], service_starts=[])
+    entry.update(requests=[], responses=[], actions=[], service_starts=[],
+                 http_requests=0, physical_tool_commands=0)
 
     def restore(*args, **kwargs):
         counts["restores"] += 1
@@ -85,15 +89,23 @@ def observe_run(entry, output):
         session = holder["session"]
         if number == 1:
             assert session.report["decision"]["request"] == public
+            expected = deepcopy(session.prefix.messages)
+            if entry["instruction"] is not None:
+                expected.append({"role": "user", "content": entry["instruction"]})
         else:
             with RecordStore.open(session.output / "record", read_only=True) as store:
                 step_id = session._record_attempt["step_id"]
                 model, = [op for op in store.list(Operation) if op.step_id == step_id and op.kind == "model"]
                 execution, = [e for e in store.list(Execution) if e.operation_id == model.operation_id]
                 assert store.read_json(execution.request) == public
+                previous = max(store.list(Node), key=lambda node: node.index)
+                expected = store.read_json(previous.context)["messages"]
+        assert semantic_messages(public["messages"]) == semantic_messages(expected)
         entry["requests"].append(public)
         write_json(output / f"request-{number:03}.json", public)
-        response = controlled_response(entry["marker"], number)
+        if fault == "model" and number == 2:
+            raise RuntimeError("acceptance second-round model failure")
+        response = controlled_response(entry["marker"], number) if controlled else original_completion(**request)
         raw = response.model_dump(mode="json")
         entry["responses"].append(raw)
         write_json(output / f"response-{number:03}.json", raw)
@@ -103,6 +115,9 @@ def observe_run(entry, output):
         session = holder["session"]
         assert executor is session.executor and executor._container.id == entry["container_id"]
         counts["tool_executions"] += 1
+        if fault == "tool_interrupt" and counts["tool_executions"] == 2:
+            raise KeyboardInterrupt("acceptance second-round tool interruption")
+        entry["physical_tool_commands"] += 1
         result = original_execute(executor, request)
         action = {"request": deepcopy(request), "container_id": executor._container.id,
                   "output": result.text, "exit_code": result.exit_code, "duration_sec": result.duration_sec}
@@ -111,6 +126,8 @@ def observe_run(entry, output):
         return result
 
     def capture(backend, *args):
+        if fault == "snapshot" and args[1].index == entry["source_index"] + 2:
+            raise RuntimeError("acceptance second-round snapshot failure")
         result = original_capture(backend, *args)
         counts["snapshots"] += 1
         return result
@@ -118,14 +135,24 @@ def observe_run(entry, output):
     def commit(store, node):
         result = original_commit(store, node)
         counts["complete_nodes"] += 1
+        if fault == "after_publication" and node.index == entry["source_index"] + 2:
+            raise OSError("acceptance failure after second-node publication")
         return result
+
+    def send(client, request, **kwargs):
+        if request.method == "POST" and request.url.path.endswith("/chat/completions"):
+            entry["http_requests"] += 1
+            body = json.loads(request.content)
+            assert semantic_messages(body["messages"]) == semantic_messages(entry["requests"][-1]["messages"])
+            write_json(output / f"http-request-{entry['http_requests']:03}.json", body)
+        return original_send(client, request, **kwargs)
 
     with ExitStack() as stack:
         for owner, name, wrapper in (
             (session_module, "restore_environment", restore), (service_module, "start_service", start),
             (Recorder, "start_from_source", branch), (native.litellm, "completion", complete),
             (RestoredExecutor, "execute", execute), (BtrfsStateBackend, "capture", capture),
-            (RecordStore, "commit_node", commit),
+            (RecordStore, "commit_node", commit), (httpx.Client, "send", send),
         ):
             stack.enter_context(patch.object(owner, name, wrapper))
         yield holder
@@ -237,7 +264,7 @@ def run_controlled_case(spec, output, client, llm_config, entry, *, max_steps, s
     entry.update(recording=recording, cleanup_confirmed=True, status="passed")
 
 
-def recover_nodes(case_output, output, *, indices=None):
+def recover_nodes(case_output, output, *, indices=None, absent_markers=()):
     """Restore saved branch nodes after the execution container has been removed."""
     case_output, output = Path(case_output).absolute(), Path(output).absolute()
     case = json.loads((case_output / "acceptance.json").read_text())
@@ -246,7 +273,8 @@ def recover_nodes(case_output, output, *, indices=None):
     outside_store(Path(case["source_store"]).parent, output)
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     if indices is None:
-        indices = (case["nodes"][0]["index"], case["nodes"][-1]["index"])
+        first, last = case["nodes"][0]["index"], case["nodes"][-1]["index"]
+        indices = (first,) if first == last else (first, last)
     result = {"status": "in_progress", "case_output": str(case_output), "output": str(output),
               "branch_run_id": case["branch_run_id"], "source_run_id": case["source_run_id"],
               "source_node_id": case["source_node_id"], "recoveries": []}
@@ -277,7 +305,10 @@ def recover_nodes(case_output, output, *, indices=None):
                 text = probe(restored, item["probes"], "cat " + shlex.quote(case["marker"]))
                 expected = case["marker_lines"][:index - case["source_index"]]
                 assert text.splitlines() == expected
-                item.update(status="passed", container_id=container, file_lines=expected,
+                for marker in absent_markers:
+                    probe(restored, item["probes"], "test ! -e " + shlex.quote(marker))
+                item.update(absent_markers=list(absent_markers),
+                            status="passed", container_id=container, file_lines=expected,
                             message_count=len(saved_context["messages"]), input_position=saved_position,
                             branch_run_id=restored.materials.run.run_id)
             report = restoration.checked_report(client, destination)
@@ -299,9 +330,8 @@ def recover_nodes(case_output, output, *, indices=None):
     return result
 
 
-def main(output, services_config=None, *, source_name="c20"):
-    spec = next(source for source in SOURCES if source.name == source_name)
-    max_steps = 4 if source_name == "c20" else 2
+def validate_source_case(spec, output, *, max_steps, services_config=None, expected_services=()):
+    """Run one controlled source case with its source and pool integrity audits."""
     output = Path(output).absolute()
     services_config = Path(services_config).resolve() if services_config is not None else None
     outside_store(spec.store.parent, output)
@@ -309,7 +339,7 @@ def main(output, services_config=None, *, source_name="c20"):
     llm_config = output / "controlled-llm.toml"
     llm_config.write_text('[llm]\nmodel="openai/resume-controlled"\napi_key="controlled-no-network"\n'
                           'base_url="https://controlled.invalid/v1"\n')
-    entry = {"status": "in_progress", "case": source_name,
+    entry = {"status": "in_progress", "case": spec.name,
              "services_config": str(services_config) if services_config is not None else None}
     started, client = time.monotonic(), None
     try:
@@ -321,8 +351,7 @@ def main(output, services_config=None, *, source_name="c20"):
         client = connect_docker(600)
         pool_before = restoration.pool_audit(client, materials.snapshot)
         run_controlled_case(spec, output, client, llm_config, entry, max_steps=max_steps,
-                            services=services_config,
-                            expected_services=("A", "B") if source_name == "c20" else ())
+                            services=services_config, expected_services=expected_services)
         pool_after = restoration.pool_audit(client, materials.snapshot)
         after = restoration.file_inventory(spec.store.parent)
         nodes_after = restoration.node_inventory(spec.store)
@@ -348,6 +377,13 @@ def main(output, services_config=None, *, source_name="c20"):
         write_json(output / "acceptance.json", entry)
     print(json.dumps({key: entry[key] for key in ("status", "branch_run_id", "counts", "duration_sec", "output")}))
     return entry
+
+
+def main(output, services_config=None, *, source_name="c20"):
+    spec = next(source for source in SOURCES if source.name == source_name)
+    return validate_source_case(spec, output, max_steps=4 if source_name == "c20" else 2,
+                                services_config=services_config,
+                                expected_services=("A", "B") if source_name == "c20" else ())
 
 
 if __name__ == "__main__":

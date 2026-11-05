@@ -34,7 +34,8 @@ The worktree began clean on `stage-5-5` at `284582b`. Each row was verified and 
 | 9. Cumulative branch report | `d9c3785` | Resume 302 passed; final progress/report-stage assertions 9 passed; variable tool counts and unknown costs retained |
 | 10. Real C20 four-round execution | `074e2f4` | Passed in 45.56 s; 4 model requests, 4 real tools, 4 Btrfs captures, C21–C24, one budget-paused RunEnd |
 | 11. Independent branch-node recovery | `8ea2792` | C21/C24 both passed in new containers after execution-container deletion; exact files, messages and input positions; 46.63 s |
-| 12. Cross-source multi-turn regression | This task's commit | All 3 sources passed; 2 requests/tools/nodes per source; all 6 new nodes independently restored |
+| 12. Cross-source multi-turn regression | `e89d06e` | All 3 sources passed; 2 requests/tools/nodes per source; all 6 new nodes independently restored |
+| 13. Long-run and final acceptance | This acceptance commit | Controlled 100 passed; starts 3/3 and real fault boundaries 4/4 passed; 17 node recoveries; Resume 302 passed, full 1809 passed / 3 skipped; live-model service faults recorded separately |
 
 Ruff and `git diff --check` passed for each completed task. The implementation checks observed existing LiteLLM/Pydantic warnings; final regression totals will be recorded separately.
 
@@ -108,3 +109,67 @@ TERM=xterm-256color LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -B \
 ```
 
 Use `--case django_middle` or `--case astropy_long` for the other two sources; use `--recover-from` with a fresh output directory to restore the two nodes.
+
+## Task 13: long runs, multiple starts and final evidence
+
+The additional opt-in experiments are in `examples/resume_multiturn_experiments.py`, with modes `controlled100`, `real100`, `starts` and `faults`. Each mode requires a fresh output directory. The live mode accepts the existing private model configuration via `--llm-config`; requests and HTTP bodies are captured without credentials.
+
+The controlled 100-round experiment passed in 278.94 seconds under `outputs/resume/261106_004858_multiturn/controlled100/`. It restored C20 once, started A/B once each, and performed exactly **100 model requests, 100 real tool calls, 100 Btrfs captures and 100 complete nodes**, with one budget-paused RunEnd. The controlled model made zero provider HTTP requests.
+
+Branch Run `43f1ab54d32b479a9a93191fc9d697f7` begins at C21 `af03b64697594d6abecf155a45685fbe` and ends at C120 `690f07391f1e46f3ac1404e3ecb4fca8`, passing the parent's C40 endpoint. Actual requests grew from 43 to 241 messages; C120 saved 243 messages. Every request and node passed the full-prefix and accepted-call reconstruction checks.
+
+After execution-container deletion, `controlled100-recovery/recovery.json` confirmed independent C120 restoration with 100 ordered file markers, exact saved context and input position, and cleanup. Source files, node references and manifest remained unchanged.
+
+The initial live-model attempt, preserved separately in `real100/`, used the legacy configuration's `openai/deepseek-v4-flash` name. The gateway rejected its first actual HTTP request as an unknown model. It made one model request, zero tools and zero new nodes; the last complete node remained source C20. The request failure and cleanup were recorded in 34.58 seconds.
+
+A second fresh attempt in `real100-verified/` used the previously accepted `openai/commandcode/deepseek/deepseek-v4.1-flash:max[1m]` name. The gateway recognized it but returned `No available providers`. It also stopped at its first request with zero tools/nodes and source C20 as the last complete node; cleanup and source audits passed in 28.79 seconds.
+
+The model catalogue was read once and saved in `model-catalog.json`. A third independent attempt in `real100-catalog/` used its advertised `openai/deepseek-v4.1-flash` name and stopped on the first request with an upstream `Invalid 'Authorization' header or token` error, in 31.00 seconds. It also produced zero successful decisions, tools and new nodes, retained C20 as the last complete node, and confirmed cleanup and source integrity.
+
+Thus the live-model result is **a model-service fault at the first request, with zero complete new rounds and no branch node**. Each of the three isolated attempts sent exactly one model request and one HTTP request; none retried automatically. No submission content or natural stopping round was obtained. A functioning provider and valid upstream authorization are required to obtain a natural model result. These are classified failure results permitted by the acceptance checklist, and are not reported as a successful live-model continuation.
+
+All three same-source starts passed in `starts/starts.json` (141.51 seconds), using source Run `a9261e45064b44029fa21e2cd2c3635e`, the same manifest, controlled model and instruction:
+
+| Start / source Node | Prepared services | Branch Run | New nodes | Actual request messages |
+| --- | --- | --- | --- | --- |
+| C1 / `866611f8dd0f4e5dbfcc133512838cc0` | None | `3ddcc208c3074664a04d8a0f09b9b2ae` | C2, C3 | 5, 7 |
+| C12 / `34744bee9f454be79bdfd119b03ad255` | A once | `9b4d3d07a9664948b3e2ab2d5eae6de9` | C13, C14 | 27, 29 |
+| C31 / `6e2e3ddd309f4bc4b85c5b0ef132dc45` | None | `6cc9318931ea4cca992538418c52d5a0` | C32, C33 | 65, 67 |
+
+Each case made two requests and two real tools, saved two complete nodes and paused on budget. C12's real A request returned `PALIN_SERVICE_A_OK`. All three branch Runs and workspaces were distinct. Their independently recovered last nodes contained their own two markers and neither of the other branches' marker files. Source audits and execution/recovery cleanup passed for each case.
+
+All four real fault scenarios passed in `faults/faults.json` (199.38 seconds). Their Resume reports correctly remain failed or interrupted; the acceptance result means the injected boundary, evidence and recovery checks passed.
+
+| Second-round boundary | Model requests | Tool attempts / physical commands | Complete nodes | Actual stop | Independently restored |
+| --- | ---: | --- | ---: | --- | --- |
+| Model request failure | 2 | 1 / 1 | 1, through C21 | failed, model stage | C21 |
+| Tool interruption | 2 | 2 / 1 | 1, through C21 | interrupted; RunEnd cancelled | C21 |
+| Snapshot failure before publication | 2 | 2 / 2 | 1, through C21 | failed, commit stage | C21 |
+| Error after C22 publication | 2 | 2 / 2 | 2, through C22 | failed, commit stage | C21 and C22 |
+
+Each case made zero third-round requests. Actual Store nodes, report totals and the RunEnd's last node agreed. The interruption preserves an unknown second tool attempt without claiming a second physical command. All five saved nodes recovered the appropriate file prefix, context and input position after execution-container removal. Source file/node/manifest audits and temporary-resource cleanup passed.
+
+Final checks are saved in `checks/verification.json` with command, exit code, duration, log/JUnit paths and SHA-256 hashes:
+
+| Check | Actual result |
+| --- | --- |
+| Resume tests | 302 passed, 0 failed, 0 skipped |
+| Full regression | 1809 passed, 0 failed, 3 skipped |
+| Ruff (`src tests examples`) | Passed |
+| `git diff --check` | Passed |
+
+The three skips are the existing ordinary-Record parameter cases in `tests/record/test_replay_verification_scope.py` that require an external source. They do not skip any real source used in this acceptance. Resume and full pytest took 41.05 and 138.13 seconds respectively; their counts overlap and must not be summed.
+
+The full machine-readable conclusion is `outputs/resume/261106_004858_multiturn/final-acceptance.json`. It links the evidence JSON files and their SHA-256 hashes, the regression logs and JUnit, and all live-model failure results. Its status is `completed_with_live_model_faults`.
+
+## Final conclusions
+
+- **Complete conversation: passed.** Actual model-call requests matched the full source prefix, the instruction appended once, and all prior accepted branch exchanges. Four-round requests were 43/45/47/49 messages; the controlled long run retained the full history through request 100. Live first-request HTTP bodies were also compared with their public request.
+- **Continuous files and environment: passed.** Four-round and 100-round controlled cases each restored once, prepared A/B once and used one execution container/workspace throughout. Later tools observed earlier writes.
+- **Independent restoration: passed.** Seventeen saved branch nodes were actually restored in new containers after their execution containers were removed, including C21/C24, C120, all six cross-source nodes, three same-source endpoints and five fault-case nodes. Files, exact contexts and input positions matched.
+- **Real-model stopping result: fault.** The live attempts completed zero new rounds and stopped at C20 on their first model requests because of gateway/provider/authorization failures. Natural submission or budget exhaustion with the real model remains unverified and requires a functioning provider with valid upstream authorization.
+- **100-round budget: passed with the controlled model.** Exactly 100 requests, tools and nodes C21–C120; no request 101; one budget-paused RunEnd; C120 independently recovered all 100 markers.
+- **Multiple starting points: 3/3 passed.** C1/C12/C31 selected the correct prefixes and services and created isolated branches.
+- **Cross-source regression: 3/3 passed.** Astropy 14182, Django 10914 and long Astropy 12907 each produced and restored two consecutive nodes.
+
+The 13 meta tasks have implementation or acceptance commits. The remaining external condition is live-model provider availability and authorization; this acceptance does not claim a successful natural live-model continuation. No additional product feature was introduced.
