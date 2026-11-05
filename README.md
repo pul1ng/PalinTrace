@@ -14,6 +14,8 @@ PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文�
 
 https://github.com/user-attachments/assets/c46a93c8-3cd9-43a4-b142-0c557c4bb7b7
 
+[下载演示视频（MP4，2.8 MB）](docs/media/palintrace-demo-zh.mp4?raw=true)
+
 ## Quickstart
 
 以下命令在项目根目录执行。安装和配置完成后，通过脚本启动 Record；生成的轨迹与快照可用于 Replay，并为后续 Resume 提供输入。

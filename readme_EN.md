@@ -12,6 +12,8 @@ PalinTrace links an agent's model interactions, tool calls, execution results, c
 
 https://github.com/user-attachments/assets/c46a93c8-3cd9-43a4-b142-0c557c4bb7b7
 
+[Download the demo (MP4, 2.8 MB)](docs/media/palintrace-demo-zh.mp4?raw=true)
+
 ## Quickstart
 
 Run the following commands from the project root. After installation and configuration, use the script to start Record. The resulting traces and snapshots can be used for Replay and provide inputs for future Resume workflows.
