@@ -39,7 +39,10 @@ def recordable(tmp_path, session, llm_config, response, execution_config, monkey
     context["counters"]["consecutive_format_errors"] = 0
     for key in ("extra_template_vars", "template_vars", "clock", "global_stats", "model_accounting"):
         context.setdefault(key, {})
-    context["config"]["model"]["observation_template"] = "{{output.returncode}}:{{output.output}}"
+    context["template_vars"]["model_name"] = context["config"]["model"]["model_name"]
+    context["config"]["model"]["observation_template"] = (
+        "{{model_name}}:{{output.returncode}}:{{output.output}}"
+    )
     source = tmp_path / "source-record"
     with RecordStore.create(source) as store:
         _, node, parent_next, *_ = _record_run(store, "parent", payloads={
@@ -102,6 +105,21 @@ def test_public_entry_rejects_duplicate_without_new_tools_or_nodes(recordable):
     assert len(case.backend.captures) == 1
     with RecordStore.open(case.session.output / "record") as store:
         assert store.list(Node) == (node,)
+
+
+def test_tool_observation_uses_the_selected_branch_model(recordable):
+    session = recordable.session
+    assert session.prefix.context["template_vars"]["model_name"] == "parent-A"
+    node = record_resume_step(session, recordable.decision)
+    with RecordStore.open(session.output / "record") as store:
+        context = store.read_json(node.context)
+        assert context["config"]["model"]["model_name"] == "openai/M"
+        assert context["template_vars"]["model_name"] == "openai/M"
+        assert context["messages"][-1]["content"] == "openai/M:0:marker\n"
+        trace = read_call(store, node.tool_execution_ids[-1])
+        assert store.read_json(trace.events[-1].payload)["messages"] == [context["messages"][-1]]
+        assert store.read_bytes(trace.events[1].payload) == b"marker\n"
+    assert session.prefix.context["template_vars"]["model_name"] == "parent-A"
 
 
 @pytest.mark.parametrize("recordable,submit_index", [(2, 0), (2, 1), (1, 0)], indirect=["recordable"])

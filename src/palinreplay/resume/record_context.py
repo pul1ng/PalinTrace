@@ -23,7 +23,7 @@ class ResumeRecordContext:
         counters["consecutive_format_errors"] = 0
         counters["cost"] = counters.get("cost", 0) + (accounting["cost"] or 0)
         self.context.setdefault("template_vars", {}).update(
-            n_model_calls=counters["n_calls"], model_cost=counters["cost"],
+            model_name=evidence["model"], n_model_calls=counters["n_calls"], model_cost=counters["cost"],
         )
         self.context["resume"] = {
             "inherited_input_position": self.inherited_position,

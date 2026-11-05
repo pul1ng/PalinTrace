@@ -15,7 +15,7 @@ with restore_resume_start(start, output=output, services_config=services) as ses
 
 The entry accepts one saved decision per active session. It checks messages, assistant response, raw response, ordered tool IDs/arguments and accounting against private copies of the fourth-stage evidence. A successful claim is persisted before execution and cannot be retried after failure. Each real tool return is persisted before the next tool starts. Native mini observation formatting and Record admission preserve actual output, exit code and message positions. Only a fully admitted group reaches `Recorder.commit_step()`.
 
-A native submission stops tool execution immediately and delivers the submitting tool's `exit` message. A single-tool submission produces a complete node. In a multi-tool group, earlier results remain recorded, later tools are skipped, and `record_resume_step()` returns `None`. The RunEnd and the recording and session reports mark the group `incomplete`.
+A native submission stops tool execution immediately and delivers the submitting tool's `exit` message. A single-tool submission produces a complete node. In a multi-tool group, earlier results remain recorded, later tools are skipped, and `record_resume_step()` returns `None`. The RunEnd and the recording and session reports mark the group `incomplete`. Tool message templates use the selected branch model name.
 
 The branch Store lives at `session.output / "record"`. Its protected config pins the source Store, Run, Node, State and original encoded materials. Its first local node has index `source.index + 1`, independent Run/Node IDs and no external ID in the local parent fields. Resume has no pinned historical endpoint; Replay retains its endpoint checks. The source Record and Btrfs pool remain retained dependencies. Independent recovery means recovery after the execution container has been removed.
 
@@ -119,3 +119,5 @@ All eight meta tasks are complete. There are no blocked or unfinished acceptance
 ## Post-review regression
 
 In `outputs/resume/261105_224340_stage5_review_fixes/`, the two real multi-tool submission cases accepted the native exit message and ended `incomplete` with zero nodes. One tool executed when the submitting command came first, and two executed when it came last. A controlled comparison with Record matched the tool events, accepted messages and RunEnd status in both orders.
+
+All four source recordings produced and recovered their expected nodes (C21, C1, C2 and C23), each with the selected branch model name in its template variables. A focused test also checked the rendered tool message after a model switch. In the full suite, 1,784 tests passed and 3 were skipped.
