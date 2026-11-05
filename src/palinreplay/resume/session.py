@@ -30,6 +30,8 @@ class ResumeSession:
     output: Path
     report: dict
     _decision_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
+    _decision_evidence: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+    _record_attempt: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @property
     def report_path(self):
