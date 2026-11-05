@@ -68,7 +68,9 @@ def decision_boundary(session, counts, *, controlled=None):
         assert counts["model_requests"] == 1
         evidence = json.loads(session.report_path.read_text())["decision"]
         public = {key: value for key, value in request.items() if key not in ("api_key", "api_base")}
-        assert evidence["request"] == public and evidence["status"] == "prepared"
+        assert evidence["request"] == public and evidence["status"] == "requesting"
+        assert evidence["model_requests"] == 1
+        assert evidence["remaining_steps"] == session.start.max_steps - 1
         assert request["api_key"] not in json.dumps(session.report)
         assert public["num_retries"] == public["max_retries"] == 0
         expected = deepcopy(session.prefix.messages)

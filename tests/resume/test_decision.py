@@ -160,8 +160,9 @@ def test_failed_evidence_write_never_delivers_prepared_request(session, llm_conf
         raise OSError("evidence unavailable")
 
     monkeypatch.setattr("palinreplay.resume.decision.write_json", fail)
-    with pytest.raises(OSError, match="evidence unavailable"):
+    with pytest.raises(ResumeDecisionError, match="evidence unavailable") as raised:
         prepare_resume_decision(session, llm_config=llm_config)
+    assert raised.value.category == "evidence"
     assert session.report["decision"]["model_requests"] == 0
     assert not session.executor.mock_calls
 
@@ -193,6 +194,8 @@ def test_decision_queries_once_after_evidence_and_does_not_execute(
 
     def transport(**request):
         evidence = json.loads(session.report_path.read_text())["decision"]
+        assert evidence["status"] == "requesting" and evidence["model_requests"] == 1
+        assert evidence["remaining_steps"] == session.start.max_steps - 1
         public = {k: v for k, v in request.items() if k not in ("api_key", "api_base")}
         assert evidence["request"] == public
         assert request["api_key"] == "decision-test-secret"
@@ -469,3 +472,56 @@ def test_inactive_executor_cannot_send_a_decision(session, monkeypatch, state):
         decide_resume_start(session)
     assert "decision" not in session.report
     transport.assert_not_called()
+
+
+@pytest.mark.parametrize("fault,status", [(KeyboardInterrupt, "interrupted"), (TimeoutError, "failed")])
+def test_caught_request_failure_remains_terminal(
+    prepared, session, llm_config, monkeypatch, fault, status,
+):
+    setup = prepared.session
+    setup.materials.context.update(deepcopy(session.prefix.context))
+    error = fault("request interrupted")
+    transport = Mock(side_effect=error)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    with restore_resume_start(setup.start, setup.output, services_config=prepared.path) as live:
+        expected_error = KeyboardInterrupt if fault is KeyboardInterrupt else ResumeDecisionError
+        with pytest.raises(expected_error) as caught:
+            decide_resume_start(live, llm_config=llm_config)
+        if fault is KeyboardInterrupt:
+            assert caught.value is error
+        saved = json.loads(live.report_path.read_text())["decision"]
+        assert saved["status"] == status and saved["error"]["error_type"] == fault.__name__
+        assert saved["model_requests"] == 1 and saved["remaining_steps"] == 1
+        assert saved["decisions"] == 0 and saved["actions"] == []
+        with pytest.raises(RecordUsageError, match="already attempted"):
+            decide_resume_start(live, llm_config=llm_config)
+    final = json.loads(live.report_path.read_text())
+    assert final["decision"] == saved and final["status"] == "failed"
+    assert final["caller"]["status"] == "completed" and final["cleanup_confirmed"]
+    assert final["restore_status"] == "passed" and final["preparation"]["status"] == "ready"
+    transport.assert_called_once()
+
+
+@pytest.mark.parametrize("at_status", ["requesting", "returned", "succeeded"])
+def test_decision_publication_failure_preserves_actual_attempts(
+    session, llm_config, response, monkeypatch, at_status,
+):
+    from palinreplay.storage.io import write_json
+
+    def fail_at(path, report, **kwargs):
+        if report["decision"]["status"] == at_status:
+            raise OSError("journal unavailable")
+        write_json(path, report, **kwargs)
+
+    transport = Mock(return_value=response)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    monkeypatch.setattr("palinreplay.resume.decision.write_json", fail_at)
+    with pytest.raises(ResumeDecisionError) as caught:
+        decide_resume_start(session, llm_config=llm_config)
+    assert caught.value.category == "evidence"
+    decision = json.loads(session.report_path.read_text())["decision"]
+    assert decision["model_requests"] == transport.call_count == int(at_status != "requesting")
+    assert decision["remaining_steps"] == session.start.max_steps - transport.call_count
+    assert decision["status"] == "failed" and decision["decisions"] == 0 and not decision["actions"]
+    if transport.call_count:
+        assert decision["raw_response"] == response.model_dump(mode="json")

@@ -42,8 +42,10 @@ def _failed_decision(session, category, error):
     details = {"category": category, **exception_evidence(error)}
     if getattr(error, "status_code", None) is not None:
         details["status_code"] = error.status_code
-    evidence.update(status="failed", error=details, actions=[])
-    failure = ResumeDecisionError(category, evidence)
+    interrupted = not isinstance(error, Exception)
+    evidence.update(status="interrupted" if interrupted else "failed", error=details,
+                    decisions=0, actions=[])
+    failure = error if interrupted else ResumeDecisionError(category, evidence)
     try:
         write_json(session.report_path, session.report, replace=True)
     except BaseException as write_error:
@@ -59,26 +61,31 @@ def decide_resume_start(session, *, instruction=None, llm_config=None):
 
 def _request_decision(session, prepared):
     evidence = session.report["decision"]
-    evidence.update(status="requesting", model_requests=1,
-                    remaining_steps=session.start.max_steps - 1)
+    dispatched = False
+    category = "evidence"
     try:
+        evidence.update(status="requesting", model_requests=1,
+                        remaining_steps=session.start.max_steps - 1)
+        write_json(session.report_path, session.report, replace=True)
+        category = "request"
+        dispatched = True
         response = complete_decision_request(prepared.request, prepared.credentials)
-    except Exception as error:
-        raise _failed_decision(session, "request", error) from None
-    try:
+        category = "tool_format"
         raw = response.model_dump(mode="json")
         evidence.update(status="returned", raw_response=raw, usage=deepcopy(raw.get("usage")))
         assistant = deepcopy(raw["choices"][0]["message"])
         evidence.update(assistant_message=assistant, **decision_cost(prepared.native_model, response))
-    except Exception as error:
-        raise _failed_decision(session, "tool_format", error) from None
-    write_json(session.report_path, session.report, replace=True)
-    try:
+        category = "evidence"
+        write_json(session.report_path, session.report, replace=True)
+        category = "tool_format"
         actions = parse_decision_actions(prepared.native_model, response)
-    except Exception as error:
-        raise _failed_decision(session, "tool_format", error) from None
-    evidence.update(status="succeeded", decisions=1, actions=deepcopy(actions))
-    write_json(session.report_path, session.report, replace=True)
+        category = "evidence"
+        evidence.update(status="succeeded", decisions=1, actions=deepcopy(actions))
+        write_json(session.report_path, session.report, replace=True)
+    except BaseException as error:
+        if not dispatched:
+            evidence.update(model_requests=0, remaining_steps=session.start.max_steps)
+        raise _failed_decision(session, category, error) from None
     accounting = {key: deepcopy(evidence[key]) for key in (
         "inherited_counters", "max_steps", "model_requests", "decisions", "remaining_steps",
         "usage", "cost", "cost_known",
@@ -131,6 +138,7 @@ def _prepare_decision(session, instruction, llm_config):
         "remaining_steps": session.start.max_steps, "usage": None,
         "cost": None, "cost_known": False, "actions": [],
     }
+    category = "config"
     try:
         messages = build_resume_messages(session, instruction=instruction)
         evidence["messages"] = deepcopy(messages)
@@ -147,10 +155,11 @@ def _prepare_decision(session, instruction, llm_config):
             "timeout": credentials.timeout, "num_retries": 0, "max_retries": 0,
         }
         model, request = prepare_decision_request(messages, config)
-    except Exception as error:
-        raise _failed_decision(session, "config", error) from None
-    evidence.update(status="prepared", model=credentials.model, request=deepcopy(request))
-    write_json(session.report_path, session.report, replace=True)
+        category = "evidence"
+        evidence.update(status="prepared", model=credentials.model, request=deepcopy(request))
+        write_json(session.report_path, session.report, replace=True)
+    except BaseException as error:
+        raise _failed_decision(session, category, error) from None
     return PreparedResumeDecision(messages, request, credentials, model)
 
 
