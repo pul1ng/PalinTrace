@@ -1,14 +1,17 @@
+import base64
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 import palinreplay.resume.services as services_module
 import palinreplay.resume.session as session_module
 from palinreplay.core.errors import IntegrityError, RecordUsageError
+from palinreplay.replay.services import PreparationError
 from palinreplay.resume import restore_resume_start, select_resume_start
 from palinreplay.resume.services import load_resume_service_input, resolve_resume_services
-from palinreplay.sandbox.base import ExecResult
+from palinreplay.sandbox.base import ExecResult, SandboxTimeout
 from tests.replay.test_service_config import _manifest, service
 from tests.resume import test_session
 
@@ -189,3 +192,66 @@ def test_explicit_legacy_readiness_uses_existing_preparation(prepared):
         entry, = saved["services"]
         assert len(entry["readiness"]) == 1
         assert entry["final_readiness"]["exit_code"] == 0
+
+
+@pytest.mark.parametrize("failed_service", ["A", "B"])
+@pytest.mark.parametrize("fault", ["exit", "timeout"])
+@pytest.mark.parametrize("borrowed_client", [False, True])
+def test_failed_preparation_stops_once_and_cleans_resources(
+    prepared, failed_service, fault, borrowed_client,
+):
+    setup = prepared.session
+    document = json.loads(prepared.path.read_text())
+    document["services"].append(service("C", readiness_command=None))
+    prepared.path.write_text(json.dumps(document))
+    client = Mock() if borrowed_client else None
+    timeout = SandboxTimeout("startup timed out; environment discarded")
+    calls = []
+
+    def execute(command, **kwargs):
+        calls.append(command)
+        if command == "start " + failed_service:
+            if fault == "timeout":
+                raise timeout
+            return ExecResult(command, b"failed\xff\n", 17, 0.5)
+        return ExecResult(command, b"started\x00\n", 0, 0.25)
+
+    setup.executor.exec.side_effect = execute
+    with pytest.raises(SandboxTimeout if fault == "timeout" else PreparationError) as caught:
+        with restore_resume_start(setup.start, setup.output, client, services_config=prepared.path):
+            pytest.fail("failed startup delivered")
+    if fault == "timeout":
+        assert caught.value is timeout
+    assert calls == (["start A"] if failed_service == "A" else ["start A", "start B"])
+    report = json.loads((setup.output / "report.json").read_text())
+    assert caught.value.resume_report == report
+    assert report["restore_status"] == "passed" and report["r1"]["status"] == "passed"
+    assert report["preparation"]["status"] == "failed"
+    assert report["caller"]["status"] == "not_started" and report["cleanup_confirmed"]
+    entries = report["preparation"]["services"]
+    assert [entry["name"] for entry in entries] == [command[-1] for command in calls]
+    if failed_service == "B":
+        assert entries[0]["status"] == "ready"
+        startup = entries[0]["startup"]
+        assert startup["exit_code"] == 0 and startup["duration_sec"] == 0.25
+        assert base64.b64decode(startup["output_base64"]) == b"started\x00\n"
+    failed = entries[-1]
+    assert failed["status"] == "failed"
+    startup = failed["startup"]
+    if fault == "timeout":
+        assert startup["status"] == "unknown" and "exit_code" not in startup
+        assert startup["error_type"] == "SandboxTimeout" and startup["duration_sec"] >= 0
+    else:
+        assert startup["exit_code"] == 17 and startup["duration_sec"] == 0.5
+        assert base64.b64decode(startup["output_base64"]) == b"failed\xff\n"
+    assert report["preparation"] == json.loads((setup.output / "preparation.json").read_text())
+    assert report["cleanup"]["executor"] == report["cleanup"]["restore"] == "closed"
+    setup.executor.close.assert_called_once()
+    setup.restored.close.assert_called_once()
+    if borrowed_client:
+        client.close.assert_not_called()
+        setup.connect.assert_not_called()
+        assert report["cleanup"]["client"] == "caller_managed"
+    else:
+        setup.connect.return_value.close.assert_called_once()
+        assert report["cleanup"]["client"] == "closed"
