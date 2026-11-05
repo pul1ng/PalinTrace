@@ -29,6 +29,9 @@ data/
 # Generated deliverables
 /outputs/
 
+# Local validation reports and evidence
+/docs/validation/
+
 # Snapshot optimization experiment outputs
 /docs/dev/*
 

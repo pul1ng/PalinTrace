@@ -10,8 +10,6 @@ PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文�
 - **Replay · 历史重执行（已实现 MVP）**：从已提交的来源节点恢复环境，按固定历史真实执行后续工具，不调用模型、不需要模型凭据；保存真实结果与快照，确定的退出码不符或框架故障会停止执行。完整一致性校验另列为后续 Verify 工作。
 - **Resume · 分叉续跑（分阶段实现）**：已支持选定历史节点并校验恢复对话与可写环境；新决策和独立分支录制待后续实现。
 
-Replay MVP 的交付范围、对应提交和真实实验结果见[最终验收摘要](docs/validation/replay-mvp-20261104.md)。
-
 ## 演示视频
 
 https://github.com/user-attachments/assets/26b0c034-820d-426f-8b40-8113f72c9520
@@ -107,7 +105,6 @@ with restore_resume_start(start) as session:
 当前阶段只恢复起点，不初始化模型、重执行历史工具、准备服务或建立分支录制。
 R1 范围是 `rootfs-files-v1`，完整排除项、属性和限制保存在报告中；它不恢复进程内存和运行中的服务。
 明确包含 `exit` 消息的终止前缀会被拒绝，父 Run 已结束不妨碍恢复中间节点。
-可复现验收见 [Resume 恢复验证](docs/validation/resume-restore-20261105/README.md)。
 
 ## Getting Started
 

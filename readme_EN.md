@@ -8,8 +8,6 @@ PalinTrace links an agent's model interactions, tool calls, execution results, c
 - **Replay · Historical re-execution (MVP implemented)**: Restore a committed source node and execute subsequent tools from a fixed history without model requests or credentials. Save actual results and snapshots; stop on a definite exit-code mismatch or a framework failure. Full consistency checking is planned as separate Verify work.
 - **Resume · Fork and continue (planned)**: Restore the agent context and task environment at any saved node, optionally provide new instructions, and continue on an independent trajectory while preserving the original history.
 
-See the [final Replay MVP acceptance summary (Chinese)](docs/validation/replay-mvp-20261104.md) for the delivered scope, implementation commits, and real experiment results.
-
 ## Demo (Chinese)
 
 https://github.com/user-attachments/assets/26b0c034-820d-426f-8b40-8113f72c9520
