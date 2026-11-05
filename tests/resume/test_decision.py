@@ -39,3 +39,22 @@ def test_inherited_messages_are_an_independent_copy(session):
     messages.append({"role": "user", "content": "branch only"})
     assert session.prefix.context == saved
     assert session.prefix.input_position == {"next_message": 42}
+
+
+@pytest.mark.parametrize("instruction", [None, "下一步先检查 B 的日志", "  keep spacing\n"])
+def test_optional_instruction_is_appended_once(session, instruction):
+    saved = deepcopy(session.prefix.messages)
+    for _ in range(2):
+        messages = build_resume_messages(session, instruction=instruction)
+        assert messages[:42] == saved
+        assert len(messages) == 42 + (instruction is not None)
+        if instruction is not None:
+            assert messages[42] == {"role": "user", "content": instruction}
+    assert session.prefix.messages == saved
+    assert session.prefix.input_position["next_message"] == 42
+
+
+@pytest.mark.parametrize("instruction", ["", " \n", 1])
+def test_instruction_requires_text(session, instruction):
+    with pytest.raises(ValueError, match="instruction"):
+        build_resume_messages(session, instruction=instruction)
