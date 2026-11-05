@@ -1,4 +1,4 @@
-"""One model decision from a restored boundary, without execution or node commits."""
+"""Prepare the initial Resume decision and record later branch model calls."""
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -13,6 +13,7 @@ from palinreplay.agents.mini import (
     prepare_decision_request,
 )
 from palinreplay.core.errors import RecordUsageError
+from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
 from palinreplay.llm import LLMConfig, mini_model_name
 from palinreplay.resume.report import exception_evidence
 from palinreplay.storage.io import write_json
@@ -120,6 +121,40 @@ def prepare_branch_decision(session, messages, *, llm_config=None):
     }
     model, request = prepare_decision_request(messages, config)
     return PreparedResumeDecision(messages, request, credentials, model)
+
+
+def record_branch_decision(session, step, context, *, llm_config=None):
+    """Request and adopt a new decision through the current Step's model port."""
+    prepared = prepare_branch_decision(session, context.messages, llm_config=llm_config)
+    accounting = {}
+
+    def execute(request):
+        session._record_attempt["model_requests"] += 1
+        response = complete_decision_request(request, prepared.credentials)
+        raw = response.model_dump(mode="json")
+        call.observe("response", Payload.json(raw))
+        accounting.update(model_requests=1, usage=deepcopy(raw.get("usage")),
+                          **decision_cost(prepared.native_model, response))
+        return response
+
+    adapter = CallAdapter(
+        name="resume.model", execute=execute, capture_request=Payload.json,
+        capture_context=lambda request: Payload.json(prepared.messages),
+        capture_result=lambda response: ResultCapture(
+            Payload.json(response.model_dump(mode="json")), "litellm-sdk-response-json",
+            details={"accounting": deepcopy(accounting), "actual_model_calls": 1},
+            limitations=("SDK representation, not HTTP wire bytes.",),
+        ),
+        visibility="observed-attempt",
+    )
+    call = step.model(adapter, prepared.request)
+    response = call.invoke()
+    context.account_decision(accounting)
+    raw = response.model_dump(mode="json")
+    assistant = deepcopy(raw["choices"][0]["message"])
+    actions = parse_decision_actions(prepared.native_model, response)
+    context.accept_response(step, call, assistant, actions)
+    return ResumeDecision(prepared.messages, assistant, raw, actions, accounting)
 
 
 def prepare_resume_decision(session, *, instruction=None, llm_config=None):

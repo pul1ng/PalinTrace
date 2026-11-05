@@ -2,7 +2,9 @@ from copy import deepcopy
 
 import pytest
 
-from palinreplay.core.models import Node, Run, RunEnd, Step
+from palinreplay.core.models import Execution, Node, Operation, Run, RunEnd, Step, ToolGroup
+from palinreplay.record.calls import read_call
+from palinreplay.resume.decision import record_branch_decision
 from palinreplay.resume.record import _claim_decision, _execute_and_save_group
 from palinreplay.resume.record_context import ResumeRecordContext
 from palinreplay.resume.recording import begin_recording_step, finish_recording, open_recording
@@ -108,3 +110,93 @@ def test_shared_context_keeps_source_and_each_admitted_round(recordable):
             assert context.adoptions[-1]["stop"] == len(messages)
             assert recorder.store.check_integrity().ok
     assert case.session.context == source
+
+
+def test_later_request_and_answer_are_recorded_in_their_own_step(recordable, llm_config, response):
+    case = recordable
+    saved_first = deepcopy(case.session._decision_evidence)
+    second_response = response.model_copy(deep=True)
+    second_response.id = "second-live-response"
+    for index, tool in enumerate(second_response.choices[0].message.tool_calls):
+        tool.id = f"second-live-tool-{index}"
+    case.session.executor.execute.side_effect = [ExecResult("tool", b"marker\n", 0, .1)] * 4
+    with _claim_decision(case.session, case.decision) as saved:
+        context = ResumeRecordContext(case.session, saved)
+        with open_recording(case.session, context.export) as (recorder, step):
+            context.accept_decision(step, saved)
+            first, _ = _execute_and_save_group(case.session, recorder, step, context, saved["actions"])
+            expected_messages = deepcopy(context.messages)
+            step = begin_recording_step(case.session, recorder)
+
+            def complete(request, credentials):
+                operations = [op for op in recorder.store.list(Operation)
+                              if op.step_id == step.step.step_id and op.kind == "model"]
+                operation, = operations
+                execution, = [e for e in recorder.store.list(Execution)
+                              if e.operation_id == operation.operation_id]
+                assert recorder.store.read_json(execution.request) == request
+                assert recorder.store.read_json(execution.context) == expected_messages
+                assert read_call(recorder.store, execution.execution_id).phase == "dispatched"
+                return second_response
+
+            case.complete.side_effect = complete
+            following = record_branch_decision(case.session, step, context, llm_config=llm_config)
+            assert following.messages == expected_messages
+            second, _ = _execute_and_save_group(case.session, recorder, step, context, following.actions)
+            recorder.pause("two model requests")
+            assert len(recorder.store.list(ToolGroup)) == 2
+            for node, actual_calls in ((first, 0), (second, 1)):
+                trace = read_call(recorder.store, node.model_execution_id)
+                result = next(event for event in trace.events if event.kind == "result")
+                details = recorder.store.read_json(result.details)["backend"]
+                assert details["actual_model_calls"] == actual_calls
+                assert trace.operation.step_id == node.step_id
+            trace = read_call(recorder.store, second.model_execution_id)
+            result = next(event for event in trace.events if event.kind == "result")
+            assert recorder.store.read_json(result.payload) == following.raw_response
+            group = recorder.store.list(ToolGroup)[-1]
+            assert group.tool_call_ids == tuple(action["tool_call_id"] for action in following.actions)
+            assert group.step_id == second.step_id
+            assert recorder.store.check_integrity().ok
+        finish_recording(case.session)
+    assert case.complete.call_count == 2
+    assert case.session._record_attempt["model_requests"] == 1
+    assert case.session._record_attempt["complete_nodes"] == 2
+    assert case.session._decision_evidence == saved_first
+
+
+@pytest.mark.parametrize("fault", ["request", "parse"])
+def test_second_model_failure_retains_its_request_and_exposed_response(
+    recordable, llm_config, response, fault,
+):
+    case = recordable
+    if fault == "request":
+        case.complete.side_effect = RuntimeError("second request failed")
+    else:
+        malformed = response.model_copy(deep=True)
+        malformed.choices[0].message.tool_calls[0].function.arguments = "not json"
+        case.complete.return_value = malformed
+    with pytest.raises(Exception) as failed:
+        with _claim_decision(case.session, case.decision) as saved:
+            context = ResumeRecordContext(case.session, saved)
+            with open_recording(case.session, context.export) as (recorder, step):
+                context.accept_decision(step, saved)
+                _execute_and_save_group(case.session, recorder, step, context, saved["actions"])
+                step = begin_recording_step(case.session, recorder)
+                record_branch_decision(case.session, step, context, llm_config=llm_config)
+    finish_recording(case.session, failed.value)
+    with RecordStore.open(case.session.output / "record") as store:
+        assert len(store.list(Node)) == 1
+        model = [op for op in store.list(Operation) if op.kind == "model"][-1]
+        execution = next(e for e in store.list(Execution) if e.operation_id == model.operation_id)
+        trace = read_call(store, execution.execution_id)
+        assert len(store.read_json(execution.request)["messages"]) == 45
+        result = next(event for event in trace.events if event.kind == "result")
+        assert result.outcome == ("unknown" if fault == "request" else "returned")
+        if fault == "parse":
+            assert store.read_json(result.payload) == malformed.model_dump(mode="json")
+        assert len(store.list(ToolGroup)) == 1
+        assert store.check_integrity().ok
+    assert case.complete.call_count == 2
+    assert case.session.executor.execute.call_count == 2
+    assert case.session._record_attempt["complete_nodes"] == 1
