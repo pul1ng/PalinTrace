@@ -11,6 +11,7 @@ from palinreplay.resume.context import ResumePrefix, validate_resume_context
 from palinreplay.resume.environment import restore_environment, saved_execution_config
 from palinreplay.resume.materials import load_resume_materials
 from palinreplay.resume.report import exception_evidence, finish_report, new_report
+from palinreplay.resume.services import load_resume_service_input
 from palinreplay.resume.start import ResumeStart
 from palinreplay.resume.validation import validate_workspace
 from palinreplay.sandbox.client import connect_docker
@@ -54,7 +55,7 @@ def prepare_output(start, output):
 
 
 @contextmanager
-def restore_resume_start(start: ResumeStart, output=None, client=None):
+def restore_resume_start(start: ResumeStart, output=None, client=None, *, services_config=None):
     """Yield only after R1 passes; own new resources and only an internally created client."""
     output = prepare_output(start, output)
     own_client = client is None
@@ -62,6 +63,7 @@ def restore_resume_start(start: ResumeStart, output=None, client=None):
     restored = executor = primary = None
     delivered = False
     try:
+        load_resume_service_input(services_config)
         materials = load_resume_materials(start)
         report["phase"] = "context"
         prefix = validate_resume_context(materials)
