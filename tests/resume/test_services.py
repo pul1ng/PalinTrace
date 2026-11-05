@@ -1,15 +1,38 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
 import palinreplay.resume.services as services_module
-from palinreplay.core.errors import RecordUsageError
+import palinreplay.resume.session as session_module
+from palinreplay.core.errors import IntegrityError, RecordUsageError
 from palinreplay.resume import restore_resume_start, select_resume_start
 from palinreplay.resume.services import load_resume_service_input, resolve_resume_services
+from palinreplay.sandbox.base import ExecResult
 from tests.replay.test_service_config import _manifest, service
 from tests.resume import test_session
 
 setup = test_session.setup
+
+
+@pytest.fixture
+def prepared(setup, tmp_path, monkeypatch):
+    path = tmp_path / "services.json"
+    path.write_text(json.dumps({"services": [
+        service("A", readiness_command=None),
+        service("B", readiness_command=None, cwd="/srv/B", env={"FLAG": "value"}),
+    ]}))
+    setup.executor.runtime = SimpleNamespace(launch=SimpleNamespace(workdir="/image"))
+    monkeypatch.setattr(session_module, "saved_execution_config", lambda materials: {"cwd": "/saved"})
+    events = []
+    setup.validate.side_effect = lambda *args: events.append("r1") or {"status": "passed"}
+
+    def execute(command, **kwargs):
+        events.append(command)
+        return ExecResult(command, b"started\xff\n", 0, 0.25)
+
+    setup.executor.exec.side_effect = execute
+    return SimpleNamespace(session=setup, path=path, events=events)
 
 
 def test_optional_service_input_skips_reading():
@@ -107,3 +130,62 @@ def test_manifest_preflight_failures_precede_restoration(setup, tmp_path, fault,
             pytest.fail("invalid source delivered")
     setup.connect.assert_not_called()
     setup.restore.assert_not_called()
+
+
+def test_services_prepare_after_r1_before_same_executor_is_delivered(prepared):
+    setup = prepared.session
+    with restore_resume_start(setup.start, setup.output, services_config=prepared.path) as session:
+        assert prepared.events == ["r1", "start A", "start B"]
+        assert session.executor is setup.executor and session.restored is setup.restored
+        journal = json.loads((session.output / "preparation.json").read_text())
+        assert journal["status"] == "ready"
+        assert [entry["name"] for entry in journal["services"]] == ["A", "B"]
+        assert all("readiness" not in entry and "final_readiness" not in entry
+                   for entry in journal["services"])
+        assert session.prefix.context is setup.materials.context
+        assert session.start.model == "M" and session.start.max_steps == 2
+    first, second = setup.executor.exec.call_args_list
+    assert first.args == ("start A",) and second.args == ("start B",)
+    assert first.kwargs["cwd"] == "/saved" and first.kwargs["env"] == {}
+    assert second.kwargs["cwd"] == "/srv/B" and second.kwargs["env"] == {"FLAG": "value"}
+    assert all(0 < call.kwargs["timeout_sec"] <= 10
+               for call in setup.executor.exec.call_args_list)
+    assert journal["services"][0]["startup"]["cwd"] == "/saved"
+    setup.restore.assert_called_once()
+    setup.executor.close.assert_called_once()
+    setup.restored.close.assert_called_once()
+
+
+def test_r1_failure_prevents_all_service_commands(prepared):
+    setup = prepared.session
+    setup.validate.side_effect = IntegrityError("R1 differs")
+    with pytest.raises(IntegrityError):
+        with restore_resume_start(setup.start, setup.output, services_config=prepared.path):
+            pytest.fail("R1 failure delivered")
+    setup.executor.exec.assert_not_called()
+    assert not (setup.output / "preparation.json").exists()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_no_configuration_skips_but_empty_selection_prepares_zero_services(setup, tmp_path, configured):
+    path = tmp_path / "empty.json"
+    path.write_text('{"services":[]}')
+    with restore_resume_start(setup.start, setup.output,
+                              services_config=path if configured else None):
+        preparation = setup.output / "preparation.json"
+        assert preparation.exists() is configured
+        if configured:
+            saved = json.loads(preparation.read_text())
+            assert saved["status"] == "ready" and saved["services"] == []
+    setup.executor.exec.assert_not_called()
+
+
+def test_explicit_legacy_readiness_uses_existing_preparation(prepared):
+    setup = prepared.session
+    prepared.path.write_text(json.dumps({"services": [service()]}))
+    with restore_resume_start(setup.start, setup.output, services_config=prepared.path):
+        assert prepared.events == ["r1", "start A", "probe A", "probe A"]
+        saved = json.loads((setup.output / "preparation.json").read_text())
+        entry, = saved["services"]
+        assert len(entry["readiness"]) == 1
+        assert entry["final_readiness"]["exit_code"] == 0
