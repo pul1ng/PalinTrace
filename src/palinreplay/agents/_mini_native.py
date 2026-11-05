@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from types import FunctionType, MethodType
 from typing import ClassVar
 
+import litellm
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.docker import DockerEnvironment, DockerEnvironmentConfig
 from minisweagent.exceptions import FormatError, Submitted
@@ -64,6 +65,78 @@ def public_config(value):
             public_config(item)
     Payload.json(value)
     return value
+
+
+def model_request(model, messages, **kwargs):
+    """The public completion arguments, shared by Record and model-only Resume."""
+    return public_config({
+        "model": model.config.model_name,
+        "messages": messages,
+        "tools": [deepcopy(BASH_TOOL)],
+        **(model.config.model_kwargs | kwargs),
+    })
+
+
+def prepare_decision_request(messages, model_config):
+    """Use native conversion without creating an Agent, Recorder or execution."""
+    model = LitellmModel(**public_config(deepcopy(model_config)))
+    prepared = model._prepare_messages_for_api(deepcopy(messages))
+    return model, model_request(model, prepared)
+
+
+def redact_model_error(error, credentials):
+    """Keep private connection values out of exceptions and public reports."""
+    if credentials is None:
+        return
+    private = (credentials.api_key.get_secret_value(), credentials.base_url)
+
+    def clean(value):
+        if isinstance(value, str):
+            for token in private:
+                value = value.replace(token, "[private]")
+        return value
+
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        error.args = tuple(clean(value) for value in error.args)
+        if isinstance(getattr(error, "message", None), str):
+            error.message = clean(error.message)
+        if hasattr(error, "__notes__"):
+            error.__notes__ = [clean(note) for note in error.__notes__]
+        error = error.__cause__ or error.__context__
+
+
+def complete_decision_request(request, credentials):
+    """Send the already journaled input once, adding credentials only here."""
+    try:
+        return litellm.completion(
+            **deepcopy(request),
+            api_key=credentials.api_key.get_secret_value(), api_base=credentials.base_url,
+        )
+    except BaseException as error:
+        redact_model_error(error, credentials)
+        raise
+
+
+def parse_decision_actions(model, response):
+    """Parse the whole native tool group before making any action available."""
+    actions = model._parse_actions(response)
+    ids = [action["tool_call_id"] for action in actions]
+    if any(not isinstance(call_id, str) or not call_id for call_id in ids):
+        raise ValueError("tool calls require nonempty provider tool-call identities")
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate provider tool-call identities in group")
+    if any(not isinstance(action["command"], str) for action in actions):
+        raise ValueError("bash tool command must be a string")
+    return [action | {"name": call.function.name, "arguments": json.loads(call.function.arguments)}
+            for action, call in zip(actions, response.choices[0].message.tool_calls, strict=True)]
+
+
+def decision_cost(model, response):
+    """Native pricing without updating inherited or process-global counters."""
+    cost = model._calculate_cost(response)["cost"]
+    return {"cost": cost if cost > 0 else None, "cost_known": cost > 0}
 
 
 @dataclass
@@ -139,32 +212,10 @@ class ObservedModel(LitellmModel):
         return policy.copy(before_sleep=before_sleep, sleep=sleep)
 
     def _redact_error(self, error):
-        if self._credentials is None:
-            return
-        private = (self._credentials.api_key.get_secret_value(), self._credentials.base_url)
-
-        def clean(value):
-            if isinstance(value, str):
-                for token in private:
-                    value = value.replace(token, "[private]")
-            return value
-
-        seen = set()
-        while error is not None and id(error) not in seen:
-            seen.add(id(error))
-            error.args = tuple(clean(value) for value in error.args)
-            if isinstance(getattr(error, "message", None), str):
-                error.message = clean(error.message)
-            error = error.__cause__ or error.__context__
+        redact_model_error(error, self._credentials)
 
     def _query(self, messages, **kwargs):
-        request = {
-            "model": self.config.model_name,
-            "messages": messages,
-            "tools": [BASH_TOOL],
-            **(self.config.model_kwargs | kwargs),
-        }
-        public_config(request)
+        request = model_request(self, messages, **kwargs)
         self.call.observe("request", Payload.json(request))
         self.client_requests += 1
         self._request_attempt += 1

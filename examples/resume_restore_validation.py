@@ -149,7 +149,7 @@ def check(executor, actions, label, command):
     return result.text
 
 
-def compare_prefix(session):
+def compare_prefix(session, *, model="M"):
     materials, node = session.materials, session.start.node
     index, message_count = node.index, 2 * node.index + 2
     with RecordStore.open(session.start.source_store, read_only=True) as store:
@@ -171,7 +171,7 @@ def compare_prefix(session):
     assert len(next_context["messages"]) == message_count + 2
     assert next_context["messages"][:message_count] == messages
     assert not any(m.get("tool_call_id") == f"service-tool-{index + 1}" for m in messages)
-    assert session.start.model == "M" and session.start.max_steps == 2
+    assert session.start.model == model and session.start.max_steps == 2
     return {"message_count": message_count, "next_message": message_count, "historical_calls": index,
             "messages": [{"index": i, "equal": a == b,
                           "sha256": hashlib.sha256(json_bytes(a)).hexdigest()}

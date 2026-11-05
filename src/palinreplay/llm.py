@@ -98,6 +98,11 @@ def _default_config_path(env: Mapping[str, str]) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def mini_model_name(model: str) -> str:
+    """Use Record's explicit LiteLLM provider convention for an API model name."""
+    return model if "/" in model else f"openai/{model}"
+
+
 class OpenAIChatClient:
     """Keep the SDK ChatCompletion intact, including tool calls and usage.
 

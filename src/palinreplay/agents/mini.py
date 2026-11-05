@@ -65,6 +65,26 @@ def load_native():
         return _native
 
 
+def prepare_decision_request(messages, model_config):
+    """Prepare the pinned model's public input without starting its Agent loop."""
+    return load_native().prepare_decision_request(messages, model_config)
+
+
+def complete_decision_request(request, credentials):
+    """Issue one prepared model call, independently of the recording Agent."""
+    return load_native().complete_decision_request(request, credentials)
+
+
+def parse_decision_actions(model, response):
+    """Return one complete ordered pending group using the pinned tool parser."""
+    return load_native().parse_decision_actions(model, response)
+
+
+def decision_cost(model, response):
+    """Report known native cost, keeping unknown cost distinct from zero."""
+    return load_native().decision_cost(model, response)
+
+
 def swebench_config() -> dict:
     """Resolved public templates from the pinned upstream package."""
     load_native()

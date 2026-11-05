@@ -15,7 +15,7 @@ from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressR
 from palinreplay.diagnostics.metrics import boundary_summary
 from palinreplay.diagnostics.record_timing import flow_scope, record_phase, record_timing
 from palinreplay.diagnostics.timing import debug_timing, span
-from palinreplay.llm import LLMConfig
+from palinreplay.llm import LLMConfig, mini_model_name
 from palinreplay.preload.base import BtrfsPreloadRecord
 from palinreplay.record.inspect import inspect_record, storage_metrics
 from palinreplay.record.state import BtrfsStateBackend
@@ -123,9 +123,7 @@ def _run_record(
         credentials = (
             None if completion else LLMConfig.load(llm_config).model_copy(update={"max_retries": 0})
         )
-    model = credentials.model if credentials else "openai/record-fixture"
-    if "/" not in model:
-        model = f"openai/{model}"
+    model = mini_model_name(credentials.model if credentials else "openai/record-fixture")
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     started = time.monotonic()
     report = {
