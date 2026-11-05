@@ -12,7 +12,7 @@ PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文�
 
 ## 演示视频
 
-https://github.com/user-attachments/assets/26b0c034-820d-426f-8b40-8113f72c9520
+https://github.com/user-attachments/assets/c46a93c8-3cd9-43a4-b142-0c557c4bb7b7
 
 ## Quickstart
 

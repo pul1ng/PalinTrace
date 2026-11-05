@@ -10,7 +10,7 @@ PalinTrace links an agent's model interactions, tool calls, execution results, c
 
 ## Demo (Chinese)
 
-https://github.com/user-attachments/assets/26b0c034-820d-426f-8b40-8113f72c9520
+https://github.com/user-attachments/assets/c46a93c8-3cd9-43a4-b142-0c557c4bb7b7
 
 ## Quickstart
 
