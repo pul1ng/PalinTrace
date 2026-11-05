@@ -75,4 +75,11 @@ def _execute_tools(session, step, actions):
         results.append(call.invoke())
         session._record_attempt["tool_results"] = len(results)
         write_json(session.report_path, session.report, replace=True)
+        try:
+            native.DockerEnvironment._check_finished(
+                session.executor, native.BorrowedEnvironment.output(results[-1]),
+            )
+        except native.Submitted as submitted:
+            if len(actions) != 1:
+                raise ValueError("submission short-circuited an incomplete tool group") from submitted
     return calls, results

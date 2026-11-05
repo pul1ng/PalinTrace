@@ -63,6 +63,37 @@ class ResumeRecordContext:
         step.declare_tools(call, tuple(action["tool_call_id"] for action in evidence["actions"]))
         return call
 
+    def accept_results(self, actions, calls, results):
+        """Admit a complete group using mini's own observation representation."""
+        from minisweagent.models.utils.actions_toolcall import format_toolcall_observation_messages
+
+        if len(results) != len(actions) or len(calls) != len(actions):
+            raise ValueError("incomplete Resume tool group cannot be adopted")
+        outputs = [self.native.BorrowedEnvironment.output(result) for result in results]
+        messages = None
+        for output in outputs:
+            try:
+                self.native.DockerEnvironment._check_finished(None, output)
+            except self.native.Submitted as submitted:
+                if len(actions) != 1:
+                    raise ValueError("submission short-circuited an incomplete tool group") from submitted
+                messages = submitted.messages
+        if messages is not None:
+            return self.adopt([(calls[0], messages)], messages)
+        config = self.context["config"]["model"]
+        messages = format_toolcall_observation_messages(
+            actions=actions, outputs=outputs, observation_template=config["observation_template"],
+            template_vars=deepcopy(self.context.get("template_vars", {})),
+            multimodal_regex=config.get("multimodal_regex", ""),
+        )
+        if len(messages) != len(calls) or any(
+            message.get("tool_call_id") != call.operation.tool_call_id
+            for message, call in zip(messages, calls, strict=True)
+        ):
+            raise ValueError("mini observations do not align with Resume tool calls")
+        return self.adopt([(call, [message]) for call, message in zip(calls, messages, strict=True)],
+                          messages)
+
     def export(self, boundary):
         return AgentSnapshot(Payload.json(self.context), Payload.json({
             "next_message": len(self.messages), "adoptions": self.adoptions,
