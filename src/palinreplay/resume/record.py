@@ -11,7 +11,7 @@ from palinreplay.core.models import Node
 from palinreplay.resume.decision import ResumeDecision
 from palinreplay.resume.environment import saved_execution_config
 from palinreplay.resume.record_context import ResumeRecordContext
-from palinreplay.resume.recording import open_recording
+from palinreplay.resume.recording import finish_recording, open_recording
 from palinreplay.resume.report import exception_evidence
 from palinreplay.storage.io import write_json
 
@@ -64,17 +64,11 @@ def record_resume_step(session, decision) -> Node:
                 attempt.update(complete_nodes=1, node_id=node.node_id, state_id=node.state_id,
                                message_count=len(context.messages))
                 recorder.finish("Saved Resume decision completed")
-            attempt["status"] = "succeeded"
-            write_json(session.report_path, session.report, replace=True)
-            return node
         except BaseException as error:
-            attempt.update(status="interrupted" if not isinstance(error, Exception) else "failed",
-                           error=exception_evidence(error))
-            try:
-                write_json(session.report_path, session.report, replace=True)
-            except BaseException as write_error:
-                error.add_note(f"Resume recording report also failed: {type(write_error).__name__}")
+            finish_recording(session, error)
             raise
+        finish_recording(session)
+        return node
 
 
 def _execute_tools(session, step, actions):

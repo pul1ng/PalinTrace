@@ -53,6 +53,7 @@ def finish_report(report, output, *, restored, executor, client, own_client, pri
         "passed" if report["restore_status"] == "passed"
         and report["preparation"]["status"] in ("ready", "skipped")
         and ("decision" not in report or report["decision"]["status"] == "succeeded")
+        and ("recording" not in report or report["recording"]["status"] == "succeeded")
         and report["caller"]["status"] == "completed" and not errors else "failed"
     )
     report["phase"] = "complete"
