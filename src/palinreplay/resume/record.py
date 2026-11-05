@@ -83,7 +83,9 @@ def run_resume_steps(session, first_decision, *, llm_config=None) -> list[Node]:
                 actions = evidence["actions"]
                 for number in range(session.start.max_steps):
                     if number:
+                        session._record_attempt["stage"] = "begin_step"
                         step = begin_recording_step(session, recorder)
+                        session._record_attempt["stage"] = "model"
                         decision = record_branch_decision(session, step, context, llm_config=llm_config)
                         actions = decision.actions
                     node, details = _execute_and_save_group(session, recorder, step, context, actions)
@@ -106,7 +108,10 @@ def run_resume_steps(session, first_decision, *, llm_config=None) -> list[Node]:
 
 def _execute_and_save_group(session, recorder, step, context, actions):
     """Execute and commit one group; the caller owns the recording's RunEnd."""
+    attempt = session._record_attempt
+    attempt["stage"] = "tools"
     calls, results, submission = _execute_tools(session, step, actions)
+    attempt["stage"] = "admission"
     complete = context.accept_results(actions, calls, results, submission=submission)
     details = None
     if submission is not None:
@@ -116,10 +121,13 @@ def _execute_and_save_group(session, recorder, step, context, actions):
             "final_control_context": context.context,
             "final_input_position": context.input_position,
         }
-    node = recorder.commit_step() if complete else None
+    if complete:
+        attempt["stage"] = "commit"
+        node = recorder.commit_step()
+    else:
+        node = None
     if node is not None:
-        attempt = session._record_attempt
-        attempt.update(complete_nodes=attempt["complete_nodes"] + 1,
+        attempt.update(stage="step_committed", complete_nodes=attempt["complete_nodes"] + 1,
                        node_id=node.node_id, state_id=node.state_id,
                        message_count=len(context.messages))
     return node, details
