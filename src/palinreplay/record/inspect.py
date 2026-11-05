@@ -160,7 +160,8 @@ def _run_document(store: RecordStore, run: Run, *, contents: bool, dependency: d
                 else [],
             }
         )
-    empty_range = dependency is not None and dependency["start"]["index"] == dependency["end"]["index"]
+    empty_range = (dependency is not None and dependency.get("mode") != "resume"
+                   and dependency["start"]["index"] == dependency["end"]["index"])
     document = {
         "run": run.model_dump(mode="json"),
         "status": status,
