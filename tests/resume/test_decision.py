@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from palinreplay.resume.context import ResumePrefix
-from palinreplay.resume.decision import build_resume_messages
+from palinreplay.resume.decision import build_resume_messages, resolve_resume_model
 
 
 @pytest.fixture
@@ -24,7 +24,8 @@ def session():
         context={"messages": messages, "counters": {"n_calls": 20, "cost": 0}},
         input_position={"next_message": 42},
     )
-    return SimpleNamespace(prefix=ResumePrefix(materials))
+    return SimpleNamespace(prefix=ResumePrefix(materials),
+                           start=SimpleNamespace(model="M", max_steps=2))
 
 
 def test_inherited_messages_are_an_independent_copy(session):
@@ -58,3 +59,39 @@ def test_optional_instruction_is_appended_once(session, instruction):
 def test_instruction_requires_text(session, instruction):
     with pytest.raises(ValueError, match="instruction"):
         build_resume_messages(session, instruction=instruction)
+
+
+@pytest.fixture
+def llm_config(tmp_path):
+    path = tmp_path / "llm.toml"
+    path.write_text('[llm]\nmodel="configured-A"\napi_key="decision-test-secret"\n'
+                    'base_url="https://model.invalid/v1"\nmax_retries=3\n')
+    return path
+
+
+@pytest.mark.parametrize("selected,expected", [("M", "openai/M"), ("openai/M", "openai/M")])
+def test_branch_model_overrides_configured_and_parent_model(session, llm_config, selected, expected):
+    session.start.model = selected
+    session.prefix.context["config"] = {"model": {"model_name": "parent-A"}}
+    resolved = resolve_resume_model(session, llm_config=llm_config)
+    assert resolved.model == expected and resolved.max_retries == 0
+    assert resolved.api_key.get_secret_value() == "decision-test-secret"
+    assert session.prefix.config["model"]["model_name"] == "parent-A"
+    assert "decision-test-secret" not in repr(resolved)
+
+
+def test_missing_credentials_fail_before_any_transport(session, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for name in ("PALINREPLAY_LLM_CONFIG", "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValueError, match="configuration invalid: api_key"):
+        resolve_resume_model(session)
+
+
+def test_invalid_configuration_does_not_print_private_inputs(session, llm_config):
+    llm_config.write_text('[llm]\nmodel="A"\napi_key="decision-test-secret"\n'
+                          'base_url="bad-url-with-private-value"\n')
+    with pytest.raises(ValueError, match="base_url") as raised:
+        resolve_resume_model(session, llm_config=llm_config)
+    assert "decision-test-secret" not in str(raised.value)
+    assert "bad-url-with-private-value" not in str(raised.value)
