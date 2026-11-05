@@ -121,7 +121,12 @@ def complete_decision_request(request, credentials):
 
 def parse_decision_actions(model, response):
     """Parse the whole native tool group before making any action available."""
-    actions = model._parse_actions(response)
+    try:
+        actions = model._parse_actions(response)
+    except FormatError as error:
+        # mini puts its diagnosis in a user message. Resume and Recorder persist str(error).
+        error.args = (error.messages[0]["content"] or "Invalid model tool call",)
+        raise
     ids = [action["tool_call_id"] for action in actions]
     if any(not isinstance(call_id, str) or not call_id for call_id in ids):
         raise ValueError("tool calls require nonempty provider tool-call identities")

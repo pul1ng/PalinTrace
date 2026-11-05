@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from palinreplay.agents.mini import load_native
 from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.models import Execution, Failure, Node, Operation, RunEnd
 from palinreplay.record.calls import RecordingError, read_call
@@ -15,6 +16,28 @@ llm_config = test_run_steps.llm_config
 execution_config = test_run_steps.execution_config
 response = test_run_steps.response
 recordable = test_run_steps.recordable
+
+
+@pytest.mark.parametrize("recordable", [{"tools": 1, "max_steps": 4}], indirect=True)
+def test_text_only_second_answer_preserves_its_diagnostic(recordable, llm_config):
+    case = recordable
+    reply = test_run_steps.model_response(2, [])
+    reply.choices[0].finish_reason = "stop"
+    reply.choices[0].message.content = "Finished the task."
+    case.complete.return_value = reply
+    with pytest.raises(load_native().FormatError, match="No tool calls found") as caught:
+        run_resume_steps(case.session, case.decision, llm_config=llm_config)
+    diagnosis = caught.value.messages[0]["content"]
+    report = json.loads(case.session.report_path.read_text())["recording"]
+    assert report["error"]["error"] == diagnosis
+    assert report["stop_reason"] == "failed" and report["failure_stage"] == "model"
+    assert report["complete_nodes"] == case.session.executor.execute.call_count == 1
+    assert case.complete.call_count == 2
+    with RecordStore.open(case.session.output / "record", read_only=True) as store:
+        end, = store.list(RunEnd)
+        failure, = store.list(Failure)
+        assert store.read_json(end.details)["error"]["message"] == diagnosis
+        assert store.read_json(failure.details)["error"]["message"] == diagnosis
 
 
 @pytest.mark.parametrize("recordable", [{"tools": 1, "max_steps": 4}], indirect=True)
