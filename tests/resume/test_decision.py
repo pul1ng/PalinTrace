@@ -489,6 +489,8 @@ def test_caught_request_failure_remains_terminal(
             decide_resume_start(live, llm_config=llm_config)
         if fault is KeyboardInterrupt:
             assert caught.value is error
+        else:
+            caught.value.decision["error"]["error"] = "edited after catching"
         saved = json.loads(live.report_path.read_text())["decision"]
         assert saved["status"] == status and saved["error"]["error_type"] == fault.__name__
         assert saved["model_requests"] == 1 and saved["remaining_steps"] == 1
@@ -525,3 +527,23 @@ def test_decision_publication_failure_preserves_actual_attempts(
     assert decision["status"] == "failed" and decision["decisions"] == 0 and not decision["actions"]
     if transport.call_count:
         assert decision["raw_response"] == response.model_dump(mode="json")
+
+
+def test_mutating_returned_decision_cannot_change_the_final_report(
+    prepared, session, llm_config, response, monkeypatch,
+):
+    setup = prepared.session
+    setup.materials.context.update(deepcopy(session.prefix.context))
+    transport = Mock(return_value=response)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    with restore_resume_start(setup.start, setup.output, services_config=prepared.path) as live:
+        result = decide_resume_start(live, llm_config=llm_config)
+        saved = json.loads(live.report_path.read_text())["decision"]
+        result.raw_response["choices"][0]["message"]["content"] = "changed"
+        result.assistant_message["tool_calls"][0]["function"]["arguments"] = "{}"
+        result.actions[0]["arguments"]["command"] = "different command"
+        result.accounting["usage"].clear()
+        result.messages[-1]["content"] = "changed"
+    final = json.loads(live.report_path.read_text())
+    assert final["decision"] == saved and final["status"] == "passed" and final["cleanup_confirmed"]
+    transport.assert_called_once()

@@ -15,7 +15,7 @@ with restore_resume_start(start, services_config=services_path) as session:
 
 Each open session accepts one first-decision attempt. The optional instruction follows the inherited messages as a new user message. The branch selects the model, messages and tools. Parent options that override these fields, including through `extra_body`, produce a configuration error before dispatch.
 
-Before calling the model, the session saves the public request, a `requesting` marker and the attempt count. If a process stops at that marker, the model outcome is unknown. A caught interrupt is recorded as `interrupted` and propagates to the caller. A failed or interrupted decision makes the final session report `failed` even when the caller catches the error. `ResumeDecisionError.category` distinguishes `config`, `request`, `tool_format` and `evidence` failures.
+Before calling the model, the session saves the public request, a `requesting` marker and the attempt count. If a process stops at that marker, the model outcome is unknown. A caught interrupt is recorded as `interrupted` and propagates to the caller. A failed or interrupted decision makes the final session report `failed` even when the caller catches the error. `ResumeDecisionError.category` distinguishes `config`, `request`, `tool_format` and `evidence` failures. The caller receives independent copies of the response, pending actions and accounting for use in stage 5.
 
 Source fixture: Run `a9261e45064b44029fa21e2cd2c3635e`, C20 Node `c18d313c6bb04ac98b1ebba48f145ba3`, State `1379ebee3b81426494c547ce5676c1a7`, from `261102_150636_service-overlap-40`. The existing v2 service manifest selects A and B. The source has 41 complete nodes (C0–C40), a 42-message C20 prefix, and 20 inherited model calls.
 

@@ -33,7 +33,7 @@ class ResumeDecisionError(RuntimeError):
     """A classified failure with the actual decision evidence obtained so far."""
 
     def __init__(self, category, decision):
-        self.category, self.decision = category, decision
+        self.category, self.decision = category, deepcopy(decision)
         super().__init__(f"Resume decision {category} failed: {decision['error']['error']}")
 
 
@@ -90,7 +90,7 @@ def _request_decision(session, prepared):
         "inherited_counters", "max_steps", "model_requests", "decisions", "remaining_steps",
         "usage", "cost", "cost_known",
     )}
-    return ResumeDecision(prepared.messages, assistant, raw, actions, accounting)
+    return ResumeDecision(prepared.messages, deepcopy(assistant), deepcopy(raw), actions, accounting)
 
 
 @dataclass
