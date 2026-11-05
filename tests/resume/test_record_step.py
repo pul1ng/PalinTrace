@@ -52,7 +52,9 @@ def recordable(tmp_path, session, llm_config, response, execution_config, monkey
             "config": Payload.json(context["config"]), "context": Payload.json(context),
             "input_position": Payload.json({"next_message": 42, "adoptions": []}),
         })
-    start = select_resume_start(source, node.node_id, model="M", max_steps=1)
+    options = getattr(request, "param", 2)
+    options = options if isinstance(options, dict) else {"tools": options}
+    start = select_resume_start(source, node.node_id, model="M", max_steps=options.get("max_steps", 1))
     materials = load_resume_materials(start)
     output = tmp_path / "branch"
     output.mkdir()
@@ -62,17 +64,14 @@ def recordable(tmp_path, session, llm_config, response, execution_config, monkey
                             executor=executor, prefix=ResumePrefix(materials), output=output,
                             report={"phase": "caller", "restore_status": "passed",
                                     "preparation": {"status": "skipped"}})
-    options = getattr(request, "param", 2)
-    tools = options["tools"] if isinstance(options, dict) else options
-    instruction = options.get("instruction") if isinstance(options, dict) else None
-    for index in range(2, tools + 1):
+    for index in range(2, options.get("tools", 2) + 1):
         extra = response.choices[0].message.tool_calls[0].model_copy(deep=True)
         extra.id = f"branch-tool-{index}"
         extra.function.arguments = '{"command":"cat /tmp/marker"}'
         response.choices[0].message.tool_calls.append(extra)
     complete = Mock(return_value=response)
     monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", complete)
-    decision = decide_resume_start(session, instruction=instruction, llm_config=llm_config)
+    decision = decide_resume_start(session, instruction=options.get("instruction"), llm_config=llm_config)
     backend = fake.FakeStateBackend()
     monkeypatch.setattr("palinreplay.resume.recording.BtrfsStateBackend", lambda *a, **kw: backend)
     return SimpleNamespace(session=session, decision=decision, backend=backend,

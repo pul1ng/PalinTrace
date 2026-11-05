@@ -1,4 +1,4 @@
-"""Record one tool group from an already obtained Resume decision."""
+"""Record saved and subsequent Resume decisions in the active workspace."""
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -8,10 +8,10 @@ from palinreplay.agents.mini import load_native
 from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
 from palinreplay.core.models import Node
-from palinreplay.resume.decision import ResumeDecision
+from palinreplay.resume.decision import ResumeDecision, record_branch_decision
 from palinreplay.resume.environment import saved_execution_config
 from palinreplay.resume.record_context import ResumeRecordContext
-from palinreplay.resume.recording import finish_recording, open_recording
+from palinreplay.resume.recording import begin_recording_step, finish_recording, open_recording
 from palinreplay.resume.report import exception_evidence
 from palinreplay.storage.io import write_json
 
@@ -70,6 +70,38 @@ def record_resume_step(session, decision) -> Node | None:
             raise
         finish_recording(session)
         return node
+
+
+def run_resume_steps(session, first_decision, *, llm_config=None) -> list[Node]:
+    """Run up to the new-decision budget in one restored workspace and branch."""
+    with _claim_decision(session, first_decision) as evidence:
+        nodes = []
+        try:
+            context = ResumeRecordContext(session, evidence)
+            with open_recording(session, context.export) as (recorder, step):
+                context.accept_decision(step, evidence)
+                actions = evidence["actions"]
+                for number in range(session.start.max_steps):
+                    if number:
+                        step = begin_recording_step(session, recorder)
+                        decision = record_branch_decision(session, step, context, llm_config=llm_config)
+                        actions = decision.actions
+                    node, details = _execute_and_save_group(session, recorder, step, context, actions)
+                    if node is None:
+                        recorder.end_incomplete("Native Agent submitted with an incomplete tool group",
+                                                details=details)
+                        break
+                    nodes.append(node)
+                    if details is not None:
+                        recorder.finish("Native Agent submitted", details=details)
+                        break
+                else:
+                    recorder.pause("Resume decision budget exhausted")
+        except BaseException as error:
+            finish_recording(session, error)
+            raise
+        finish_recording(session)
+        return nodes
 
 
 def _execute_and_save_group(session, recorder, step, context, actions):
