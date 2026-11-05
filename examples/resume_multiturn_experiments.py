@@ -153,8 +153,9 @@ def run_real100(output, services, llm_config, *, model=None):
 
 def run_starts(output, services):
     output, services = Path(output).absolute(), Path(services).resolve()
-    output.mkdir(parents=True, mode=0o700, exist_ok=False)
     base = SOURCES[0]
+    outside_store(base.store.parent, output)
+    output.mkdir(parents=True, mode=0o700, exist_ok=False)
     summary = {"status": "in_progress", "source_run_id": base.run_id, "cases": {}}
     started = time.monotonic()
     try:

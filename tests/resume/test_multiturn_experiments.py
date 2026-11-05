@@ -1,5 +1,6 @@
 import json
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,11 +10,25 @@ import pytest
 from examples import resume_multiturn_experiments as experiments
 from examples import resume_multiturn_validation as validation
 from palinreplay.agents.mini import load_native
+from palinreplay.core.errors import RecordUsageError
 from palinreplay.resume import decision
+from palinreplay.storage.store import RecordStore
 from tests.resume import test_decision
 
 session = test_decision.session
 llm_config = test_decision.llm_config
+
+
+@pytest.mark.parametrize("relative_output", ["record/validation", "validation"])
+def test_multistart_rejects_output_inside_source_before_writing(tmp_path, monkeypatch, relative_output):
+    source = tmp_path / "source" / "record"
+    with RecordStore.create(source):
+        pass
+    monkeypatch.setattr(experiments, "SOURCES", (replace(experiments.SOURCES[0], store=source),))
+    output = source.parent / relative_output
+    with pytest.raises(RecordUsageError, match="outside"):
+        experiments.run_starts(output, tmp_path / "services.json")
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("case", ["missing_prefix", "wrong_http_body", "before_http", "http_error"])
