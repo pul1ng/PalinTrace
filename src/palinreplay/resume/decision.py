@@ -5,9 +5,31 @@ from dataclasses import dataclass, field
 
 from pydantic import ValidationError
 
-from palinreplay.agents.mini import prepare_decision_request
+from palinreplay.agents.mini import complete_decision_request, prepare_decision_request
 from palinreplay.llm import LLMConfig, mini_model_name
 from palinreplay.storage.io import write_json
+
+
+@dataclass
+class ResumeDecision:
+    """Actual model output; messages and tools have not been executed or adopted."""
+
+    messages: list[dict]
+    assistant_message: dict
+    raw_response: dict
+
+
+def decide_resume_start(session, *, instruction=None, llm_config=None):
+    """Ask the selected model once from a service-ready Resume boundary."""
+    prepared = prepare_resume_decision(session, instruction=instruction, llm_config=llm_config)
+    evidence = session.report["decision"]
+    evidence.update(status="requesting", model_requests=1)
+    response = complete_decision_request(prepared.request, prepared.credentials)
+    raw = response.model_dump(mode="json")
+    assistant = deepcopy(raw["choices"][0]["message"])
+    evidence.update(status="returned", raw_response=raw, assistant_message=assistant)
+    write_json(session.report_path, session.report, replace=True)
+    return ResumeDecision(prepared.messages, assistant, raw)
 
 
 @dataclass

@@ -70,6 +70,11 @@ def prepare_decision_request(messages, model_config):
     return load_native().prepare_decision_request(messages, model_config)
 
 
+def complete_decision_request(request, credentials):
+    """Issue one prepared model call, independently of the recording Agent."""
+    return load_native().complete_decision_request(request, credentials)
+
+
 def swebench_config() -> dict:
     """Resolved public templates from the pinned upstream package."""
     load_native()

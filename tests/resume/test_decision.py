@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from palinreplay.resume import decide_resume_start
 from palinreplay.resume.context import ResumePrefix
 from palinreplay.resume.decision import (
     build_resume_messages,
@@ -150,4 +151,80 @@ def test_failed_evidence_write_never_delivers_prepared_request(session, llm_conf
     with pytest.raises(OSError, match="evidence unavailable"):
         prepare_resume_decision(session, llm_config=llm_config)
     assert session.report["decision"]["model_requests"] == 0
+    assert not session.executor.mock_calls
+
+
+@pytest.fixture
+def response():
+    from litellm import ModelResponse
+
+    return ModelResponse(
+        id="resume-response", model="M", created=1,
+        choices=[{"index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": "A new branch decision", "tool_calls": [{
+                "id": "branch-tool-1", "type": "function", "function": {
+                    "name": "bash", "arguments": '{"command":"cat /tmp/B.log"}',
+                },
+            }],
+        }}], usage={"prompt_tokens": 120, "completion_tokens": 12, "total_tokens": 132},
+    )
+
+
+@pytest.mark.parametrize("instruction", [None, "下一步先检查 B 的日志"])
+def test_decision_queries_once_after_evidence_and_does_not_execute(
+    session, llm_config, response, monkeypatch, instruction,
+):
+    from palinreplay.agents.mini import load_native
+
+    native = load_native()
+    saved = deepcopy(session.prefix.context)
+
+    def transport(**request):
+        evidence = json.loads(session.report_path.read_text())["decision"]
+        public = {k: v for k, v in request.items() if k not in ("api_key", "api_base")}
+        assert evidence["request"] == public
+        assert request["api_key"] == "decision-test-secret"
+        assert request["model"] == "openai/M"
+        return response
+
+    complete = Mock(side_effect=transport)
+    monkeypatch.setattr(native.litellm, "completion", complete)
+    monkeypatch.setattr(native.Recorder, "begin_step", Mock(side_effect=AssertionError("step")))
+    result = decide_resume_start(session, instruction=instruction, llm_config=llm_config)
+    assert complete.call_count == 1
+    assert result.raw_response == response.model_dump(mode="json")
+    assert result.assistant_message["content"] == "A new branch decision"
+    assert len(result.messages) == 42 + (instruction is not None)
+    assert session.report["decision"]["model_requests"] == 1
+    assert session.report["decision"]["complete_nodes"] == 0
+    assert session.prefix.context == saved and not session.executor.mock_calls
+
+
+def test_decision_real_sdk_sends_one_offline_http_request(
+    session, llm_config, response, monkeypatch,
+):
+    import httpx
+    from litellm.llms.openai.openai import OpenAIChatCompletion
+
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        evidence = json.loads(session.report_path.read_text())["decision"]
+        # LiteLLM omits null content for assistant tool-call messages on HTTP.
+        expected_messages = deepcopy(evidence["request"]["messages"])
+        for message in expected_messages:
+            if message.get("content", "") is None:
+                message.pop("content")
+        assert body["messages"] == expected_messages
+        assert body["tools"] == evidence["request"]["tools"]
+        assert body["model"] == "M"
+        requests.append(body)
+        return httpx.Response(200, json=response.model_dump(mode="json"), request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr(OpenAIChatCompletion, "_get_sync_http_client",
+                            staticmethod(lambda: client))
+        result = decide_resume_start(session, llm_config=llm_config)
+    assert len(requests) == 1 and result.raw_response["id"] == "resume-response"
     assert not session.executor.mock_calls

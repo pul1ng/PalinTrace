@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from types import FunctionType, MethodType
 from typing import ClassVar
 
+import litellm
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.docker import DockerEnvironment, DockerEnvironmentConfig
 from minisweagent.exceptions import FormatError, Submitted
@@ -81,6 +82,14 @@ def prepare_decision_request(messages, model_config):
     model = LitellmModel(**public_config(deepcopy(model_config)))
     prepared = model._prepare_messages_for_api(deepcopy(messages))
     return model, model_request(model, prepared)
+
+
+def complete_decision_request(request, credentials):
+    """Send the already journaled input once, adding credentials only here."""
+    return litellm.completion(
+        **deepcopy(request),
+        api_key=credentials.api_key.get_secret_value(), api_base=credentials.base_url,
+    )
 
 
 @dataclass
