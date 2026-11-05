@@ -13,7 +13,7 @@ class RestoredExecutor:
     exec = DockerSDKSandbox.exec
     check_root = BtrfsSandbox.check_root
 
-    def __init__(self, restored, runtime):
+    def __init__(self, restored, runtime, *, execution_config=None):
         self.restored, self.runtime = restored, runtime
         self.pool, self.workspace = restored.pool, restored.workspace.name
         self._container = restored.container
@@ -22,6 +22,11 @@ class RestoredExecutor:
         self._shell = runtime.launch.shell
         self._env = dict(runtime.launch.environment)
         self._timeout = 60
+        if execution_config is not None:
+            self._workdir = execution_config["cwd"]
+            self._shell = tuple(execution_config["interpreter"])
+            self._timeout = execution_config["timeout"]
+            self._env.update(execution_config["env"])
         self.name = restored.workspace.container_name
         self.state = "running"
         self.mounts_at_start = None
