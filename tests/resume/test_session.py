@@ -5,16 +5,23 @@ import pytest
 
 import palinreplay.resume.session as session_module
 from palinreplay.core.errors import IntegrityError, RecordUsageError
-from palinreplay.resume import ResumeSession, restore_resume_start
+from palinreplay.resume import ResumeSession, restore_resume_start, select_resume_start
+from palinreplay.resume.materials import load_resume_materials
+from palinreplay.storage.store import RecordStore
+from tests.record.test_restore_materials import _record_run
 
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     source = tmp_path / "recording" / "record"
-    source.mkdir(parents=True)
-    start = SimpleNamespace(source_store=source, node=SimpleNamespace(index=20))
-    materials = SimpleNamespace(context={"messages": ["saved"]}, input_position={"next_message": 1})
-    restored = Mock(report={})
+    monkeypatch.setattr("palinreplay.storage.btrfs.verification.verify_state", lambda *a: None)
+    with RecordStore.create(source) as store:
+        _, node, *_ = _record_run(store, "fixture")
+    start = select_resume_start(source, node.node_id, model="M", max_steps=2)
+    materials = load_resume_materials(start)
+    materials.context["counters"] = {"n_calls": 0}
+    materials.input_position["next_message"] = 1
+    restored = Mock(report={"cleanup_confirmed": True, "cleanup_errors": []})
     executor = Mock()
     executor.exec.return_value = SimpleNamespace(text="/testbed\n", exit_code=0)
     connect = Mock()
@@ -89,4 +96,4 @@ def test_default_output_is_in_current_directory(setup, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with restore_resume_start(setup.start) as session:
         assert session.output.parent == tmp_path / "outputs" / "resume"
-        assert session.output.name.endswith("_C20-restore")
+        assert session.output.name.endswith("_C0-restore")
