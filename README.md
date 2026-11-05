@@ -8,7 +8,7 @@ PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文�
 
 - **Record · 轨迹录制（已实现 MVP）**：记录 Agent 的模型交互、工具调用与结果，关联当时的上下文、任务文件和运行配置，为历史查看、环境恢复与后续回放提供依据。
 - **Replay · 历史重执行（已实现 MVP）**：从已提交的来源节点恢复环境，按固定历史真实执行后续工具，不调用模型、不需要模型凭据；保存真实结果与快照，确定的退出码不符或框架故障会停止执行。完整一致性校验另列为后续 Verify 工作。
-- **Resume · 分叉续跑（计划中）**：从任意已保存节点恢复 Agent 上下文与任务环境，可补充新的指令并继续运行，生成独立的新轨迹，保留原始历史。
+- **Resume · 分叉续跑（分阶段实现）**：已支持选定历史节点并校验恢复对话与可写环境；新决策和独立分支录制待后续实现。
 
 Replay MVP 的交付范围、对应提交和真实实验结果见[最终验收摘要](docs/validation/replay-mvp-20261104.md)。
 
@@ -83,7 +83,31 @@ PALIN_SERVICES="/path/to/services.json"
 
 示例从 C0 执行到录制末尾，可用 `--from`、`--to` 选择区间。结果默认保存到 `outputs/replay/YYMMDD_HHMMSS_任务名/`；退出码与历史不一致时停止并保留结果。完整参数和恢复范围见[命令参考](docs/命令参考.md#replay)。
 
-### 5. Resume（待实现）
+### 5. Resume：恢复分叉起点
+
+Python 入口可选择已保存节点，恢复原始对话前缀和可写任务环境，并在同一容器通过完整 R1 文件校验后交付：
+
+```python
+from palinreplay.resume import select_resume_start, restore_resume_start
+
+start = select_resume_start("outputs/record/来源录制", "C20", model="M", max_steps=2)
+with restore_resume_start(start) as session:
+    result = session.executor.exec("pwd")
+    print(result.text)
+```
+
+`session` 提供 `start`、`materials`、`restored`、`executor`、`prefix`、`context`、
+`input_position`、`output`、`report` 和 `report_path`。原始运行配置通过
+`session.materials.config` 访问；本次模型与新增预算留在 `start`，历史计数保持原值。
+默认输出为当前目录的 `outputs/resume/YYMMDD_HHMMSS_C20-restore/`，也可传入来源录制目录之外的
+新 `output` 目录。`report.json` 分别记录恢复、调用方错误及清理结果；`restore-report.json`
+保留底层资源与 R1 证据。退出上下文时清理执行器和恢复资源，自行创建的 Docker 客户端也会关闭；
+传入的 `client` 仍由调用方管理。
+
+当前阶段只恢复起点，不初始化模型、重执行历史工具、准备服务或建立分支录制。
+R1 范围是 `rootfs-files-v1`，完整排除项、属性和限制保存在报告中；它不恢复进程内存和运行中的服务。
+明确包含 `exit` 消息的终止前缀会被拒绝，父 Run 已结束不妨碍恢复中间节点。
+可复现验收见 [Resume 恢复验证](docs/validation/resume-restore-20261105/README.md)。
 
 ## Getting Started
 
