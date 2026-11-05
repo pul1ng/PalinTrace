@@ -17,7 +17,7 @@ response = test_decision.response
 
 
 @pytest.fixture
-def decision(session, llm_config, response, monkeypatch):
+def decision(session, llm_config, response, monkeypatch, request):
     second = response.choices[0].message.tool_calls[0].model_copy(deep=True)
     second.id = "branch-tool-2"
     second.function.arguments = '{"command":"cat /tmp/marker","label":"keep"}'
@@ -25,7 +25,8 @@ def decision(session, llm_config, response, monkeypatch):
     session.start.max_steps = 1
     monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request",
                         Mock(return_value=response))
-    return decide_resume_start(session, llm_config=llm_config)
+    return decide_resume_start(session, llm_config=llm_config,
+                               instruction=getattr(request, "param", None))
 
 
 def test_claim_uses_saved_evidence_with_no_remaining_budget(session, decision):

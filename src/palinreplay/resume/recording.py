@@ -24,6 +24,8 @@ def branch_config(session):
     # Old derivation permissions belong to the source Run, not this branch.
     config = {key: deepcopy(value) for key, value in materials.config.items()
               if key not in ("replay", "resume")}
+    if "model" in config:
+        config["model"]["model_name"] = session._decision_evidence["model"]
     config["resume"] = {
         "schema_version": "palinreplay.resume.v1",
         "initial_state_mode": "source-reference-v1",
