@@ -61,3 +61,23 @@ def test_timeout_delegates_cleanup_once_without_retry(monkeypatch):
         assert len(calls) == 1 and cleanups == ["closed"] and env.state == "failed"
     finally:
         released.set()
+
+
+def test_saved_execution_defaults_and_explicit_overrides(monkeypatch):
+    env, calls, cleanups = environment(
+        monkeypatch, lambda command, kwargs: SimpleNamespace(exit_code=0, output=b"ok"),
+    )
+    saved = {"cwd": "/saved", "interpreter": ["bash", "-c"], "timeout": 17,
+             "env": {"PAGER": "cat", "TZ": "Etc/UTC"}}
+    env = RestoredExecutor(env.restored, env.runtime, execution_config=saved)
+    assert env._timeout == 17
+    env.exec("pwd")
+    assert calls[-1][0] == ["bash", "-c", "pwd"]
+    assert calls[-1][1]["workdir"] == "/saved"
+    assert calls[-1][1]["environment"] == {"BASE": "saved", "PAGER": "cat", "TZ": "Etc/UTC"}
+    env.exec("pwd", cwd="/override", env={"TZ": "override"}, timeout_sec=3)
+    assert calls[-1][1]["workdir"] == "/override"
+    assert calls[-1][1]["environment"]["TZ"] == "override"
+    assert saved["env"]["TZ"] == "Etc/UTC"
+    env.close()
+    assert cleanups == []
