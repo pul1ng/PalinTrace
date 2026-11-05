@@ -17,6 +17,8 @@ with restore_resume_start(start, output=output, services_config=services) as ses
 
 The recording report separates inherited counters from branch activity. `total_model_requests` includes the already obtained first decision; `model_requests` and its explicit alias `recording_model_requests` count requests made during recording. `request_accounting` retains usage and known/unknown cost per request. `known_cost` sums known fees, while `cost` remains null unless every request's cost is known. Node counts and the last complete node are reread from the Store, including when publication succeeds before an exception. Stop reasons distinguish `budget_exhausted`, `submitted`, `incomplete_tool_group`, `failed`, `interrupted` and compatibility entry `step_completed`.
 
+New node contexts store the budget at that node in `resume.remaining_steps` and preserve the first decision's accounting in `resume.first_decision_accounting`. With a 100-decision budget from C20, the current budget is 99 at C21 and 0 at C120. In older snapshots, `resume.decision_accounting` describes the first decision.
+
 ## Sequential task commits
 
 The worktree began clean on `stage-5-5` at `284582b`. Each row was verified and committed before the next task began. Test selections overlap and must not be added.

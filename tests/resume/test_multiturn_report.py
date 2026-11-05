@@ -59,6 +59,10 @@ def test_totals_match_variable_tool_groups_and_keep_inherited_usage_separate(
         assert sum(op.kind == "model" for op in operations) == 3
         assert sum(op.kind == "tool" for op in operations) == 6
         assert len(store.list(RunEnd)) == 1
+        budgets = [store.read_json(node.context)["resume"] for node in nodes]
+        assert [resume["remaining_steps"] for resume in budgets] == [2, 1, 0]
+        assert budgets[-1]["remaining_steps"] == report["remaining_steps"]
+        assert all(resume["first_decision_accounting"] == case.decision.accounting for resume in budgets)
         context = store.read_json(nodes[-1].context)
         assert len(context["messages"]) == report["message_count"] == 51
         assert context["counters"]["n_calls"] == 23

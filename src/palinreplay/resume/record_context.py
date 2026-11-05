@@ -19,7 +19,8 @@ class ResumeRecordContext:
         self.context["config"]["model"]["model_name"] = evidence["model"]
         self.context["resume"] = {
             "inherited_input_position": self.inherited_position,
-            "decision_accounting": deepcopy(evidence["accounting"]), "recording_model_requests": 0,
+            "first_decision_accounting": deepcopy(evidence["accounting"]),
+            "recording_model_requests": 0,
         }
         self.account_decision(evidence["accounting"], recording=False)
 
@@ -33,8 +34,12 @@ class ResumeRecordContext:
             model_name=self.context["config"]["model"]["model_name"],
             n_model_calls=counters["n_calls"], model_cost=counters["cost"],
         )
+        resume = self.context["resume"]
         if recording:
-            self.context["resume"]["recording_model_requests"] += accounting["model_requests"]
+            resume["recording_model_requests"] += accounting["model_requests"]
+        resume["remaining_steps"] = (
+            resume["first_decision_accounting"]["remaining_steps"] - resume["recording_model_requests"]
+        )
         model = self.context.setdefault("model_accounting", {})
         model.setdefault("calls", []).append({"known": accounting["cost_known"],
                                               "cost": accounting["cost"]})
