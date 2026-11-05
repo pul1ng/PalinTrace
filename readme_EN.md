@@ -6,7 +6,7 @@ PalinTrace links an agent's model interactions, tool calls, execution results, c
 
 - **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and historical replay.
 - **Replay · Historical re-execution (MVP implemented)**: Restore a committed source node and execute subsequent tools from a fixed history without model requests or credentials. Save actual results and snapshots; stop on a definite exit-code mismatch or a framework failure. Full consistency checking is planned as separate Verify work.
-- **Resume · Fork and continue (implemented in stages)**: Select a saved node, restore and validate its context and writable environment, and optionally prepare the background services required at that boundary. New model decisions and independent branch recording are planned for later stages.
+- **Resume · Fork and continue (implemented in stages)**: Restore a saved node, validate its context and writable environment, prepare optional services, then obtain one new decision and record its tool group as an independent branch node.
 
 ## Demo (Chinese)
 
@@ -81,17 +81,22 @@ PALIN_SERVICES="/path/to/services.json"
 
 This example runs from C0 to the recorded end. Use `--from` and `--to` to select a range. Results default to `outputs/replay/YYMMDD_HHMMSS_TASK/`; an exit-code mismatch stops execution and preserves actual results. See the [command reference (Chinese)](docs/命令参考.md#replay) for all parameters and restoration scope.
 
-### 5. Resume: restore and prepare a starting node
+### 5. Resume: restore a starting node and record one branch step
 
 The Python API restores the saved conversation and writable environment, passes R1,
-and prepares optional services in the same container before handing it to the caller:
+and prepares optional services. It can then obtain one decision and record the tools
+in that same container:
 
 ```python
-from palinreplay.resume import select_resume_start, restore_resume_start
+from palinreplay.resume import (
+    select_resume_start, restore_resume_start, decide_resume_start, record_resume_step,
+)
 
-start = select_resume_start("outputs/record/SOURCE", "C20", model="M", max_steps=2)
+start = select_resume_start("outputs/record/SOURCE", "C20", model="openai/M", max_steps=1)
 with restore_resume_start(start, services_config="outputs/preprocess/SOURCE/services.json") as session:
-    print(session.executor.exec("pwd").text)
+    decision = decide_resume_start(session, llm_config="config/llm/llm.toml")
+    node = record_resume_step(session, decision)
+    print(node.run_id, node.node_id, node.index)  # independent branch C21
 ```
 
 Omit `services_config` to skip preparation. A valid manifest selecting no services
@@ -104,8 +109,19 @@ Outputs default to `outputs/resume/<timestamp>_C20-restore/`. `report.json` pres
 restoration, preparation, caller and cleanup outcomes separately; `restore-report.json`
 contains R1 and resource evidence, and `preparation.json` records configured startups.
 The context manager releases the container and writable workspace on normal or
-exceptional exit. A caller-supplied Docker client remains caller-owned. This stage
-makes no model calls, re-executes no historical tools, and records no branch nodes.
+exceptional exit. A caller-supplied Docker client remains caller-owned.
+
+`decide_resume_start()` accepts an optional `instruction=` after the inherited prefix.
+`record_resume_step()` consumes that saved response once, without another model request,
+including when the decision used the last budget slot. Modified decisions, repeated
+consumption and closed sessions are rejected before execution. Actual results are saved
+as each tool returns; the complete group is admitted before one node is published under
+`session.output / "record"`. Ordinary nonzero exits retain their actual output and status.
+Interruptions and recording failures preserve the call tail, and `report.json.recording`
+reports the actual published node count. `session.context` remains the source prefix;
+the new node contains the updated branch messages and input position. This API handles
+one round; an autonomous decision loop remains future work. See the
+[stage 5 acceptance record](docs/resume-stage5-acceptance.md) for evidence and reproduction.
 
 ## Getting Started
 

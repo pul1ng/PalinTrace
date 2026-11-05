@@ -39,6 +39,6 @@ def resume_source_reference(config) -> SourceReference | None:
                     or ref.media_type not in JSON_TYPES
                     or not isinstance(json.loads(decode(data, ref.media_type)), dict)):
                 raise ValueError(f"source {role} differs from its protected material reference")
-        return SourceReference(source["store"], run, (node,), (state,))
+        return SourceReference(source["store"], run, (node,), (state,), mode="resume")
     except (KeyError, TypeError, ValueError) as error:
         raise IntegrityError(f"invalid Resume source reference: {error}") from error

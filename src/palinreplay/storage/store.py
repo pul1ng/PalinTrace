@@ -449,7 +449,7 @@ class RecordStore:
 
     def recording_source(self, run_id: str) -> SourceReference | None:
         """Read the external start for either a fixed Replay or an open-ended Resume."""
-        return self.resume_source(run_id) or self.replay_source(run_id)
+        return self._recording_source(run_id, None)
 
     def _recording_source(self, run_id, mode):
         """Read protected config without treating external IDs as local relations."""
@@ -458,7 +458,7 @@ class RecordStore:
 
         with self._snapshot():
             run = self.get(Run, run_id)
-            key = (mode, run_id, run.config.sha256, run.config.size, run.config.media_type)
+            key = (run_id, run.config.sha256, run.config.size, run.config.media_type)
             if key not in self._source_cache:
                 source = None
                 if run.config.media_type in JSON_TYPES:
@@ -468,10 +468,10 @@ class RecordStore:
                     except (ValueError, UnicodeError):
                         pass  # Ordinary Record configurations may be opaque payloads.
                     else:
-                        reader = resume_source_reference if mode == "resume" else source_reference
-                        source = reader(config)
+                        source = resume_source_reference(config) or source_reference(config)
                 self._source_cache[key] = source
-            return self._source_cache[key]
+            source = self._source_cache[key]
+            return source if source is None or mode is None or source.mode == mode else None
 
     def replay_finalization(self, run_id: str):
         """Freeze sidecar presence/bytes alongside one catalog read operation."""
@@ -538,10 +538,10 @@ class RecordStore:
         elif isinstance(record, Step):
             attempt = self.get(Attempt, record.attempt_id)
             self._same_run(record.run_id, attempt)
-            replay = self.replay_source(record.run_id)
-            if replay is not None and not replay.start.index < record.index <= replay.end.index:
-                raise IntegrityError("step index is outside the pinned Replay range")
             source = self.recording_source(record.run_id)
+            if (source is not None and source.mode == "replay"
+                    and not source.start.index < record.index <= source.end.index):
+                raise IntegrityError("step index is outside the pinned Replay range")
             if record.parent_node_id is None:
                 if source is None or record.index != source.start.index + 1:
                     raise IntegrityError("parentless step requires the first external source index")

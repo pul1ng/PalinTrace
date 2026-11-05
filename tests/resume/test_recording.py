@@ -60,6 +60,26 @@ def test_open_branch_at_final_source_node_has_no_complete_local_node(branch_sess
         assert store.check_integrity().ok and not store.list(Node)
 
 
+def test_source_queries_share_one_config_read_per_snapshot(branch_session, monkeypatch):
+    with open_recording(branch_session, fake.FakeAgent().export) as (rec, _step):
+        reads = []
+        original = RecordStore.read_bytes
+        def read(store, ref):
+            if store.root == rec.store.root and ref == rec.run.config:
+                reads.append(ref)
+            return original(store, ref)
+        monkeypatch.setattr(RecordStore, "read_bytes", read)
+        for count in (1, 2):
+            with rec.store.snapshot():
+                source = rec.store.recording_source(rec.run.run_id)
+                assert source.mode == "resume"
+                assert rec.store.resume_source(rec.run.run_id) == source
+                assert rec.store.replay_source(rec.run.run_id) is None
+                assert rec.store.check_integrity().ok
+                assert reads == [rec.run.config] * count
+            assert rec.store._source_cache is None
+
+
 def test_resume_has_no_historical_endpoint_and_keeps_local_parent_chain(branch_session):
     agent, backend = fake.FakeAgent(), fake.FakeStateBackend()
     with RecordStore.create(branch_session.output / "record") as store:

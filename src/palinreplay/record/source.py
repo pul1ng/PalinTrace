@@ -18,7 +18,7 @@ def source_dependency(store, run_id, *, check=False):
         "required": True, "checked": False,
         "materials": "source Record artifacts and retained filesystem snapshots",
     }
-    if store.resume_source(run_id) is not None:
+    if source.mode == "resume":
         document["mode"] = "resume"
     if check:
         try:

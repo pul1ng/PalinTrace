@@ -19,6 +19,7 @@ class SourceReference:
     nodes: tuple[Node, ...]
     states: tuple[State, ...]
     finalization_protocol: str | None = None
+    mode: str = "replay"
 
     @property
     def start(self):
