@@ -103,6 +103,25 @@ class PreparedResumeDecision:
     native_model: object = field(repr=False)
 
 
+def prepare_branch_decision(session, messages, *, llm_config=None):
+    """Prepare mini input from the complete conversation supplied by the branch."""
+    messages = deepcopy(messages)
+    credentials = resolve_resume_model(session, llm_config=llm_config)
+    config = deepcopy(session.prefix.config["model"])
+    config.update(model_name=credentials.model, cost_tracking="ignore_errors")
+    options = config.get("model_kwargs", {})
+    for location, values in (("model_kwargs", options),
+                             ("model_kwargs.extra_body", options.get("extra_body") or {})):
+        for key in ("model", "messages", "tools"):
+            if key in values:
+                raise ValueError(f"{location}.{key} cannot override the Resume request")
+    config["model_kwargs"] = options | {
+        "timeout": credentials.timeout, "num_retries": 0, "max_retries": 0,
+    }
+    model, request = prepare_decision_request(messages, config)
+    return PreparedResumeDecision(messages, request, credentials, model)
+
+
 def prepare_resume_decision(session, *, instruction=None, llm_config=None):
     """Persist the exact public model input before it can be sent."""
     with _first_attempt(session, instruction, llm_config) as prepared:
@@ -144,25 +163,14 @@ def _prepare_decision(session, instruction, llm_config):
     try:
         messages = build_resume_messages(session, instruction=instruction)
         evidence["messages"] = deepcopy(messages)
-        credentials = resolve_resume_model(session, llm_config=llm_config)
-        config = deepcopy(session.prefix.config["model"])
-        config.update(model_name=credentials.model, cost_tracking="ignore_errors")
-        options = config.get("model_kwargs", {})
-        for location, values in (("model_kwargs", options),
-                                 ("model_kwargs.extra_body", options.get("extra_body") or {})):
-            for key in ("model", "messages", "tools"):
-                if key in values:
-                    raise ValueError(f"{location}.{key} cannot override the Resume request")
-        config["model_kwargs"] = options | {
-            "timeout": credentials.timeout, "num_retries": 0, "max_retries": 0,
-        }
-        model, request = prepare_decision_request(messages, config)
+        prepared = prepare_branch_decision(session, messages, llm_config=llm_config)
         category = "evidence"
-        evidence.update(status="prepared", model=credentials.model, request=deepcopy(request))
+        evidence.update(status="prepared", model=prepared.credentials.model,
+                        request=deepcopy(prepared.request))
         write_json(session.report_path, session.report, replace=True)
     except BaseException as error:
         raise _failed_decision(session, category, error) from None
-    return PreparedResumeDecision(messages, request, credentials, model)
+    return prepared
 
 
 def resolve_resume_model(session, *, llm_config=None):
