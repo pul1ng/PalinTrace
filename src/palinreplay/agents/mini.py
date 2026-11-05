@@ -65,6 +65,11 @@ def load_native():
         return _native
 
 
+def prepare_decision_request(messages, model_config):
+    """Prepare the pinned model's public input without starting its Agent loop."""
+    return load_native().prepare_decision_request(messages, model_config)
+
+
 def swebench_config() -> dict:
     """Resolved public templates from the pinned upstream package."""
     load_native()

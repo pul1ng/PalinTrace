@@ -66,6 +66,23 @@ def public_config(value):
     return value
 
 
+def model_request(model, messages, **kwargs):
+    """The public completion arguments, shared by Record and model-only Resume."""
+    return public_config({
+        "model": model.config.model_name,
+        "messages": messages,
+        "tools": [deepcopy(BASH_TOOL)],
+        **(model.config.model_kwargs | kwargs),
+    })
+
+
+def prepare_decision_request(messages, model_config):
+    """Use native conversion without creating an Agent, Recorder or execution."""
+    model = LitellmModel(**public_config(deepcopy(model_config)))
+    prepared = model._prepare_messages_for_api(deepcopy(messages))
+    return model, model_request(model, prepared)
+
+
 @dataclass
 class ModelReply:
     raw: dict
@@ -158,13 +175,7 @@ class ObservedModel(LitellmModel):
             error = error.__cause__ or error.__context__
 
     def _query(self, messages, **kwargs):
-        request = {
-            "model": self.config.model_name,
-            "messages": messages,
-            "tools": [BASH_TOOL],
-            **(self.config.model_kwargs | kwargs),
-        }
-        public_config(request)
+        request = model_request(self, messages, **kwargs)
         self.call.observe("request", Payload.json(request))
         self.client_requests += 1
         self._request_attempt += 1

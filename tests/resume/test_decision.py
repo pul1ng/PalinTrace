@@ -1,14 +1,20 @@
+import json
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from palinreplay.resume.context import ResumePrefix
-from palinreplay.resume.decision import build_resume_messages, resolve_resume_model
+from palinreplay.resume.decision import (
+    build_resume_messages,
+    prepare_resume_decision,
+    resolve_resume_model,
+)
 
 
 @pytest.fixture
-def session():
+def session(tmp_path):
     messages = [{"role": "system", "content": "Use bash"}, {"role": "user", "content": "Task"}]
     for index in range(1, 21):
         call_id = f"service-tool-{index}"
@@ -24,8 +30,17 @@ def session():
         context={"messages": messages, "counters": {"n_calls": 20, "cost": 0}},
         input_position={"next_message": 42},
     )
-    return SimpleNamespace(prefix=ResumePrefix(materials),
-                           start=SimpleNamespace(model="M", max_steps=2))
+    materials.context["config"] = {"model": {
+        "model_name": "parent-A", "model_kwargs": {"max_tokens": 128},
+    }}
+    return SimpleNamespace(
+        prefix=ResumePrefix(materials),
+        start=SimpleNamespace(model="M", max_steps=2, source_store=tmp_path / "source",
+                              node=SimpleNamespace(run_id="parent-run", node_id="source-C20",
+                                                   index=20, state_id="state-C20")),
+        report={"restore_status": "passed", "preparation": {"status": "ready"}},
+        report_path=tmp_path / "report.json", executor=Mock(),
+    )
 
 
 def test_inherited_messages_are_an_independent_copy(session):
@@ -95,3 +110,44 @@ def test_invalid_configuration_does_not_print_private_inputs(session, llm_config
         resolve_resume_model(session, llm_config=llm_config)
     assert "decision-test-secret" not in str(raised.value)
     assert "bad-url-with-private-value" not in str(raised.value)
+
+
+@pytest.mark.parametrize("instruction", [None, "下一步先检查 B 的日志"])
+def test_prepared_input_is_durable_and_public(session, llm_config, instruction):
+    from palinreplay.agents.mini import load_native
+
+    saved = deepcopy(session.prefix.context)
+    prepared = prepare_resume_decision(session, instruction=instruction, llm_config=llm_config)
+
+    def capture(**request):
+        evidence = json.loads(session.report_path.read_text())["decision"]
+        assert evidence["status"] == "prepared" and evidence["model_requests"] == 0
+        assert evidence["request"] == request
+        assert evidence["source"]["node_id"] == "source-C20"
+        assert evidence["messages"] == prepared.messages
+        assert evidence["inherited_message_count"] == 42
+        assert evidence["instruction"] == instruction
+        assert request["model"] == "openai/M"
+        assert request["tools"] == [load_native().BASH_TOOL]
+        assert len(request["messages"]) == 42 + (instruction is not None)
+        assert not any("extra" in message for message in request["messages"])
+        assert request["messages"][41]["tool_call_id"] == "service-tool-20"
+        if instruction is not None:
+            assert request["messages"][-1] == {"role": "user", "content": instruction}
+        assert "decision-test-secret" not in session.report_path.read_text()
+        assert "api_key" not in request and "api_base" not in request
+
+    capture(**prepared.request)
+    assert session.prefix.context == saved
+    assert not session.executor.mock_calls
+
+
+def test_failed_evidence_write_never_delivers_prepared_request(session, llm_config, monkeypatch):
+    def fail(*args, **kwargs):
+        raise OSError("evidence unavailable")
+
+    monkeypatch.setattr("palinreplay.resume.decision.write_json", fail)
+    with pytest.raises(OSError, match="evidence unavailable"):
+        prepare_resume_decision(session, llm_config=llm_config)
+    assert session.report["decision"]["model_requests"] == 0
+    assert not session.executor.mock_calls
