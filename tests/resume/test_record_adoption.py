@@ -36,8 +36,9 @@ def test_real_results_use_mini_messages_and_local_adoption_positions(
             rec.start()
             step = rec.begin_step()
             context.accept_decision(step, saved)
-            calls, results = _execute_tools(session, step, saved["actions"])
-            context.accept_results(saved["actions"], calls, results)
+            calls, results, submission = _execute_tools(session, step, saved["actions"])
+            assert submission is None
+            assert context.accept_results(saved["actions"], calls, results)
             assert len(context.messages) == 45 + guided
             assert context.messages[:42] == inherited["messages"]
             if guided:
@@ -75,32 +76,13 @@ def test_partial_or_misaligned_results_are_not_adopted(
             rec.start()
             step = rec.begin_step()
             context.accept_decision(step, saved)
-            calls, results = _execute_tools(session, step, saved["actions"])
+            calls, results, submission = _execute_tools(session, step, saved["actions"])
+            assert submission is None
             before = deepcopy(context.messages)
             with pytest.raises(ValueError, match=r"incomplete|align"):
                 context.accept_results(saved["actions"], calls[::-1] if fault == "swapped" else calls,
                                        results[:1] if fault == "missing" else results)
             assert context.messages == before
             assert all(read_call(store, call.execution_id).phase == "result" for call in calls)
-            rec.cancel()
-            rec.close()
-
-
-def test_native_submission_stops_a_multi_tool_group_after_recording_the_return(
-    tmp_path, session, decision, execution_config,
-):
-    session.executor.execute.return_value = ExecResult(
-        "first", b"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndone\n", 0, .1,
-    )
-    with _claim_decision(session, decision) as saved:
-        context = ResumeRecordContext(session, saved)
-        with RecordStore.create(tmp_path / "record") as store:
-            rec = test_record_context.context_recorder(store, context)
-            rec.start()
-            step = rec.begin_step()
-            context.accept_decision(step, saved)
-            with pytest.raises(ValueError, match="submission short-circuited"):
-                _execute_tools(session, step, saved["actions"])
-            assert session.executor.execute.call_count == 1
             rec.cancel()
             rec.close()

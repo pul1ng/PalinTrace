@@ -96,7 +96,8 @@ start = select_resume_start("outputs/record/SOURCE", "C20", model="openai/M", ma
 with restore_resume_start(start, services_config="outputs/preprocess/SOURCE/services.json") as session:
     decision = decide_resume_start(session, llm_config="config/llm/llm.toml")
     node = record_resume_step(session, decision)
-    print(node.run_id, node.node_id, node.index)  # independent branch C21
+    if node is not None:
+        print(node.run_id, node.node_id, node.index)  # independent branch C21
 ```
 
 Omit `services_config` to skip preparation. A valid manifest selecting no services
@@ -117,6 +118,9 @@ including when the decision used the last budget slot. Modified decisions, repea
 consumption and closed sessions are rejected before execution. Actual results are saved
 as each tool returns; the complete group is admitted before one node is published under
 `session.output / "record"`. Ordinary nonzero exits retain their actual output and status.
+On native submission, mini accepts the submitting tool's `exit` message. A single-tool submission
+publishes a node. When submission cuts a multi-tool group short, the function returns `None`,
+the recording and session report `incomplete`, and the Store retains the tools' actual returns.
 Interruptions and recording failures preserve the call tail, and `report.json.recording`
 reports the actual published node count. `session.context` remains the source prefix;
 the new node contains the updated branch messages and input position. This API handles

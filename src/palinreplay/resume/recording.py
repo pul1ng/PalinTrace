@@ -113,9 +113,10 @@ def finish_recording(session, primary=None):
             pending = error
         else:
             pending.add_note(f"Resume progress could not be read: {type(error).__name__}")
-    attempt["status"] = ("succeeded" if pending is None else
-                         "interrupted" if not isinstance(pending, Exception) else "failed")
-    if pending is not None:
+    if pending is None:
+        attempt["status"] = "incomplete" if attempt.get("run_status") == "incomplete" else "succeeded"
+    else:
+        attempt["status"] = "failed" if isinstance(pending, Exception) else "interrupted"
         attempt["error"] = exception_evidence(pending)
     try:
         write_json(session.report_path, session.report, replace=True)

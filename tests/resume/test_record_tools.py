@@ -50,7 +50,8 @@ def test_tools_use_saved_execution_defaults_and_persist_before_next_call(
                 requests.append(request)
                 return ExecResult(request["action"]["command"], b"marker\xff\r\n", exit_code, .1)
             session.executor.execute.side_effect = execute
-            calls, results = _execute_tools(session, step, saved["actions"])
+            calls, results, submission = _execute_tools(session, step, saved["actions"])
+            assert submission is None
             assert len(calls) == len(results) == 2
             assert [request["action"] for request in requests] == decision.actions
             for request in requests:

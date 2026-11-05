@@ -96,7 +96,8 @@ start = select_resume_start("outputs/record/来源录制", "C20", model="openai/
 with restore_resume_start(start, services_config="outputs/preprocess/来源清单/services.json") as session:
     decision = decide_resume_start(session, llm_config="config/llm/llm.toml")
     node = record_resume_step(session, decision)
-    print(node.run_id, node.node_id, node.index)  # 独立分支 C21
+    if node is not None:
+        print(node.run_id, node.node_id, node.index)  # 独立分支 C21
 ```
 
 `session` 提供 `start`、`materials`、`restored`、`executor`、`prefix`、`context`、
@@ -114,9 +115,11 @@ with restore_resume_start(start, services_config="outputs/preprocess/来源清�
 准备失败不交付会话，保留已完成的恢复和准备证据并清理资源。调用方之后抛错不会改写先前结论。
 
 `decide_resume_start()` 取得一次回答，可通过 `instruction=` 在来源前缀之后追加引导。
-`record_resume_step()` 消费这份已保存的回答，不再请求模型；即使决策预算已用完，仍会完成该工具组。
+`record_resume_step()` 消费这份已保存的回答。即使决策预算已用完，本轮工具也会继续执行，新增模型请求数为零。
 两者须使用同一个打开的会话，修改决策、重复消费或关闭后调用会在执行前被拒绝。
 工具逐条保存实际输出和退出码，全部接纳后才在 `session.output / "record"` 提交一个新节点。
+mini 收到任务提交标记时，会接纳提交工具的 `exit` 消息。单工具提交会保存节点。多工具组因此提前结束时，
+函数返回 `None`，录制和会话报告记为 `incomplete`，已执行工具的真实返回保存在 Store 中。
 普通非零退出照实接纳；中断和录制故障保留已发生的调用，并在 `report.json.recording` 中报告实际完整节点数。
 来源前缀仍由 `session.context` 保留，分支更新后的消息与输入位置保存在新节点中。
 当前入口完成一轮；自动请求下一轮决策的循环留待后续。验收与重跑方式见[第五步验收记录](docs/resume-stage5-acceptance.md)。

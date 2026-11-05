@@ -1,11 +1,14 @@
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.interfaces import Payload
-from palinreplay.core.models import Node, RunEnd
+from palinreplay.core.models import Execution, Failure, Node, Operation, RunEnd, ToolGroup
+from palinreplay.record.calls import read_call
 from palinreplay.resume import (
     ResumeSession,
     decide_resume_start,
@@ -14,6 +17,7 @@ from palinreplay.resume import (
 )
 from palinreplay.resume.context import ResumePrefix
 from palinreplay.resume.materials import load_resume_materials
+from palinreplay.resume.report import finish_report
 from palinreplay.sandbox.base import ExecResult
 from palinreplay.storage.store import RecordStore
 from tests.helpers import recorder_smoke as fake
@@ -27,7 +31,7 @@ execution_config = test_record_tools.execution_config
 
 
 @pytest.fixture
-def recordable(tmp_path, session, llm_config, response, execution_config, monkeypatch):
+def recordable(tmp_path, session, llm_config, response, execution_config, monkeypatch, request):
     monkeypatch.setattr("palinreplay.storage.btrfs.verification.verify_state", lambda *a: None)
     execution_config["interpreter"] = ["bash", "-c"]
     context = deepcopy(session.prefix.context)
@@ -52,10 +56,11 @@ def recordable(tmp_path, session, llm_config, response, execution_config, monkey
                             executor=executor, prefix=ResumePrefix(materials), output=output,
                             report={"phase": "caller", "restore_status": "passed",
                                     "preparation": {"status": "skipped"}})
-    second = response.choices[0].message.tool_calls[0].model_copy(deep=True)
-    second.id = "branch-tool-2"
-    second.function.arguments = '{"command":"cat /tmp/marker"}'
-    response.choices[0].message.tool_calls.append(second)
+    for index in range(2, getattr(request, "param", 2) + 1):
+        extra = response.choices[0].message.tool_calls[0].model_copy(deep=True)
+        extra.id = f"branch-tool-{index}"
+        extra.function.arguments = '{"command":"cat /tmp/marker"}'
+        response.choices[0].message.tool_calls.append(extra)
     complete = Mock(return_value=response)
     monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", complete)
     decision = decide_resume_start(session, llm_config=llm_config)
@@ -89,8 +94,6 @@ def test_public_entry_commits_one_independent_node_and_does_not_query_again(reco
 
 
 def test_public_entry_rejects_duplicate_without_new_tools_or_nodes(recordable):
-    from palinreplay.core.errors import RecordUsageError
-
     case = recordable
     node = record_resume_step(case.session, case.decision)
     with pytest.raises(RecordUsageError, match="already consumed"):
@@ -99,3 +102,62 @@ def test_public_entry_rejects_duplicate_without_new_tools_or_nodes(recordable):
     assert len(case.backend.captures) == 1
     with RecordStore.open(case.session.output / "record") as store:
         assert store.list(Node) == (node,)
+
+
+@pytest.mark.parametrize("recordable,submit_index", [(2, 0), (2, 1), (1, 0)], indirect=["recordable"])
+def test_native_submission_adopts_only_the_submitting_tool(recordable, submit_index):
+    session, decision = recordable.session, recordable.decision
+    actions = decision.actions
+    outputs = [b"ordinary output\n"] * submit_index + [
+        b"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndone\n"
+    ]
+    session.executor.execute.side_effect = [
+        ExecResult(action["command"], output, 0, .1)
+        for action, output in zip(actions, outputs, strict=False)
+    ]
+    exit_message = {
+        "role": "exit", "content": "done\n", "extra": {"exit_status": "Submitted", "submission": "done\n"},
+    }
+    node = record_resume_step(session, decision)
+    complete = len(actions) == 1
+    assert (node is not None) == complete
+    assert session.executor.execute.call_count == len(outputs)
+    assert recordable.complete.call_count == 1
+    with pytest.raises(RecordUsageError, match="already consumed"):
+        record_resume_step(session, decision)
+    with RecordStore.open(session.output / "record") as store:
+        end, = store.list(RunEnd)
+        assert end.status == ("completed" if complete else "incomplete")
+        details = store.read_json(end.details)
+        assert details["agent_exit_status"] == "Submitted"
+        group, = store.list(ToolGroup)
+        assert list(group.tool_call_ids) == [action["tool_call_id"] for action in actions]
+        tools = [op for op in store.list(Operation) if op.kind == "tool"]
+        assert [op.tool_call_id for op in tools] == list(group.tool_call_ids[:len(outputs)])
+        executions = {e.operation_id: e.execution_id for e in store.list(Execution)}
+        for index, op in enumerate(tools):
+            trace = read_call(store, executions[op.operation_id])
+            assert store.read_bytes(trace.events[1].payload) == outputs[index]
+            if index == submit_index:
+                assert trace.phase == "accepted"
+                assert store.read_json(trace.events[-1].payload)["messages"] == [exit_message]
+            else:
+                assert trace.phase == "result"
+        assert not store.list(Failure) and store.check_integrity().ok
+        if complete:
+            assert store.list(Node) == (node,)
+            assert store.read_json(node.context)["messages"][-1] == exit_message
+        else:
+            assert not store.list(Node) and not recordable.backend.captures
+            assert details["final_control_context"]["messages"][-1] == exit_message
+            admitted = details["final_input_position"]["adoptions"][-1]
+            assert admitted["execution_id"] == executions[tools[-1].operation_id]
+    report = session.report
+    report.update(cleanup_errors=[], cleanup={}, caller={"status": "completed"})
+    finish_report(report, session.output, restored=None, executor=session.executor, client=None,
+                  own_client=False, primary=None)
+    final = json.loads(session.report_path.read_text())
+    assert final["recording"]["status"] == ("succeeded" if complete else "incomplete")
+    assert final["recording"]["accepted_tools"] == 1
+    assert final["recording"]["complete_nodes"] == int(complete)
+    assert final["cleanup_confirmed"] and final["status"] == ("passed" if complete else "incomplete")

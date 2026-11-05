@@ -49,13 +49,12 @@ def finish_report(report, output, *, restored, executor, client, own_client, pri
             errors.append({"resource": "restore", "error": "resource cleanup unconfirmed",
                            "details": resources.get("cleanup_errors", [])})
     report["cleanup_confirmed"] = not errors
-    report["status"] = (
-        "passed" if report["restore_status"] == "passed"
-        and report["preparation"]["status"] in ("ready", "skipped")
-        and ("decision" not in report or report["decision"]["status"] == "succeeded")
-        and ("recording" not in report or report["recording"]["status"] == "succeeded")
-        and report["caller"]["status"] == "completed" and not errors else "failed"
-    )
+    report["status"] = "failed"
+    if (report["restore_status"] == "passed" and report["preparation"]["status"] in ("ready", "skipped")
+            and ("decision" not in report or report["decision"]["status"] == "succeeded")
+            and report["caller"]["status"] == "completed" and not errors):
+        recording = report.get("recording", {}).get("status", "succeeded")
+        report["status"] = {"succeeded": "passed", "incomplete": "incomplete"}.get(recording, "failed")
     report["phase"] = "complete"
     pending = primary
     if errors:

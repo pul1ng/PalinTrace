@@ -1,6 +1,6 @@
 # Resume stage 5 acceptance
 
-Stage 5 consumes the fourth stage's saved `ResumeDecision` in the same open session, executes its tools in order, admits their actual returns and publishes one independent branch node. It makes no new model request and completes the already obtained tool group even when the decision budget is exhausted.
+Stage 5 consumes the fourth stage's saved `ResumeDecision` in the same open session. It executes the pending tools in order even when the decision budget is exhausted, admits their actual returns and publishes one independent branch node for a complete step. Stage 5 makes zero new model requests.
 
 ```python
 from palinreplay.resume import (
@@ -14,6 +14,8 @@ with restore_resume_start(start, output=output, services_config=services) as ses
 ```
 
 The entry accepts one saved decision per active session. It checks messages, assistant response, raw response, ordered tool IDs/arguments and accounting against private copies of the fourth-stage evidence. A successful claim is persisted before execution and cannot be retried after failure. Each real tool return is persisted before the next tool starts. Native mini observation formatting and Record admission preserve actual output, exit code and message positions. Only a fully admitted group reaches `Recorder.commit_step()`.
+
+A native submission stops tool execution immediately and delivers the submitting tool's `exit` message. A single-tool submission produces a complete node. In a multi-tool group, earlier results remain recorded, later tools are skipped, and `record_resume_step()` returns `None`. The RunEnd and the recording and session reports mark the group `incomplete`.
 
 The branch Store lives at `session.output / "record"`. Its protected config pins the source Store, Run, Node, State and original encoded materials. Its first local node has index `source.index + 1`, independent Run/Node IDs and no external ID in the local parent fields. Resume has no pinned historical endpoint; Replay retains its endpoint checks. The source Record and Btrfs pool remain retained dependencies. Independent recovery means recovery after the execution container has been removed.
 
@@ -113,3 +115,7 @@ The final `last_parent` source is Run `0632bb4df85f4c9b8d0176787581b64c`, Node `
 For interruption, the recording report counts two executor-entry attempts while the acceptance guard confirms only one command reached the real executor. The second recorded result is explicitly unknown. Failure-case `status=passed` in the acceptance summary means the expected failure and evidence/cleanup checks passed; their session reports correctly remain failed or interrupted. Post-publication errors and unreadable Store facts were additionally verified by automated fault tests.
 
 All eight meta tasks are complete. There are no blocked or unfinished acceptance items and no additional requirements for this group. The automatic multi-round decision loop remains outside this one-step implementation.
+
+## Post-review regression
+
+In `outputs/resume/261105_224340_stage5_review_fixes/`, the two real multi-tool submission cases accepted the native exit message and ended `incomplete` with zero nodes. One tool executed when the submitting command came first, and two executed when it came last. A controlled comparison with Record matched the tool events, accepted messages and RunEnd status in both orders.

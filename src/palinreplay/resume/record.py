@@ -50,20 +50,34 @@ def _claim_decision(session, decision):
         session._decision_lock.release()
 
 
-def record_resume_step(session, decision) -> Node:
-    """Execute one saved decision and return its complete, restorable branch node."""
+def record_resume_step(session, decision) -> Node | None:
+    """Return the committed node, or None if submission left the tool group incomplete."""
     with _claim_decision(session, decision) as evidence:
         attempt = session._record_attempt
         try:
             context = ResumeRecordContext(session, evidence)
             with open_recording(session, context.export) as (recorder, step):
                 context.accept_decision(step, evidence)
-                calls, results = _execute_tools(session, step, evidence["actions"])
-                context.accept_results(evidence["actions"], calls, results)
-                node = recorder.commit_step()
-                attempt.update(complete_nodes=1, node_id=node.node_id, state_id=node.state_id,
-                               message_count=len(context.messages))
-                recorder.finish("Saved Resume decision completed")
+                actions = evidence["actions"]
+                calls, results, submission = _execute_tools(session, step, actions)
+                complete = context.accept_results(actions, calls, results, submission=submission)
+                details = None
+                if submission is not None:
+                    details = {
+                        "agent_exit_status": context.messages[-1]["extra"]["exit_status"],
+                        "record_complete": complete,
+                        "final_control_context": context.context,
+                        "final_input_position": context.input_position,
+                    }
+                if complete:
+                    node = recorder.commit_step()
+                    attempt.update(complete_nodes=1, node_id=node.node_id, state_id=node.state_id,
+                                   message_count=len(context.messages))
+                    recorder.finish("Saved Resume decision completed", details=details)
+                else:
+                    recorder.end_incomplete("Native Agent submitted with an incomplete tool group",
+                                            details=details)
+                    node = None
         except BaseException as error:
             finish_recording(session, error)
             raise
@@ -104,6 +118,5 @@ def _execute_tools(session, step, actions):
                 session.executor, native.BorrowedEnvironment.output(results[-1]),
             )
         except native.Submitted as submitted:
-            if len(actions) != 1:
-                raise ValueError("submission short-circuited an incomplete tool group") from submitted
-    return calls, results
+            return calls, results, submitted
+    return calls, results, None
