@@ -59,7 +59,9 @@ def no_new_work(counts, actions):
         if category == "startup":
             entry["service"] = action["commands"][command]
         else:
-            entry["label"] = action["label"]
+            entry.update({key: action[key] for key in ("label", "service", "attempt") if key in action})
+            if category == "request":
+                entry["request_passed"] = False
         actions.append(entry)
         counts[category + "_commands"] += 1
         started = time.monotonic()
@@ -105,12 +107,16 @@ def no_new_work(counts, actions):
         yield
 
 
-def check(executor, label, command):
-    token = _ACTION.set({"category": "inspection", "executor": id(executor), "label": label})
+def run_command(executor, label, command, *, category="inspection", **metadata):
+    token = _ACTION.set({"category": category, "executor": id(executor), "label": label, **metadata})
     try:
-        result = executor.exec(command)
+        return executor.exec(command)
     finally:
         _ACTION.reset(token)
+
+
+def check(executor, label, command):
+    result = run_command(executor, label, command)
     assert result.exit_code == 0, (label, result.exit_code, result.text)
     return result.text
 
@@ -143,12 +149,64 @@ def check_commands(session):
             "temporary_file_deleted": True}
 
 
+def request_services(executor, actions, order):
+    attempts = dict.fromkeys(("A", "B", "C"), 0)
+    for name in order:
+        attempts[name] += 1
+        result = run_command(
+            executor, name + str(attempts[name]),
+            f"{PYTHON} /opt/palin-replay-service-fixture/{name}/request.py",
+            category="request", service=name, attempt=attempts[name],
+        )
+        response = json.loads(result.text)
+        entry = actions[-1]
+        entry.update(http_status=response.get("status"), body=response.get("body"))
+        assert result.exit_code == 0, entry
+        assert response.get("status") == 200, entry
+        assert response.get("body") == f"PALIN_SERVICE_{name}_OK", entry
+        entry["request_passed"] = True
+
+
+def validate_requests(actions, group, order):
+    requests = [action for action in actions
+                if action["group"] == group and action["category"] == "request"]
+    assert [action["service"] for action in requests] == list(order), requests
+    for name in ("A", "B", "C"):
+        selected = [action for action in requests if action["service"] == name]
+        assert [action["attempt"] for action in selected] == list(range(1, order.count(name) + 1))
+    assert all(action["exit_code"] == 0 and action["http_status"] == 200
+               and action["body"] == f"PALIN_SERVICE_{action['service']}_OK"
+               and action["duration_sec"] >= 0 and action["request_passed"] for action in requests)
+    return {name: sum(action["service"] == name for action in requests) for name in ("A", "B", "C")}
+
+
+def check_closed_ports(executor, names):
+    ports = {"A": 18765, "B": 18766, "C": 18767}
+    selected = {name: ports[name] for name in names}
+    code = (
+        "import json,socket\n"
+        f"ports={selected!r}\n"
+        "for name,port in ports.items():\n"
+        "    try:\n"
+        "        connection=socket.create_connection(('127.0.0.1',port),timeout=1)\n"
+        "    except ConnectionRefusedError:\n"
+        "        continue\n"
+        "    else:\n"
+        "        connection.close()\n"
+        "        raise AssertionError(name+' port is open')\n"
+        "print(json.dumps({'closed':list(ports)}))\n"
+    )
+    result = json.loads(check(executor, "unselected_ports_closed", python(code)))
+    assert result == {"closed": list(names)}
+    return result
+
+
 def main(source, services_config, output):
     source, output = Path(source).resolve(), Path(output).absolute()
     recording = source.parent if source.name == "record" else source
     outside_store(recording, output)
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
-    counts = dict.fromkeys((*FORBIDDEN, "startup_commands", "inspection_commands"), 0)
+    counts = dict.fromkeys((*FORBIDDEN, "startup_commands", "inspection_commands", "request_commands"), 0)
     summary = {"status": "failed", "source": str(recording), "counts": counts,
                "actions": [], "r1_calls": [], "sessions": {}}
     write_json(output / "acceptance.json", summary)
@@ -193,37 +251,63 @@ def main(source, services_config, output):
             write_json(output / "source-nodes-before.json", nodes_before)
             client = connect_docker(600)
             summary["pool_before"] = restoration.pool_audit(client, materials.snapshot)
-            destination = output / "C20"
-            token = _GROUP.set("C20")
-            try:
-                print("Restoring C20, preparing A/B, and checking real commands", flush=True)
-                with restore_resume_start(start, destination, client,
-                                          services_config=services_config) as session:
-                    assert session.report["r1"]["status"] == "passed"
-                    assert session.report["r1"]["scope"] == SCOPE
-                    assert session.report["preparation"]["status"] == "ready"
-                    prefix = restoration.compare_prefix(session)
-                    commands = check_commands(session)
-            finally:
-                _GROUP.reset(token)
-            report = restoration.checked_report(client, destination)
-            assert report["status"] == "passed"
-            assert [item["name"] for item in report["preparation"]["services"]] == ["A", "B"]
-            startups = [action for action in summary["actions"] if action["category"] == "startup"]
-            assert [action["service"] for action in startups] == ["A", "B"]
-            container = session.restored.container.id
-            assert all(action["container_id"] == container for action in summary["actions"])
-            assert len(summary["r1_calls"]) == 1
-            r1_call, = summary["r1_calls"]
-            assert r1_call["container_id"] == container
-            assert r1_call["commands_before_r1"] == r1_call["commands_after_r1"] == 0
-            summary["sessions"]["C20"] = {
-                "status": "passed", "container_id": container, "report": str(destination / "report.json"),
-                "restore_report": str(destination / "restore-report.json"),
-                "preparation_report": str(destination / "preparation.json"), "prefix": prefix,
-                "commands": commands, "startup_counts": {"A": 1, "B": 1, "C": 0},
-                "same_container": True, "r1_before_startup": True, "cleanup_confirmed": True,
-            }
+            for index, node_id, selected, order, closed in (
+                (20, restoration.EXPECTED_NODE_ID, ["A", "B"], ["A", "B"] * 3, ["C"]),
+                (35, "fd94fb57b2944f98affd89b2a931d308", ["C"], ["C"] * 3, ["A", "B"]),
+            ):
+                group = f"C{index}"
+                start = select_resume_start(source, group, model="M", max_steps=2)
+                assert start.node.node_id == node_id
+                group_materials = load_resume_materials(start)
+                snapshot_before = restoration.pool_audit(client, group_materials.snapshot)
+                destination = output / group
+                entry = {"status": "in_progress", "report": str(destination / "report.json"),
+                         "restore_report": str(destination / "restore-report.json"),
+                         "preparation_report": str(destination / "preparation.json")}
+                summary["sessions"][group] = entry
+                token = _GROUP.set(group)
+                try:
+                    print(f"Restoring {group}, preparing {selected}, and making requests", flush=True)
+                    with restore_resume_start(start, destination, client,
+                                              services_config=services_config) as session:
+                        assert session.report["r1"]["status"] == "passed"
+                        assert session.report["r1"]["scope"] == SCOPE
+                        assert session.report["preparation"]["status"] == "ready"
+                        entry["prefix"] = restoration.compare_prefix(session)
+                        if index == 20:
+                            entry["commands"] = check_commands(session)
+                        request_services(session.executor, summary["actions"], order)
+                        entry["closed_ports"] = check_closed_ports(session.executor, closed)
+                except BaseException as error:
+                    entry.update(status="failed", error_type=type(error).__name__, error=str(error))
+                    raise
+                finally:
+                    _GROUP.reset(token)
+                report = restoration.checked_report(client, destination)
+                assert report["status"] == "passed"
+                assert [item["name"] for item in report["preparation"]["services"]] == selected
+                actions = [action for action in summary["actions"] if action["group"] == group]
+                startups = [action for action in actions if action["category"] == "startup"]
+                assert [action["service"] for action in startups] == selected
+                container = session.restored.container.id
+                assert all(action["container_id"] == container for action in actions)
+                r1_call, = [call for call in summary["r1_calls"] if call["group"] == group]
+                assert r1_call["container_id"] == container
+                assert r1_call["commands_before_r1"] == r1_call["commands_after_r1"]
+                assert r1_call["commands_after_r1"] == summary["actions"].index(actions[0])
+                snapshot_after = restoration.pool_audit(client, group_materials.snapshot)
+                assert snapshot_before["source"] == snapshot_after["source"]
+                assert snapshot_before["workspaces"] == snapshot_after["workspaces"]
+                entry.update(
+                    status="passed", container_id=container,
+                    startup_counts={name: sum(action["service"] == name for action in startups)
+                                    for name in ("A", "B", "C")},
+                    request_counts=validate_requests(summary["actions"], group, order),
+                    same_container=True, r1_before_startup=True, cleanup_confirmed=True,
+                    snapshot_before=snapshot_before, snapshot_after=snapshot_after,
+                )
+            assert len(summary["r1_calls"]) == 2
+            assert summary["sessions"]["C20"]["container_id"] != summary["sessions"]["C35"]["container_id"]
             summary["pool_after"] = restoration.pool_audit(client, materials.snapshot)
             assert summary["pool_before"]["source"] == summary["pool_after"]["source"]
             assert summary["pool_before"]["workspaces"] == summary["pool_after"]["workspaces"]

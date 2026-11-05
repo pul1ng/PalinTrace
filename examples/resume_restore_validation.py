@@ -151,6 +151,7 @@ def check(executor, actions, label, command):
 
 def compare_prefix(session):
     materials, node = session.materials, session.start.node
+    index, message_count = node.index, 2 * node.index + 2
     with RecordStore.open(session.start.source_store, read_only=True) as store:
         context = store.read_json(node.context)
         assert session.context == context
@@ -159,23 +160,24 @@ def compare_prefix(session):
         assert materials.context_payload.data == store.read_bytes(node.context)
         assert materials.input_position_payload.data == store.read_bytes(node.input_position)
         assert materials.config_payload.data == store.read_bytes(materials.run.config)
-        c21_id, = store.find_node_ids(index=21, run_id=node.run_id)
-        c21 = store.read_json(store.get(Node, c21_id).context)
+        next_id, = store.find_node_ids(index=index + 1, run_id=node.run_id)
+        next_context = store.read_json(store.get(Node, next_id).context)
         ends = store.list(RunEnd, run_id=node.run_id)
         assert ends, "fixture parent Run must be finished"
     messages = session.context["messages"]
-    assert len(messages) == 42 and session.input_position["next_message"] == 42
-    assert session.prefix.counters["n_calls"] == 20
-    assert messages[-1]["tool_call_id"] == "service-tool-20"
-    assert len(c21["messages"]) == 44 and c21["messages"][:42] == messages
-    assert not any(m.get("tool_call_id") == "service-tool-21" for m in messages)
+    assert len(messages) == message_count and session.input_position["next_message"] == message_count
+    assert session.prefix.counters["n_calls"] == index
+    assert messages[-1]["tool_call_id"] == f"service-tool-{index}"
+    assert len(next_context["messages"]) == message_count + 2
+    assert next_context["messages"][:message_count] == messages
+    assert not any(m.get("tool_call_id") == f"service-tool-{index + 1}" for m in messages)
     assert session.start.model == "M" and session.start.max_steps == 2
-    return {"message_count": 42, "next_message": 42, "historical_calls": 20,
+    return {"message_count": message_count, "next_message": message_count, "historical_calls": index,
             "messages": [{"index": i, "equal": a == b,
                           "sha256": hashlib.sha256(json_bytes(a)).hexdigest()}
                          for i, (a, b) in enumerate(zip(messages, context["messages"], strict=True))],
-            "raw_payloads_equal": True, "configuration_equal": True, "C21_excluded": True,
-            "parent_run_ended": True}
+            "raw_payloads_equal": True, "configuration_equal": True,
+            f"C{index + 1}_excluded": True, "parent_run_ended": True}
 
 
 def check_environment(session, actions):
