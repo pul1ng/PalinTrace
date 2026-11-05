@@ -5,13 +5,17 @@ from unittest.mock import Mock
 
 import pytest
 
-from palinreplay.resume import decide_resume_start
+from palinreplay.resume import ResumeDecisionError, decide_resume_start
 from palinreplay.resume.context import ResumePrefix
 from palinreplay.resume.decision import (
     build_resume_messages,
     prepare_resume_decision,
     resolve_resume_model,
 )
+from tests.resume import test_services, test_session
+
+setup = test_session.setup
+prepared = test_services.prepared
 
 
 @pytest.fixture
@@ -256,8 +260,6 @@ def test_multiple_actions_preserve_response_order_ids_and_full_arguments(
 
 @pytest.mark.parametrize("fault", ["json", "duplicate_id", "command_type", "no_tools"])
 def test_invalid_group_delivers_no_partial_actions(session, llm_config, response, monkeypatch, fault):
-    from palinreplay.agents.mini import load_native
-
     calls = response.choices[0].message.tool_calls
     second = calls[0].model_copy(deep=True)
     second.id = "branch-tool-2"
@@ -272,8 +274,9 @@ def test_invalid_group_delivers_no_partial_actions(session, llm_config, response
         response.choices[0].message.tool_calls = []
     transport = Mock(return_value=response)
     monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
-    with pytest.raises((load_native().FormatError, ValueError)):
+    with pytest.raises(ResumeDecisionError) as raised:
         decide_resume_start(session, llm_config=llm_config)
+    assert raised.value.category == "tool_format"
     evidence = json.loads(session.report_path.read_text())["decision"]
     assert evidence["raw_response"] == response.model_dump(mode="json")
     assert evidence["usage"] == response.model_dump(mode="json")["usage"]
@@ -304,3 +307,77 @@ def test_new_budget_and_usage_are_independent_of_inherited_history(
     assert accounting["usage"] == response.model_dump(mode="json")["usage"]
     assert accounting["cost"] == known_cost
     assert accounting["cost_known"] == (known_cost is not None)
+
+
+@pytest.mark.parametrize("category", ["config", "request", "tool_format"])
+def test_decision_failures_preserve_preparation_evidence_and_cleanup(
+    prepared, session, llm_config, response, monkeypatch, category,
+):
+    from palinreplay.agents.mini import load_native
+    from palinreplay.resume import restore_resume_start
+
+    restored = prepared.session
+    restored.materials.context.update(deepcopy(session.prefix.context))
+    restored.materials.input_position.update(next_message=42)
+    transport = Mock(return_value=response)
+    if category == "config":
+        llm_config.write_text('[llm]\nmodel="M"\napi_key=""\n')
+    elif category == "request":
+        error = RuntimeError("request failed with decision-test-secret at https://model.invalid/v1")
+        error.add_note("private note decision-test-secret")
+        transport.side_effect = error
+    else:
+        response.choices[0].message.tool_calls[0].function.arguments = "invalid json"
+    monkeypatch.setattr(load_native().litellm, "completion", transport)
+    with pytest.raises(ResumeDecisionError) as raised:
+        with restore_resume_start(restored.start, restored.output,
+                                  services_config=prepared.path) as live:
+            assert live.report["preparation"]["status"] == "ready"
+            before = restored.executor.exec.call_count
+            decide_resume_start(live, llm_config=llm_config)
+    error = raised.value
+    report = json.loads((restored.output / "report.json").read_text())
+    decision = report["decision"]
+    assert error.category == category and error.decision == decision
+    assert decision["error"]["category"] == category
+    assert decision["status"] == "failed" and decision["actions"] == []
+    assert decision["model_requests"] == transport.call_count == (category != "config")
+    assert decision["remaining_steps"] == 2 - transport.call_count
+    assert decision["tool_executions"] == decision["complete_nodes"] == 0
+    assert restored.executor.exec.call_count == before
+    assert report["restore_status"] == report["r1"]["status"] == "passed"
+    assert report["preparation"]["status"] == "ready"
+    assert report["cleanup_confirmed"] and not report["cleanup_errors"]
+    assert error.resume_report == report
+    restored.executor.close.assert_called_once()
+    restored.restored.close.assert_called_once()
+    if category == "tool_format":
+        assert decision["raw_response"] == response.model_dump(mode="json")
+        assert decision["usage"] == response.model_dump(mode="json")["usage"]
+    public = json.dumps(report) + str(error) + str(getattr(error, "__notes__", []))
+    assert "decision-test-secret" not in public
+    assert "https://model.invalid/v1" not in public
+
+
+def test_http_failure_is_not_retried(session, llm_config, monkeypatch):
+    import httpx
+    from litellm.llms.openai.openai import OpenAIChatCompletion
+
+    # A distinct endpoint avoids reusing the successful test's cached SDK client.
+    llm_config.write_text('[llm]\nmodel="M"\napi_key="decision-test-secret"\n'
+                          'base_url="https://failure.invalid/v1"\n')
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        assert json.loads(session.report_path.read_text())["decision"]["request"]
+        return httpx.Response(500, json={"error": {"message": "controlled failure"}}, request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr(OpenAIChatCompletion, "_get_sync_http_client",
+                            staticmethod(lambda: client))
+        with pytest.raises(ResumeDecisionError) as raised:
+            decide_resume_start(session, llm_config=llm_config)
+    assert len(requests) == 1 and raised.value.category == "request"
+    assert raised.value.decision["error"]["status_code"] == 500
+    assert not session.executor.mock_calls

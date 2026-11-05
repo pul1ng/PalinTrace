@@ -84,12 +84,39 @@ def prepare_decision_request(messages, model_config):
     return model, model_request(model, prepared)
 
 
+def redact_model_error(error, credentials):
+    """Keep private connection values out of exceptions and public reports."""
+    if credentials is None:
+        return
+    private = (credentials.api_key.get_secret_value(), credentials.base_url)
+
+    def clean(value):
+        if isinstance(value, str):
+            for token in private:
+                value = value.replace(token, "[private]")
+        return value
+
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        error.args = tuple(clean(value) for value in error.args)
+        if isinstance(getattr(error, "message", None), str):
+            error.message = clean(error.message)
+        if hasattr(error, "__notes__"):
+            error.__notes__ = [clean(note) for note in error.__notes__]
+        error = error.__cause__ or error.__context__
+
+
 def complete_decision_request(request, credentials):
     """Send the already journaled input once, adding credentials only here."""
-    return litellm.completion(
-        **deepcopy(request),
-        api_key=credentials.api_key.get_secret_value(), api_base=credentials.base_url,
-    )
+    try:
+        return litellm.completion(
+            **deepcopy(request),
+            api_key=credentials.api_key.get_secret_value(), api_base=credentials.base_url,
+        )
+    except BaseException as error:
+        redact_model_error(error, credentials)
+        raise
 
 
 def parse_decision_actions(model, response):
@@ -185,23 +212,7 @@ class ObservedModel(LitellmModel):
         return policy.copy(before_sleep=before_sleep, sleep=sleep)
 
     def _redact_error(self, error):
-        if self._credentials is None:
-            return
-        private = (self._credentials.api_key.get_secret_value(), self._credentials.base_url)
-
-        def clean(value):
-            if isinstance(value, str):
-                for token in private:
-                    value = value.replace(token, "[private]")
-            return value
-
-        seen = set()
-        while error is not None and id(error) not in seen:
-            seen.add(id(error))
-            error.args = tuple(clean(value) for value in error.args)
-            if isinstance(getattr(error, "message", None), str):
-                error.message = clean(error.message)
-            error = error.__cause__ or error.__context__
+        redact_model_error(error, self._credentials)
 
     def _query(self, messages, **kwargs):
         request = model_request(self, messages, **kwargs)

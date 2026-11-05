@@ -1,4 +1,4 @@
-"""Branch-owned input for decisions at a restored Resume boundary."""
+"""One model decision from a restored boundary, without execution or node commits."""
 
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -12,6 +12,7 @@ from palinreplay.agents.mini import (
     prepare_decision_request,
 )
 from palinreplay.llm import LLMConfig, mini_model_name
+from palinreplay.resume.report import exception_evidence
 from palinreplay.storage.io import write_json
 
 
@@ -26,19 +27,50 @@ class ResumeDecision:
     accounting: dict
 
 
+class ResumeDecisionError(RuntimeError):
+    """A classified failure with the actual decision evidence obtained so far."""
+
+    def __init__(self, category, decision):
+        self.category, self.decision = category, decision
+        super().__init__(f"Resume decision {category} failed: {decision['error']['error']}")
+
+
+def _failed_decision(session, category, error):
+    evidence = session.report["decision"]
+    details = {"category": category, **exception_evidence(error)}
+    if getattr(error, "status_code", None) is not None:
+        details["status_code"] = error.status_code
+    evidence.update(status="failed", error=details, actions=[])
+    failure = ResumeDecisionError(category, evidence)
+    try:
+        write_json(session.report_path, session.report, replace=True)
+    except BaseException as write_error:
+        failure.add_note(f"Decision evidence write also failed: {type(write_error).__name__}")
+    return failure
+
+
 def decide_resume_start(session, *, instruction=None, llm_config=None):
     """Ask the selected model once from a service-ready Resume boundary."""
     prepared = prepare_resume_decision(session, instruction=instruction, llm_config=llm_config)
     evidence = session.report["decision"]
     evidence.update(status="requesting", model_requests=1,
                     remaining_steps=session.start.max_steps - 1)
-    response = complete_decision_request(prepared.request, prepared.credentials)
-    raw = response.model_dump(mode="json")
-    assistant = deepcopy(raw["choices"][0]["message"])
-    evidence.update(status="returned", raw_response=raw, assistant_message=assistant,
-                    usage=deepcopy(raw.get("usage")), **decision_cost(prepared.native_model, response))
+    try:
+        response = complete_decision_request(prepared.request, prepared.credentials)
+    except Exception as error:
+        raise _failed_decision(session, "request", error) from None
+    try:
+        raw = response.model_dump(mode="json")
+        evidence.update(status="returned", raw_response=raw, usage=deepcopy(raw.get("usage")))
+        assistant = deepcopy(raw["choices"][0]["message"])
+        evidence.update(assistant_message=assistant, **decision_cost(prepared.native_model, response))
+    except Exception as error:
+        raise _failed_decision(session, "tool_format", error) from None
     write_json(session.report_path, session.report, replace=True)
-    actions = parse_decision_actions(prepared.native_model, response)
+    try:
+        actions = parse_decision_actions(prepared.native_model, response)
+    except Exception as error:
+        raise _failed_decision(session, "tool_format", error) from None
     evidence.update(status="succeeded", decisions=1, actions=deepcopy(actions))
     write_json(session.report_path, session.report, replace=True)
     accounting = {key: deepcopy(evidence[key]) for key in (
@@ -58,30 +90,34 @@ class PreparedResumeDecision:
 
 def prepare_resume_decision(session, *, instruction=None, llm_config=None):
     """Persist the exact public model input before it can be sent."""
-    messages = build_resume_messages(session, instruction=instruction)
-    credentials = resolve_resume_model(session, llm_config=llm_config)
-    config = deepcopy(session.prefix.config["model"])
-    config.update(model_name=credentials.model, cost_tracking="ignore_errors")
-    config["model_kwargs"] = config.get("model_kwargs", {}) | {
-        "timeout": credentials.timeout, "num_retries": 0, "max_retries": 0,
-    }
-    model, request = prepare_decision_request(messages, config)
     node = session.start.node
-    session.report["decision"] = {
-        "status": "prepared",
+    evidence = session.report["decision"] = {
+        "status": "configuring",
         "source": {"store": str(session.start.source_store), "run_id": node.run_id,
                    "node_id": node.node_id, "index": node.index, "state_id": node.state_id},
-        "model": credentials.model, "instruction": instruction,
+        "model": session.start.model, "instruction": instruction,
         "inherited_message_count": len(session.prefix.messages),
-        "messages": deepcopy(messages), "request": deepcopy(request),
         "request_representation": "public litellm.completion arguments",
         "model_requests": 0, "tool_executions": 0, "task_file_updates": 0,
         "file_snapshots": 0, "complete_nodes": 0,
         "inherited_counters": deepcopy(session.prefix.counters),
         "max_steps": session.start.max_steps, "decisions": 0,
         "remaining_steps": session.start.max_steps, "usage": None,
-        "cost": None, "cost_known": False,
+        "cost": None, "cost_known": False, "actions": [],
     }
+    try:
+        messages = build_resume_messages(session, instruction=instruction)
+        evidence["messages"] = deepcopy(messages)
+        credentials = resolve_resume_model(session, llm_config=llm_config)
+        config = deepcopy(session.prefix.config["model"])
+        config.update(model_name=credentials.model, cost_tracking="ignore_errors")
+        config["model_kwargs"] = config.get("model_kwargs", {}) | {
+            "timeout": credentials.timeout, "num_retries": 0, "max_retries": 0,
+        }
+        model, request = prepare_decision_request(messages, config)
+    except Exception as error:
+        raise _failed_decision(session, "config", error) from None
+    evidence.update(status="prepared", model=credentials.model, request=deepcopy(request))
     write_json(session.report_path, session.report, replace=True)
     return PreparedResumeDecision(messages, request, credentials, model)
 
