@@ -114,6 +114,8 @@ Use `--case django_middle` or `--case astropy_long` for the other two sources; u
 
 The additional opt-in experiments are in `examples/resume_multiturn_experiments.py`, with modes `controlled100`, `real100`, `starts` and `faults`. Each mode requires a fresh output directory. The live mode accepts the existing private model configuration via `--llm-config`; requests and HTTP bodies are captured without credentials.
 
+In new live reports, `model_requests` counts attempted requests, `successful_decisions` counts parsed decisions, and `actual_rounds` counts committed nodes. A full-history mismatch fails the experiment. `full_requests_verified` is true only when every attempted model request and its HTTP messages were compared. A provider failure before HTTP leaves this flag false.
+
 The controlled 100-round experiment passed in 278.94 seconds under `outputs/resume/261106_004858_multiturn/controlled100/`. It restored C20 once, started A/B once each, and performed exactly **100 model requests, 100 real tool calls, 100 Btrfs captures and 100 complete nodes**, with one budget-paused RunEnd. The controlled model made zero provider HTTP requests.
 
 Branch Run `43f1ab54d32b479a9a93191fc9d697f7` begins at C21 `af03b64697594d6abecf155a45685fbe` and ends at C120 `690f07391f1e46f3ac1404e3ecb4fca8`, passing the parent's C40 endpoint. Actual requests grew from 43 to 241 messages; C120 saved 243 messages. Every request and node passed the full-prefix and accepted-call reconstruction checks.

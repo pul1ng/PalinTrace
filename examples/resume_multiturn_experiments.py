@@ -70,12 +70,14 @@ def run_real100(output, services, llm_config, *, model=None):
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     entry = {"status": "in_progress", "source_store": str(spec.store), "source_run_id": spec.run_id,
              "source_node_id": spec.node_id, "source_index": spec.index, "max_steps": 100,
-             "model": model, "instruction": REAL_INSTRUCTION, "output": str(output)}
+             "model": model, "instruction": REAL_INSTRUCTION, "output": str(output),
+             "full_requests_verified": False}
     started, client = time.monotonic(), None
     try:
         client = connect_docker(600)
         with audit_source(spec, client, output, entry, services):
             start = select_resume_start(spec.store, spec.node_id, model=model, max_steps=100, run_id=spec.run_id)
+            run_error = None
             with observe_run(entry, output, controlled=False) as holder:
                 try:
                     with restore_resume_start(start, output / "session", client=client,
@@ -87,7 +89,7 @@ def run_real100(output, services, llm_config, *, model=None):
                         first = decide_resume_start(session, instruction=REAL_INSTRUCTION, llm_config=llm_config)
                         run_resume_steps(session, first, llm_config=llm_config)
                 except Exception as error:
-                    entry["fault"] = {"type": type(error).__name__, "error": str(error)}
+                    run_error = error
             report = restoration.checked_report(client, output / "session")
             recording = report.get("recording", {})
             nodes, ends = (), ()
@@ -108,15 +110,31 @@ def run_real100(output, services, llm_config, *, model=None):
                 assert recording["total_model_requests"] == entry["counts"]["model_requests"]
                 assert recording["tool_executions"] == entry["counts"]["tool_executions"]
                 assert recording["complete_nodes"] == len(nodes)
+            requests = entry["counts"]["model_requests"]
+            verified_http = entry["verified_http_rounds"]
+            decisions = recording.get("decisions", report.get("decision", {}).get("decisions", 0))
             entry.update(status="fault" if report["status"] == "failed" else "passed",
-                         recording=recording, actual_rounds=entry["counts"]["model_requests"],
+                         recording=recording, model_requests=requests, actual_rounds=len(nodes),
+                         successful_decisions=decisions,
                          complete_nodes=len(nodes), nodes=[node.model_dump(mode="json") for node in nodes],
                          last_complete_node=nodes[-1].model_dump(mode="json") if nodes else start.node.model_dump(mode="json"),
                          branch_run_id=recording.get("run_id"), stop_reason=recording.get("stop_reason", "failed"),
                          failure_stage=recording.get("failure_stage", report.get("decision", {}).get("error", {}).get("category")),
-                         cleanup_confirmed=report["cleanup_confirmed"], full_requests_verified=True)
+                         cleanup_confirmed=report["cleanup_confirmed"])
+            # Resume or the SDK can wrap an observer assertion as a model error.
+            if len(entry["requests"]) != requests:
+                raise AssertionError("full model request verification failed") from run_error
+            if len(verified_http) != entry["http_requests"]:
+                raise AssertionError("HTTP request verification failed") from run_error
+            entry["full_requests_verified"] = requests > 0 and set(verified_http) == set(range(1, requests + 1))
+            if isinstance(run_error, AssertionError):
+                raise run_error
+            if entry["status"] == "passed" and not entry["full_requests_verified"]:
+                raise AssertionError("missing verified HTTP request for a successful live run")
+            if run_error is not None:
+                entry["fault"] = {"type": type(run_error).__name__, "error": str(run_error)}
             if entry["stop_reason"] == "budget_exhausted":
-                assert len(nodes) == entry["actual_rounds"] == 100 and nodes[-1].index == 120
+                assert requests == len(nodes) == 100 and nodes[-1].index == 120
             if entry["stop_reason"] in ("submitted", "incomplete_tool_group"):
                 assert "submission" in entry
     except BaseException as error:
@@ -127,7 +145,9 @@ def run_real100(output, services, llm_config, *, model=None):
             client.close()
         entry["duration_sec"] = time.monotonic() - started
         write_json(output / "acceptance.json", entry)
-    print(json.dumps({key: entry[key] for key in ("status", "actual_rounds", "complete_nodes", "stop_reason", "duration_sec")}))
+    print(json.dumps({key: entry[key] for key in (
+        "status", "model_requests", "successful_decisions", "actual_rounds", "stop_reason", "duration_sec",
+    )}))
     return entry
 
 

@@ -67,7 +67,7 @@ def observe_run(entry, output, *, controlled=True, fault=None):
     counts = entry["counts"] = dict.fromkeys(("restores", "branch_starts", "model_requests",
                                              "tool_executions", "snapshots", "complete_nodes"), 0)
     entry.update(requests=[], responses=[], actions=[], service_starts=[],
-                 http_requests=0, physical_tool_commands=0)
+                 http_requests=0, verified_http_rounds=[], physical_tool_commands=0)
 
     def restore(*args, **kwargs):
         counts["restores"] += 1
@@ -84,11 +84,12 @@ def observe_run(entry, output, *, controlled=True, fault=None):
     def complete(**request):
         counts["model_requests"] += 1
         number = counts["model_requests"]
-        assert number <= entry["max_steps"], "model request exceeded the new-decision budget"
+        if number > entry["max_steps"]:
+            raise AssertionError("model request exceeded the new-decision budget")
         public = {key: deepcopy(value) for key, value in request.items() if key not in ("api_key", "api_base")}
         session = holder["session"]
         if number == 1:
-            assert session.report["decision"]["request"] == public
+            saved_request = session.report["decision"]["request"]
             expected = deepcopy(session.prefix.messages)
             if entry["instruction"] is not None:
                 expected.append({"role": "user", "content": entry["instruction"]})
@@ -97,12 +98,13 @@ def observe_run(entry, output, *, controlled=True, fault=None):
                 step_id = session._record_attempt["step_id"]
                 model, = [op for op in store.list(Operation) if op.step_id == step_id and op.kind == "model"]
                 execution, = [e for e in store.list(Execution) if e.operation_id == model.operation_id]
-                assert store.read_json(execution.request) == public
+                saved_request = store.read_json(execution.request)
                 previous = max(store.list(Node), key=lambda node: node.index)
                 expected = store.read_json(previous.context)["messages"]
-        assert semantic_messages(public["messages"]) == semantic_messages(expected)
-        entry["requests"].append(public)
+        if saved_request != public or semantic_messages(public["messages"]) != semantic_messages(expected):
+            raise AssertionError(f"model request {number} differs from the recorded request or full conversation")
         write_json(output / f"request-{number:03}.json", public)
+        entry["requests"].append(public)
         if fault == "model" and number == 2:
             raise RuntimeError("acceptance second-round model failure")
         response = controlled_response(entry["marker"], number) if controlled else original_completion(**request)
@@ -143,8 +145,10 @@ def observe_run(entry, output, *, controlled=True, fault=None):
         if request.method == "POST" and request.url.path.endswith("/chat/completions"):
             entry["http_requests"] += 1
             body = json.loads(request.content)
-            assert semantic_messages(body["messages"]) == semantic_messages(entry["requests"][-1]["messages"])
+            if semantic_messages(body["messages"]) != semantic_messages(entry["requests"][-1]["messages"]):
+                raise AssertionError(f"HTTP messages differ from model request {counts['model_requests']}")
             write_json(output / f"http-request-{entry['http_requests']:03}.json", body)
+            entry["verified_http_rounds"].append(counts["model_requests"])
         return original_send(client, request, **kwargs)
 
     with ExitStack() as stack:
