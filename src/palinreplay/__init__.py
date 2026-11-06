@@ -1,3 +1,3 @@
-"""Coding-agent Record and Docker file-state recovery; Resume is not implemented."""
+"""Coding-agent trace recording, historical re-execution, and branching continuation."""
 
 __version__ = "0.2.0"

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "palinreplay"
 version = "0.2.0"
-description = "Independent foundations for recording and restoring coding-agent trajectories"
+description = "Record, replay, and resume coding-agent trajectories"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
