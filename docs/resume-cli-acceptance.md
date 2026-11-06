@@ -51,7 +51,7 @@ TERM=xterm-256color LITELLM_LOCAL_MODEL_COST_MAP=True \
 | 同一容器 | 两个新节点的 runtime 均指向本次恢复会话的执行容器 |
 | 清理 | 原执行容器、辅助容器、临时卷均已删除；池工作区回到基线 |
 | 来源 | 录制文件摘要、全部来源节点、C20 只读快照及清单均未改变 |
-| 密钥检查 | 终端日志、报告、查看结果及本次分支材料共 58 个文件未发现配置密钥 |
+| 密钥检查 | 终端日志、报告、查看结果及本次分支材料均未发现配置密钥 |
 
 逐节点读取模型请求、已接纳工具结果、上下文、输入位置和文件状态，并执行 Store 完整性检查。首次请求的历史前缀与源 C20 一致，下一条为新增 user 引导；第二次请求与本分支 C21 的完整上下文一致。原执行容器已确认不存在后，使用现有入口查看并恢复本次 C22：
 
@@ -92,7 +92,32 @@ PALIN_CLI_CHECK=outputs/validation/261106_112614_resume_cli
 
 截至文档提交 `f4213b2`，新增 CLI 测试共 74 项通过。覆盖解析、配置、来源选择、输出隔离、恢复与准备顺序、首次决策、两轮累计上下文、预算 1/2/100、提前提交、普通工具非零返回、未完成尾部、失败与取消优先级、发布事实、清理后摘要及未知进度。关键受控测试执行真实 Resume 编排和临时 Store，替换模型、容器及快照边界。
 
-中英文 README 和命令参考中的 3 条 Resume 命令已通过实际解析，11 个新增本地链接与锚点已核对。各项对应的局部回归及 Ruff、差异检查已执行；整组最终回归结果将在第 13 项完成后补入。
+中英文 README 和命令参考中的 3 条 Resume 命令已通过实际解析，11 个新增本地链接与锚点已核对。各项对应的局部回归及 Ruff、差异检查已执行。
+
+## 全量验证
+
+被测提交为 `ca3063c`，与真实运行时的 `f4213b2` 相比仅新增本验收记录。最终执行以下检查，pytest 的 `-ra` 仅用于列明跳过原因：
+
+```bash
+.venv/bin/ruff check src tests examples
+TERM=xterm-256color LITELLM_LOCAL_MODEL_COST_MAP=True \
+  .venv/bin/python -m pytest -q -ra
+git diff --check
+```
+
+| 检查 | 实际结果 |
+|---|---|
+| 新增 CLI 测试 | 74 项通过，并全部纳入下述全量回归 |
+| Ruff | `src tests examples` 全部通过 |
+| 全量 pytest | **1890 passed、3 skipped、1 warning**，耗时 154.64 秒 |
+| 差异检查 | `git diff --check` 通过；最终验收记录更新后再次检查 |
+| 密钥检查 | 两次真实运行的产物、日志及公开文档共 76 个文件通过逐文件检查 |
+
+3 个跳过项均来自 `tests/record/test_replay_verification_scope.py`：`test_direct_source_check_shares_a_session_across_nodes` 的 local 参数跳过 1 项，`test_snapshot_failure_closes_sessions_and_prevents_export` 的 local/source 参数跳过 inspect、export 共 2 项。这些 local 参数本身没有外部来源，因而跳过仅适用于外部来源的检查，理由为 `requires an external source`；对应共享池及独立池 Replay 参数正常执行。跳过项未计为通过。
+
+唯一警告来自 LiteLLM `_service_logger.py` 调用 `asyncio.get_event_loop()` 的弃用提示。没有为本轮 CLI 验收修改该第三方依赖。
+
+原始日志保留在 `outputs/validation/261106_112614_resume_cli/` 的 `ruff.log`、`pytest.log`、`diff-check.log`。本轮 13 项 CLI 任务已完成；真实短程续跑及独立恢复是本轮新执行的证据，历史长实验只作为下节列出的核心能力依据。
 
 ## 历史能力依据
 
