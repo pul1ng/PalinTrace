@@ -6,7 +6,7 @@ PalinTrace saves model interactions and tool results alongside the agent context
 
 - **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and historical replay.
 - **Replay · Historical re-execution (MVP implemented)**: Restore a committed source node and execute subsequent tools from a fixed history without model requests or credentials. Save actual results and snapshots; stop on a definite exit-code mismatch or a framework failure. Full consistency checking is planned as separate Verify work.
-- **Resume · Fork and continue (Python MVP)** restores the environment and full conversation at a saved node. The model makes new decisions, tools run in the same container, and each complete step becomes a node on the new branch.
+- **Resume · Fork and continue (MVP implemented)** uses `palin resume` to restore the environment and full conversation at a saved node. The model makes new decisions, tools run in the same container, and each complete step becomes a node on the new branch.
 
 ## Demo (Chinese)
 
@@ -81,42 +81,33 @@ PALIN_SERVICES="/path/to/services.json"
 
 This example runs from C0 to the recorded end. Use `--from` and `--to` to select a range. Results default to `outputs/replay/YYMMDD_HHMMSS_TASK/`; an exit-code mismatch stops execution and preserves actual results. See the [command reference (Chinese)](docs/命令参考.md#replay) for all parameters and restoration scope.
 
-### 5. Resume a branch from a saved node (Python)
+### 5. Resume a branch from a saved node
 
-Use the source Record in `$PALIN_RUN`. Set `$PALIN_SERVICES` to the service manifest path if you have one, or leave it empty. This example starts at C0 and allows up to two new model decisions. To start at C20, choose a recording that contains that node and change `"C0"` to `"C20"`.
+Use the source recording in `$PALIN_RUN` and the model configured above to make up to two new decisions from C0. The source also accepts its `record/` directory. If the recording contains C20, change `--from C0` to `--from C20`.
 
 ```bash
-.venv/bin/python - "$PALIN_RUN" "${PALIN_SERVICES:-}" <<'PY'
-import sys
-
-from palinreplay.llm import LLMConfig
-from palinreplay.resume import (
-    decide_resume_start, restore_resume_start, run_resume_steps, select_resume_start,
-)
-
-source, services = sys.argv[1:]
-llm_config = "config/llm/llm.toml"
-model = LLMConfig.load(llm_config).model
-start = select_resume_start(source, "C0", model=model, max_steps=2)
-with restore_resume_start(start, services_config=services or None) as session:
-    print("Output", session.output, flush=True)
-    first = decide_resume_start(session, llm_config=llm_config)
-    nodes = run_resume_steps(session, first, llm_config=llm_config)
-
-if nodes:
-    last = nodes[-1]
-    print("Run", last.run_id, "node", f"C{last.index}", last.node_id)
-print("Stop reason", session.report["recording"]["stop_reason"])
-PY
+.venv/bin/palin resume "$PALIN_RUN" --from C0 \
+  --max-steps 2 \
+  --llm-config config/llm/llm.toml \
+  --instruction "Inspect the current working directory first" \
+  --services-config "$PALIN_SERVICES"
 ```
 
-Use `instruction=` on `decide_resume_start()` to append a user message to the source conversation. The first decision counts toward `max_steps`. Each later request includes the full branch conversation and all previously accepted tool results. Once the whole tool group has executed and its results have been accepted, the recorder commits the node and its file snapshot. The [single-step API](docs/resume-stage5-acceptance.md) `record_resume_step()` is also available for executing one saved decision.
+Omit `--services-config` when you have no manifest. Preparation is skipped; services are not inferred. With a manifest, files, conversation and configuration are restored and checked by R1 before services are prepared in the same container. Each selected v2 startup command runs once. Readiness checks remain available when explicitly specified by a legacy configuration.
 
-File restoration covers `rootfs-files-v1`. If you supply a manifest, the session prepares the services selected for the starting node in the restored container after the R1 check. Each v2 startup command runs once. Legacy configurations can also specify readiness checks. Omit the manifest to skip preparation.
+`--from` is required and accepts a C label or full node ID. Use `--run RUN_ID` when the source is ambiguous. `--max-steps` defaults to `20` and must be a positive integer. It is a **new decision budget**, including the first request. The model may submit before reaching the limit. By default, no instruction is added. A supplied `--instruction` must contain nonblank text and is appended once as a `role=user` message after the inherited history. Later requests include the full accumulated conversation and accepted branch tool results. Omitting `--llm-config` uses the [existing model configuration rules](docs/命令参考.md#模型配置); the current configuration selects the branch model independently of the parent model.
 
-Session directories are created under `outputs/resume/` by default. Set `output=` to use a new directory outside the source recording. The session's `report.json` identifies the source, completed rounds, last node, stop reason, and cleanup result. The `record/` directory holds the calls and updated conversation at each branch node. The inherited prefix is available in `session.context`. The R1 evidence is in `restore-report.json`, and `preparation.json` records any service preparation requested through a manifest. On submission, budget exhaustion, interruption or failure, committed nodes and calls that already occurred remain available. Exiting the session releases the temporary container and writable workspace. The caller owns any Docker client it supplies.
+Output defaults to `outputs/resume/YYMMDD_HHMMSS_TASK/`, using the selected source Run's task name. Use `--output DIR` for a new directory outside the source recording. `report.json` records the source, model requests, complete nodes, stopping reason and cleanup. `restore-report.json` holds restoration evidence; a supplied manifest produces `preparation.json`; branch recording creates `record/`. Early failures retain only artifacts actually produced. The terminal summary appears after cleanup and shows the branch, last complete node and report location. Unconfirmed progress is displayed as unknown.
 
-In the live run from C20, the model submitted in round 10 at branch C30. See the [stage 6 acceptance summary (Chinese)](docs/validation/resume-stage6-20261106.md) for the report fields, the snapshot inspection command and other stopping cases.
+A live progress bar shows the current phase, node, model request, tool execution and elapsed time. It counts saved new steps against the new budget: submitting after 14 rounds from C20 with a budget of 100 leaves `14/100 · C34`. Redirecting progress output selects plain text automatically. Use `--progress plain` to force text or `--progress off` to hide progress; the final summary remains available.
+
+Resume and Record use the same native mini-SWE-agent control loop. A text-only response or invalid tool format adds the native correction prompt to the full conversation before another request. Correction requests count toward the new budget; consecutive format errors stop at the native limit (3 by default). Original responses and correction feedback are retained. Finishing the task requires the native submission action.
+
+From source C20, the first complete branch node is C21, followed by C22 on the same branch. No local C0 or C20 is created, and parent C21/C22 results are not copied. A node and file snapshot are committed only after the complete tool group has run and its results have been accepted. Ordinary nonzero tool results go back to the model. Format-correction rounds use Record's empty-tool-group boundary without inventing tool execution. Source C20 remains an external reference: **retain its Store, artifacts, images and associated Btrfs snapshot pool**. Copying the branch directory alone does not create a self-contained backup.
+
+Submission and budget exhaustion return `0`; failures return `1`; argument parsing errors return `2`; an incomplete tool group returns `3`; cancellation without another known fault returns `130`. Cancellation accompanied by a recording, report or cleanup fault returns `1`, retaining both kinds of evidence. Budget exhaustion is a normal pause, and model submission does not mean the answer passed evaluation. See the [command reference (Chinese)](docs/命令参考.md#resume) for all options and report fields, or the [multi-turn acceptance notes](docs/resume-multiturn-acceptance.md) for the Python API.
+
+In the earlier Python acceptance run, the live model branched from C20 and submitted in round 10 at C30. Its evidence is in the [stage 6 acceptance summary (Chinese)](docs/validation/resume-stage6-20261106.md).
 
 ## Getting Started
 
@@ -288,8 +279,8 @@ outputs/             Local outputs grouped by type and timestamp (Git-ignored)
 
 - [x] Replay MVP: Restore a committed source node, pass R1 and explicitly configured service preparation, and execute fixed historical tools without model requests. Reference the source baseline, save only actually completed steps, and use definite historical exit codes to control continuation while retaining actual evidence.
 - [ ] Verify: Independently check actual Replay results against the pinned source; no Verify command is implemented yet.
-- [x] Resume (Python MVP) supports restoring a saved node, multi-turn decisions, branch snapshots, and a final report.
-- [ ] Resume command-line entry point.
+- [x] Resume supports restoring a saved node, multi-turn decisions, branch snapshots, and a final report.
+- [x] The `palin resume` command-line entry point.
 - [ ] Rewrite: Generate and actually execute replacement operations for a selected historical interval, validate its exit conditions and context handoff, and save a separate derived trace while preserving the original Record.
 - [ ] Incremental storage management: Merge and split storage increments while retaining historical nodes.
 - [ ] Portable backups and migration across machines.

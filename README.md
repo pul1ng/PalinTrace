@@ -8,7 +8,7 @@ PalinTrace 将模型交互、工具调用和结果与当时的 Agent 上下文�
 
 - **Record · 轨迹录制（已实现 MVP）**：记录 Agent 的模型交互、工具调用与结果，关联当时的上下文、任务文件和运行配置，为历史查看、环境恢复与后续回放提供依据。
 - **Replay · 历史重执行（已实现 MVP）**：从已提交的来源节点恢复环境，按固定历史真实执行后续工具，不调用模型、不需要模型凭据；保存真实结果与快照，确定的退出码不符或框架故障会停止执行。完整一致性校验另列为后续 Verify 工作。
-- **Resume · 分叉续跑（Python MVP）** 从历史节点恢复环境和完整会话，让模型继续决策，在同一容器执行工具，并将每个完整步骤保存为独立分支上的新节点。
+- **Resume · 分叉续跑（已实现 MVP）** 通过 `palin resume` 从历史节点恢复环境和完整会话，让模型继续决策，在同一容器执行工具，并将每个完整步骤保存为独立分支上的新节点。
 
 ## 演示视频
 
@@ -83,42 +83,33 @@ PALIN_SERVICES="/path/to/services.json"
 
 示例从 C0 执行到录制末尾，可用 `--from`、`--to` 选择区间。结果默认保存到 `outputs/replay/YYMMDD_HHMMSS_任务名/`；退出码与历史不一致时停止并保留结果。完整参数和恢复范围见[命令参考](docs/命令参考.md#replay)。
 
-### 5. 用 Python 从历史节点分叉续跑（Resume）
+### 5. 从历史节点分叉续跑（Resume）
 
-使用前面选定的来源录制 `$PALIN_RUN`，有服务清单时将 `$PALIN_SERVICES` 设为它的路径，否则留空。以下示例从 C0 出发，给模型最多两轮新决策。要从 C20 开始，选择包含该节点的录制，并将 `"C0"` 改为 `"C20"`。
+使用来源录制 `$PALIN_RUN` 和前面配置的模型，让 Agent 从 C0 开始最多作出两轮新决策。来源也接受其中的 `record/` 目录；如果录制包含 C20，可以将 `--from C0` 改为 `--from C20`。
 
 ```bash
-.venv/bin/python - "$PALIN_RUN" "${PALIN_SERVICES:-}" <<'PY'
-import sys
-
-from palinreplay.llm import LLMConfig
-from palinreplay.resume import (
-    decide_resume_start, restore_resume_start, run_resume_steps, select_resume_start,
-)
-
-source, services = sys.argv[1:]
-llm_config = "config/llm/llm.toml"
-model = LLMConfig.load(llm_config).model
-start = select_resume_start(source, "C0", model=model, max_steps=2)
-with restore_resume_start(start, services_config=services or None) as session:
-    print("Output", session.output, flush=True)
-    first = decide_resume_start(session, llm_config=llm_config)
-    nodes = run_resume_steps(session, first, llm_config=llm_config)
-
-if nodes:
-    last = nodes[-1]
-    print("Run", last.run_id, "node", f"C{last.index}", last.node_id)
-print("Stop reason", session.report["recording"]["stop_reason"])
-PY
+.venv/bin/palin resume "$PALIN_RUN" --from C0 \
+  --max-steps 2 \
+  --llm-config config/llm/llm.toml \
+  --instruction "先检查当前工作目录" \
+  --services-config "$PALIN_SERVICES"
 ```
 
-`decide_resume_start()` 可通过 `instruction=` 在来源会话末尾追加一条用户指令。首轮决策计入 `max_steps`。之后模型每轮都收到完整的分支会话，包括此前已接纳的工具返回。整组工具执行完毕、结果被接纳后，程序提交该步的节点和文件快照。只执行一份已取得的回答时，也可以使用[单步入口](docs/resume-stage5-acceptance.md) `record_resume_step()`。
+没有服务清单时，省略 `--services-config`，程序会跳过准备，不自动推测服务。提供清单时，先完成文件、上下文及配置恢复和 R1 检查，再在同一容器准备起点服务。v2 清单中的选中启动命令各执行一次；旧配置显式指定的 readiness 检查继续生效。
 
-文件恢复范围为 `rootfs-files-v1`。提供清单时，通过 R1 检查后会在同一容器准备起点所需的服务。v2 清单中的启动命令各执行一次，旧配置显式指定的就绪检查也会执行。省略清单可跳过服务准备。
+`--from` 必填，支持 C 标签或完整节点 ID；来源不唯一时使用 `--run RUN_ID`。`--max-steps` 默认 `20`，必须为正整数，表示包含首次请求的**新增决策预算**。模型可以提前提交，不会被强制运行到预算上限。`--instruction` 默认不追加消息；提供时必须为非空白文本，在继承历史之后仅追加一条 `role=user` 消息。之后每次模型请求都使用完整累计上下文，包括新分支已接纳的工具结果。省略 `--llm-config` 时沿用[已有模型配置规则](docs/命令参考.md#模型配置)，本次模型由配置选择，不固定使用父轨迹的模型。
 
-默认会话目录位于 `outputs/resume/`，也可通过 `output=` 指定来源录制目录外的新目录。`report.json` 给出来源、完整轮数、最后节点、停止原因和清理结果。`record/` 保存分支调用和各步更新后的会话，`session.context` 仍可查看继承的前缀。`restore-report.json` 保留 R1 恢复证据，提供清单时的 `preparation.json` 记录准备动作。模型提交、预算用尽、中断或故障时，已提交节点和已发生的调用都会保留。退出会话后释放临时容器和可写工作区，调用方提供的 Docker 客户端由调用方管理。
+默认输出为 `outputs/resume/YYMMDD_HHMMSS_任务名/`，任务名取自选中的来源 Run；可用 `--output DIR` 指定来源录制之外、尚不存在的新目录。`report.json` 保存来源、模型请求、完整节点、停止及清理结果，`restore-report.json` 保存恢复证据，提供服务清单时生成 `preparation.json`，进入分支录制后生成 `record/`。早期失败只保留实际产生的材料。终端在清理结束后显示本次分支、最后完整节点及报告位置；无法确认的进度显示为 unknown。
 
-真实模型从 C20 分叉，在第 10 轮主动提交并保存了 C30。如何读报告、查快照和区分停止原因，见[第 6 步最终验收](docs/validation/resume-stage6-20261106.md)。
+默认显示动态进度条，包含当前阶段、节点、模型请求、工具执行和耗时。进度按“已保存新步骤数 / 新增预算”计算；预算为 100 时，从 C20 续跑 14 轮后提交，显示 `14/100 · C34`。重定向进度输出时自动使用普通文本，也可用 `--progress plain` 固定文本模式、`--progress off` 关闭进度显示；最终摘要仍保留。
+
+Resume 与 Record 使用同一套原生 mini-SWE-agent 循环。模型仅返回文字或工具格式不正确时，将原生格式提示追加到完整会话后继续请求，纠正请求也计入新增预算；连续错误达到原生上限时停止（默认 3 次）。原始回答与纠正反馈均保留，模型需要通过原生提交动作结束任务。
+
+从源 C20 分叉时，首个完整新节点为分支 C21，下一步为同一分支 C22；本次不新建 C0 或 C20，也不复制父轨迹的 C21/C22 结果。整组工具执行并接纳后才提交节点和文件快照；普通工具非零返回继续交给模型处理。格式纠正轮沿用 Record 的空工具组边界保存，不虚构工具执行。来源 C20 是外部引用，**须继续保留来源 Store、材料、镜像及关联 Btrfs 快照池**，仅复制分支目录不能得到自包含备份。
+
+正常提交或预算耗尽返回 `0`；故障返回 `1`；参数解析错误返回 `2`；未完成工具组返回 `3`；无其他已知故障的取消返回 `130`。取消伴随录制、报告或清理故障时返回 `1`，并保留两类证据。预算耗尽是正常暂停，模型提交不代表答案已通过评测。完整参数及报告字段见[命令参考](docs/命令参考.md#resume)，Python 接口见[多轮能力验收](docs/resume-multiturn-acceptance.md)。
+
+此前 Python 多轮验收中，真实模型从 C20 分叉，在第 10 轮主动提交并保存了 C30；其证据见[第 6 步验收记录](docs/validation/resume-stage6-20261106.md)。
 
 ## Getting Started
 
@@ -290,8 +281,8 @@ outputs/             按类型和时间戳分类的本地产物（Git 忽略）
 
 - [x] Replay MVP：从已提交的来源节点恢复，通过 R1 与显式服务准备后沿固定历史真实执行工具，不调用模型；引用源起点，只保存实际完成步骤，按确定的历史退出码控制继续或停止并保留真实证据。
 - [ ] Verify：独立检查 Replay 实际结果与固定来源的一致性；当前尚无已实现的 Verify 命令。
-- [x] Resume（Python MVP）支持恢复已保存的节点、多步决策、分支快照和结束报告。
-- [ ] Resume 命令行入口。
+- [x] Resume 支持恢复已保存的节点、多步决策、分支快照和结束报告。
+- [x] `palin resume` 命令行入口。
 - [ ] Rewrite：为指定历史区间生成并实际执行替代流程，校验出口与上下文衔接，保存独立派生轨迹并保留原 Record。
 - [ ] 增量整理：合并、拆分存储增量并保留历史节点。
 - [ ] 便携备份与跨机器迁移。

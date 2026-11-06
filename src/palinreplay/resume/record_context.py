@@ -52,8 +52,8 @@ class ResumeRecordContext:
             lambda offered: self.native.DefaultAgent.add_messages(self, *messages),
         )
 
-    def accept_decision(self, step, evidence):
-        """Supply the fourth-step response locally, then seal its whole tool group."""
+    def saved_decision_call(self, step, evidence):
+        """Supply the already requested response without invoking the model again."""
         adapter = CallAdapter(
             name="resume.saved-decision",
             execute=lambda request: deepcopy(evidence["raw_response"]),
@@ -68,6 +68,11 @@ class ResumeRecordContext:
         )
         call = step.model(adapter, deepcopy(evidence["request"]))
         call.invoke()
+        return call
+
+    def accept_decision(self, step, evidence):
+        """Supply the fourth-step response locally, then seal its whole tool group."""
+        call = self.saved_decision_call(step, evidence)
         self.accept_response(step, call, evidence["assistant_message"], evidence["actions"])
         return call
 
