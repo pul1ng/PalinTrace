@@ -79,6 +79,11 @@ def execute(args):
         output = _output_path(args, start)
         print(f"Source: C{start.node.index} ({start.node.node_id}), Run {start.node.run_id}")
         print(f"Output: {output}")
+        phase = "restoration"
+        from palinreplay.resume import restore_resume_start
+
+        with restore_resume_start(start, output=output) as session:
+            print(f"Restored: C{session.start.node.index}; R1 passed")
         return 0
     except ValidationError as error:
         fields = ", ".join(

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -5,7 +6,10 @@ import pytest
 from palinreplay.cli import main
 from palinreplay.cli.app import build_parser
 from palinreplay.storage.store import RecordStore
+from tests.resume import test_session as session_tests
 from tests.resume.test_start import history
+
+restoration = session_tests.setup
 
 
 def test_resume_help(capsys):
@@ -246,3 +250,82 @@ def test_explicit_output_is_not_created_or_renamed(source_record, monkeypatch):
     monkeypatch.setattr(RecordStore, "open", forbidden)
     assert cli._output_path(args, start) == Path("custom/branch")
     assert not Path("custom").exists()
+
+
+def _restoration_args(restoration, private_config, *options):
+    return ["resume", str(restoration.start.source_store), "--from", restoration.start.node.node_id,
+            "--llm-config", str(private_config), "--output", str(restoration.output), *options]
+
+
+def test_cli_enters_the_existing_restored_session(restoration, private_config, monkeypatch):
+    import palinreplay.resume as resume
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("restoration alone must not request a model")
+
+    monkeypatch.setattr(resume, "decide_resume_start", forbidden)
+    assert main(_restoration_args(restoration, private_config)) == 0
+    restoration.validate.assert_called_once_with(restoration.materials, restoration.executor)
+    restoration.restore.assert_called_once()
+    restoration.executor.close.assert_called_once()
+    restoration.restored.close.assert_called_once()
+    restoration.connect.return_value.close.assert_called_once()
+    report = json.loads((restoration.output / "report.json").read_text())
+    assert report["restore_status"] == report["r1"]["status"] == "passed"
+    assert report["cleanup_confirmed"]
+    assert report["prefix"]["message_count"] == len(restoration.materials.context["messages"])
+
+
+def test_cli_r1_failure_does_not_deliver_a_session(restoration, private_config, capsys):
+    from palinreplay.core.errors import IntegrityError
+
+    restoration.validate.side_effect = IntegrityError("R1 differs")
+    assert main(_restoration_args(restoration, private_config)) == 1
+    restoration.executor.close.assert_called_once()
+    restoration.restored.close.assert_called_once()
+    restoration.connect.return_value.close.assert_called_once()
+    report = json.loads((restoration.output / "report.json").read_text())
+    assert report["restore_error"]["phase"] == "validate_r1"
+    assert report["caller"]["status"] == "not_started"
+    assert "Restored:" not in capsys.readouterr().out
+
+
+def test_cli_caller_failure_still_leaves_restoration_context(
+    restoration, private_config, monkeypatch,
+):
+    import builtins
+
+    original_print = builtins.print
+
+    def fail_after_delivery(*args, **kwargs):
+        if args and str(args[0]).startswith("Restored:"):
+            raise RuntimeError("caller failure")
+        original_print(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "print", fail_after_delivery)
+    assert main(_restoration_args(restoration, private_config)) == 1
+    restoration.executor.close.assert_called_once()
+    restoration.restored.close.assert_called_once()
+    restoration.connect.return_value.close.assert_called_once()
+    report = json.loads((restoration.output / "report.json").read_text())
+    assert report["caller"]["status"] == "failed" and report["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("location", ["existing", "record", "recording"])
+def test_cli_reuses_output_rejection_without_changing_source(
+    restoration, private_config, location,
+):
+    if location == "existing":
+        restoration.output.mkdir()
+        marker = restoration.output / "report.json"
+        marker.write_text("existing evidence")
+    else:
+        source = restoration.start.source_store
+        restoration.output = (source if location == "record" else source.parent) / "new-output"
+    assert main(_restoration_args(restoration, private_config)) == 1
+    restoration.connect.assert_not_called()
+    restoration.restore.assert_not_called()
+    if location == "existing":
+        assert marker.read_text() == "existing evidence"
+    else:
+        assert not restoration.output.exists()
