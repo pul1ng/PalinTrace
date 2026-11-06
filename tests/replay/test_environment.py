@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from palinreplay.core.errors import IntegrityError
-from palinreplay.replay.environment import RestoredExecutor
+from palinreplay.restoration.environment import RestoredExecutor
 from palinreplay.sandbox.base import SandboxTimeout
 
 
