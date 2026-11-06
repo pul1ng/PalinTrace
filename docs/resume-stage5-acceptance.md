@@ -59,6 +59,8 @@ Its SHA-256 is `241a072f9c145ab28bf7c455b8a9e306034ea397964a9eba36ef8fe68437887e
 
 Run from this worktree with Docker and the retained source pools available. Use a new output directory on every invocation:
 
+The C20 source is under this checkout's `outputs/record/`. The other three fixed sources are under `data/` by default. If the retained datasets are elsewhere, set `PALIN_VALIDATION_DATA` to their data directory before running the examples. This setting is local and is not committed.
+
 ```bash
 LITELLM_LOCAL_MODEL_COST_MAP=True TERM=xterm-256color .venv/bin/python -B \
   -m examples.resume_record_validation \

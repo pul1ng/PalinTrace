@@ -7,6 +7,7 @@ publication and recovery use the actual package entry points and Docker backend.
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import time
 from contextlib import ExitStack, contextmanager
@@ -49,11 +50,11 @@ class SourceCase:
     messages: int
 
 
-PALIN = Path(__file__).resolve().parents[2]
-DATA = PALIN.parent / "PalinReplay/data"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA = Path(os.environ.get("PALIN_VALIDATION_DATA", PROJECT_ROOT / "data")).expanduser()
 TEN = DATA / "btrfs-ten-direct-20261030-223433/results"
 SOURCES = (
-    SourceCase("c20", PALIN / "PalinTrace/outputs/record/261102_150636_service-overlap-40/record",
+    SourceCase("c20", PROJECT_ROOT / "outputs/record/261102_150636_service-overlap-40/record",
                "a9261e45064b44029fa21e2cd2c3635e", "c18d313c6bb04ac98b1ebba48f145ba3",
                "1379ebee3b81426494c547ce5676c1a7", 20, 42),
     SourceCase("astropy_initial", TEN / "astropy__astropy-14182/run/record",
