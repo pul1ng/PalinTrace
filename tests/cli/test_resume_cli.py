@@ -540,13 +540,19 @@ def cli_case(tmp_path, monkeypatch, decision_session, private_config):
         requests.append(deepcopy(request))
         events.append(f"model-{len(requests)}")
         assert credentials.model == "openai/branch-model"
-        return responses[len(requests) - 1]
+        response = responses[len(requests) - 1]
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
     def execute(request):
         index = executor.execute.call_count - 1
         events.append(f"tool-{index + 1}")
         backend.files["/testbed/branch"] = {"hex": f"branch-{index + 1}".encode().hex(), "mode": 0o644}
-        return outcomes[index]
+        outcome = outcomes[index]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
     executor.exec.side_effect = prepare
     executor.execute.side_effect = execute
@@ -656,7 +662,7 @@ def test_cli_keeps_an_incomplete_group_tail_without_publishing_a_node(cli_case):
 
     cli_case.responses[1] = model_response(2, ["submit", "never executed"])
     cli_case.outcomes[1] = ExecResult("submit", b"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndone\n", 0, .1)
-    main([*cli_case.argv, "--max-steps", "2"])
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 3
     assert len(cli_case.requests) == cli_case.executor.execute.call_count == 2
     with RecordStore.open(cli_case.output / "record") as store:
         assert [node.index for node in store.list(Node)] == [21]
@@ -665,3 +671,150 @@ def test_cli_keeps_an_incomplete_group_tail_without_publishing_a_node(cli_case):
         assert store.check_integrity().ok
     report = json.loads((cli_case.output / "report.json").read_text())
     assert report["recording"]["stop_reason"] == "incomplete_tool_group"
+
+
+@pytest.mark.parametrize("request_number", [1, 2])
+def test_cli_model_failure_retains_the_last_complete_node(cli_case, request_number):
+    from palinreplay.core.models import Node
+
+    cli_case.responses[request_number - 1] = RuntimeError("model request failed")
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 1
+    assert len(cli_case.requests) == request_number
+    assert cli_case.executor.execute.call_count == request_number - 1
+    report = json.loads((cli_case.output / "report.json").read_text())
+    assert report["cleanup_confirmed"]
+    if request_number == 1:
+        assert "recording" not in report and not (cli_case.output / "record").exists()
+        assert report["decision"]["complete_nodes"] == 0
+    else:
+        assert report["recording"]["last_complete_node"]["index"] == 21
+        with RecordStore.open(cli_case.output / "record") as store:
+            assert [node.index for node in store.list(Node)] == [21]
+
+
+@pytest.mark.parametrize("stage", ["first-model", "later-model", "tool", "snapshot", "preparation"])
+def test_cli_pure_cancellation_returns_130_and_cleans_up(cli_case, stage):
+    interrupted = KeyboardInterrupt("user cancelled")
+    if stage == "first-model":
+        cli_case.responses[0] = interrupted
+    elif stage == "later-model":
+        cli_case.responses[1] = interrupted
+    elif stage == "tool":
+        cli_case.outcomes[1] = interrupted
+    elif stage == "snapshot":
+        cli_case.backend.capture = Mock(side_effect=interrupted)
+    else:
+        cli_case.executor.exec.side_effect = interrupted
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 130
+    report = interrupted.resume_report
+    assert report["status"] == "failed" and report["cleanup_confirmed"]
+    assert report["cleanup_errors"] == []
+    assert cli_case.events[-3:] == ["executor-close", "restore-close", "client-close"]
+    if stage in ("later-model", "tool"):
+        assert report["recording"]["complete_nodes"] == 1
+        assert report["recording"]["last_complete_node"]["index"] == 21
+
+
+def test_cli_sigterm_uses_existing_cancellation_and_restores_handler(cli_case, monkeypatch):
+    import signal
+
+    import palinreplay.resume.decision as decision
+
+    original, previous = decision.complete_decision_request, signal.getsignal(signal.SIGTERM)
+
+    def interrupt(request, credentials):
+        if len(cli_case.requests) == 1:
+            signal.raise_signal(signal.SIGTERM)
+        return original(request, credentials)
+
+    monkeypatch.setattr(decision, "complete_decision_request", interrupt)
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 130
+    assert signal.getsignal(signal.SIGTERM) == previous
+    assert cli_case.events[-3:] == ["executor-close", "restore-close", "client-close"]
+
+
+@pytest.mark.parametrize("fault", ["snapshot", "after-publication"])
+def test_cli_recording_failure_uses_actual_publication_facts(cli_case, monkeypatch, fault):
+    from palinreplay.core.models import Node
+
+    if fault == "snapshot":
+        cli_case.backend.capture = Mock(side_effect=OSError("snapshot unavailable"))
+    else:
+        commit = RecordStore.commit_node
+
+        def publish_then_fail(store, node):
+            commit(store, node)
+            raise OSError("after publication")
+
+        monkeypatch.setattr(RecordStore, "commit_node", publish_then_fail)
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 1
+    report = json.loads((cli_case.output / "report.json").read_text())
+    with RecordStore.open(cli_case.output / "record") as store:
+        expected = 0 if fault == "snapshot" else 1
+        assert len(store.list(Node)) == report["recording"]["complete_nodes"] == expected
+    assert report["cleanup_confirmed"]
+
+
+def test_cli_submission_with_cleanup_failure_is_failure_and_keeps_nodes(cli_case):
+    from palinreplay.core.models import Node
+    from palinreplay.sandbox.base import ExecResult
+
+    cli_case.outcomes[1] = ExecResult("submit", b"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndone\n", 0, .1)
+    cli_case.executor.close.side_effect = OSError("executor close failed")
+    assert main([*cli_case.argv, "--max-steps", "100"]) == 1
+    report = json.loads((cli_case.output / "report.json").read_text())
+    assert report["recording"]["stop_reason"] == "submitted"
+    assert not report["cleanup_confirmed"] and report["cleanup_errors"]
+    with RecordStore.open(cli_case.output / "record") as store:
+        assert [node.index for node in store.list(Node)] == [21, 22]
+    cli_case.restored.close.assert_called_once()
+    cli_case.client.close.assert_called_once()
+
+
+@pytest.mark.parametrize("fault", ["cleanup", "recording", "report", "decision-evidence"])
+def test_cli_known_failure_takes_priority_over_cancellation(cli_case, monkeypatch, fault, capsys):
+    interrupted = KeyboardInterrupt("user cancelled")
+    cli_case.responses[1 if fault != "decision-evidence" else 0] = interrupted
+    if fault == "cleanup":
+        cli_case.executor.close.side_effect = OSError("cleanup unavailable")
+    elif fault == "recording":
+        from palinreplay.record.recorder import Recorder
+
+        fail = Mock(side_effect=OSError("recorder evidence unavailable"))
+        monkeypatch.setattr(Recorder, "_failure", fail)
+    elif fault == "report":
+        import palinreplay.resume.report as reports
+
+        write = reports.write_json
+
+        def fail_final(path, data, **kwargs):
+            if data.get("phase") == "complete":
+                raise OSError("final report unavailable")
+            return write(path, data, **kwargs)
+
+        monkeypatch.setattr(reports, "write_json", fail_final)
+    else:
+        import palinreplay.resume.decision as decision
+
+        write = decision.write_json
+
+        def fail_interrupted(path, data, **kwargs):
+            if data.get("decision", {}).get("status") == "interrupted":
+                raise OSError("decision evidence unavailable")
+            return write(path, data, **kwargs)
+
+        monkeypatch.setattr(decision, "write_json", fail_interrupted)
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 1
+    report = interrupted.resume_report
+    assert report["caller"]["error_type"] == "KeyboardInterrupt"
+    if fault == "cleanup":
+        assert report["cleanup_errors"] and not report["cleanup_confirmed"]
+    elif fault == "report":
+        assert report["report_error"] and report["cleanup_confirmed"]
+    else:
+        assert interrupted.__notes__
+        assert report["cleanup_confirmed"]
+    output = capsys.readouterr()
+    assert "cancelled" in output.err and "also has" in output.err
+    cli_case.restored.close.assert_called_once()
+    cli_case.client.close.assert_called_once()
