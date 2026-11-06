@@ -1,6 +1,5 @@
 """Service configuration at a saved Resume boundary."""
 
-from palinreplay.replay.plan import pin_replay
 from palinreplay.restoration.service_config import load_service_input, resolve_services
 from palinreplay.storage.store import RecordStore
 
@@ -15,6 +14,4 @@ def resolve_resume_services(start, service_input):
     if service_input is None:
         return None
     with RecordStore.open(start.source_store, read_only=True) as store, store.snapshot():
-        boundary = pin_replay(store, start.node.node_id, start.node.node_id,
-                              run_id=start.node.run_id)
-        return resolve_services(service_input, store, boundary)
+        return resolve_services(service_input, store, start.node)

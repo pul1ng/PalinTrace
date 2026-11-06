@@ -80,25 +80,23 @@ def test_invalid_services_fail_before_container_creation(setup, tmp_path, docume
 
 
 @pytest.mark.parametrize("index,expected", [(0, []), (1, ["A"]), (2, ["A"]), (3, [])])
-def test_services_use_complete_single_node_boundary(tmp_path, monkeypatch, index, expected):
+def test_services_resolve_the_saved_node_directly(tmp_path, monkeypatch, index, expected):
     record, manifest = _manifest(tmp_path)
     start = select_resume_start(record, f"C{index}", model="M", max_steps=2)
     path = tmp_path / "manifest.json"
     path.write_text(manifest.model_dump_json())
-    original_pin = services_module.pin_replay
+    original_resolve = services_module.resolve_services
     boundaries = []
 
-    def pin(store, first, last, **kwargs):
-        boundaries.append((first, last, kwargs))
-        plan = original_pin(store, first, last, **kwargs)
-        assert plan.nodes == (start.node,)
-        return plan
+    def resolve(service_input, store, node):
+        boundaries.append(node)
+        assert node is start.node
+        return original_resolve(service_input, store, node)
 
-    monkeypatch.setattr(services_module, "pin_replay", pin)
+    monkeypatch.setattr(services_module, "resolve_services", resolve)
     selected = resolve_resume_services(start, load_resume_service_input(path))
     assert [item.name for item in selected.services] == expected
-    assert boundaries == [(start.node.node_id, start.node.node_id,
-                           {"run_id": start.node.run_id})]
+    assert boundaries == [start.node]
 
 
 def test_no_services_and_static_configuration_remain_distinct(setup, tmp_path):

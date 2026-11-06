@@ -14,7 +14,7 @@ from palinreplay.preprocess.manifest import (
     ServiceManifest,
     select_services,
 )
-from palinreplay.replay.plan import ReplayPlan, pin_replay
+from palinreplay.record.selection import pin_source_selection
 from palinreplay.storage.store import RecordStore
 
 
@@ -104,21 +104,21 @@ def load_service_input(path: str | Path) -> ServiceInput:
 
 
 def _validate_manifest_source(
-    store: RecordStore, plan: ReplayPlan, manifest: ServiceManifest
+    store: RecordStore, start: Node, end_index: int, manifest: ServiceManifest
 ) -> None:
     source = manifest.source
-    if source.run_id != plan.run.run_id:
+    if source.run_id != start.run_id:
         raise RecordUsageError(
-            f"service manifest belongs to Run {source.run_id!r}, not {plan.run.run_id!r}"
+            f"service manifest belongs to Run {source.run_id!r}, not {start.run_id!r}"
         )
-    if source.start_index > plan.start.index or plan.end.index > source.end_index:
+    if source.start_index > start.index or end_index > source.end_index:
         raise RecordUsageError(
-            f"Replay range C{plan.start.index}-C{plan.end.index} is outside the manifest "
+            f"Replay range C{start.index}-C{end_index} is outside the manifest "
             f"analysis range C{source.start_index}-C{source.end_index}"
         )
     try:
-        full = pin_replay(
-            store, f"C{source.start_index}", f"C{source.end_index}", run_id=plan.run.run_id
+        full = pin_source_selection(
+            store, f"C{source.start_index}", f"C{source.end_index}", run_id=start.run_id
         )
     except ValueError as error:
         raise RecordUsageError(f"manifest analysis range cannot be pinned: {error}") from error
@@ -157,18 +157,22 @@ def _validate_manifest_evidence(store: RecordStore, manifest: ServiceManifest) -
 
 
 def resolve_services(
-    service_input: ServiceInput | None, store: RecordStore, plan: ReplayPlan
+    service_input: ServiceInput | None, store: RecordStore, start: Node,
+    *, end_index: int | None = None,
 ) -> ServicesConfig | None:
-    """Resolve legacy services or select a manifest's services at the Replay start."""
+    """Validate a source range and select services at its saved starting node."""
     if service_input is None:
         return None
     if service_input.static is not None:
         return service_input.static
     manifest = service_input.manifest
     assert manifest is not None
-    _validate_manifest_source(store, plan, manifest)
-    _validate_manifest_evidence(store, manifest)
-    selected = select_services(manifest, plan.start.index)
+    with store.snapshot():
+        _validate_manifest_source(
+            store, start, start.index if end_index is None else end_index, manifest,
+        )
+        _validate_manifest_evidence(store, manifest)
+    selected = select_services(manifest, start.index)
     services = tuple(
         ServiceSpec(
             name=service.name,

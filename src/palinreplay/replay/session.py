@@ -113,7 +113,7 @@ def run_replay(
         notify(ProgressEvent("preparing"))
         with RecordStore.open(source) as origin, origin.snapshot():
             plan = pin_replay(origin, start, end, run_id=run_id)
-            services = resolve_services(service_input, origin, plan)
+            services = resolve_services(service_input, origin, plan.start, end_index=plan.end.index)
             if service_input is not None and service_input.manifest is not None:
                 report["services_manifest"] = {
                     "path": str(service_input.path),

@@ -135,12 +135,13 @@ def test_resolve_manifest_services_at_replay_start(tmp_path):
     record, manifest = _manifest(tmp_path)
     with RecordStore.open(record) as store:
         plan = pin_replay(store, "C1", "C3")
-        selected = resolve_services(ServiceInput(None, manifest, tmp_path / "m.json"), store, plan)
+        selected = resolve_services(ServiceInput(None, manifest, tmp_path / "m.json"), store,
+                                    plan.start, end_index=plan.end.index)
         assert [item.name for item in selected.services] == ["A"]
         assert selected.services[0].start_command == "start A"
         empty_plan = pin_replay(store, "C3", "C3")
         assert resolve_services(
-            ServiceInput(None, manifest, tmp_path / "m.json"), store, empty_plan
+            ServiceInput(None, manifest, tmp_path / "m.json"), store, empty_plan.start
         ).services == ()
 
 
@@ -153,7 +154,7 @@ def test_manifest_source_and_evidence_are_verified_before_runtime(tmp_path):
     with RecordStore.open(record) as store:
         with pytest.raises(Exception, match="source digest"):
             resolve_services(ServiceInput(None, manifest, tmp_path / "m.json"), store,
-                             pin_replay(store, "C1", "C3"))
+                             pin_replay(store, "C1", "C3").start, end_index=3)
 
     record, manifest = _manifest(tmp_path / "other")
     with RecordStore.open(record) as store:
@@ -168,7 +169,7 @@ def test_manifest_source_and_evidence_are_verified_before_runtime(tmp_path):
         bad = manifest.model_copy(update={"services": (service,)})
         with pytest.raises(Exception, match="evidence"):
             resolve_services(ServiceInput(None, bad, tmp_path / "m.json"), store,
-                             pin_replay(store, "C1", "C3"))
+                             pin_replay(store, "C1", "C3").start, end_index=3)
 
 
 def test_static_config_without_readiness_and_binary_manifest_resolve_without_probe(tmp_path):
@@ -187,5 +188,5 @@ def test_static_config_without_readiness_and_binary_manifest_resolve_without_pro
     assert "unknowns" not in manifest_document(binary)
     with RecordStore.open(record) as store:
         config = resolve_services(ServiceInput(None, binary, tmp_path / "m.json"), store,
-                                  pin_replay(store, "C1", "C3"))
+                                  pin_replay(store, "C1", "C3").start, end_index=3)
     assert config.services[0].readiness_command is None
