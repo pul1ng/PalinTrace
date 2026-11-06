@@ -23,6 +23,7 @@ from minisweagent.models.utils.retry import retry
 from minisweagent.utils.serialize import recursive_merge
 from tenacity import stop_after_attempt
 
+from palinreplay.agents._mini_tools import encode_tool_result
 from palinreplay.core.interfaces import (
     AgentSnapshot,
     BoundaryAdapter,
@@ -400,11 +401,8 @@ class BorrowedEnvironment:
                 env=req["env"],
                 timeout_sec=req["timeout_sec"],
             ),
-            capture_result=lambda result: ResultCapture(
-                Payload(result.output),
-                "sandbox-merged-output-bytes",
-                details={"decoded": self.output(result), "duration_sec": result.duration_sec},
-                outcome="error" if result.exit_code else "returned",
+            capture_result=lambda result: encode_tool_result(
+                result, self.output(result), "error" if result.exit_code else "returned",
             ),
             visibility="observed-attempt",
         )

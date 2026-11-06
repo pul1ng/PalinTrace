@@ -178,6 +178,35 @@ def test_execution_or_adoption_fault_preserves_observed_mismatch(tmp_path, monke
         source.close()
 
 
+@pytest.mark.parametrize("exit_code", [None, False, True])
+def test_indefinite_exit_is_persisted_as_unknown_before_replay_fails(tmp_path, exit_code):
+    source, _, _, _, original = integrated(tmp_path, [response("read"), response("submit")])
+    try:
+        original.run(AgentTask("task", "Task"))
+        materials = load_replay_materials(source, pin_replay(source, "C0", "C1"))
+        context, sandbox = ReplayContext(materials), Sandbox()
+        sandbox.execute = lambda req: ExecResult("read", b"actual\xff\r\n", exit_code, .25)
+        report = {}
+        with RecordStore.create(tmp_path / "replay") as store:
+            with pytest.raises(RuntimeError, match="definitive integer exit code"):
+                with recording(store, materials, context, sandbox) as rec:
+                    replay_range(rec, context, sandbox, materials, report=report)
+            tool = report["steps"][0]["tools"][0]
+            event = read_call(store, tool["execution_id"]).events[1]
+            assert event.outcome == "unknown"
+            assert event.payload.media_type == "application/octet-stream"
+            assert store.read_bytes(event.payload) == b"actual\xff\r\n"
+            details = store.read_json(event.details)
+            assert details["capture"]["source"] == "sandbox-merged-output-bytes"
+            assert details["backend"] == {
+                "decoded": {"output": "actual�\n", "returncode": exit_code, "exception_info": ""},
+                "duration_sec": .25,
+            }
+            assert not store.list(Node)
+    finally:
+        source.close()
+
+
 def test_equal_nonzero_exits_allow_historical_recovery(tmp_path):
     source, _, _, _, original = integrated(tmp_path, [response("bad"), response("read"), response("submit")])
     try:

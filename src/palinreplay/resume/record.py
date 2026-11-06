@@ -4,9 +4,10 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import fields
 
+from palinreplay.agents._mini_tools import encode_tool_result
 from palinreplay.agents.mini import load_native
 from palinreplay.core.errors import RecordUsageError
-from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
+from palinreplay.core.interfaces import CallAdapter, Payload
 from palinreplay.core.models import Node
 from palinreplay.resume.decision import ResumeDecision
 from palinreplay.resume.environment import saved_execution_config
@@ -163,11 +164,9 @@ def _execute_tool(session, step, action):
 
     adapter = CallAdapter(
         name="resume.bash", execute=execute, capture_request=Payload.json,
-        capture_result=lambda result: ResultCapture(
-            Payload(result.output), "sandbox-merged-output-bytes",
-            details={"decoded": native.BorrowedEnvironment.output(result),
-                     "duration_sec": result.duration_sec},
-            outcome="error" if result.exit_code else "returned",
+        capture_result=lambda result: encode_tool_result(
+            result, native.BorrowedEnvironment.output(result),
+            "error" if result.exit_code else "returned",
         ),
         visibility="observed-attempt",
     )
