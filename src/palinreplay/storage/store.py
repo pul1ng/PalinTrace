@@ -349,7 +349,7 @@ class RecordStore:
     def read_payload(self, ref: ArtifactRef) -> Payload:
         """Expand shared payloads; raw artifacts retain their exact bytes/media."""
         self._ensure_open()
-        return self._payloads.read(ref)
+        return self._payloads.read(ref, data=self.read_bytes(ref))
 
     def iter_payload_artifacts(self, ref: ArtifactRef) -> Iterator[ArtifactRef]:
         """Yield distinct physical objects in a verified shared payload closure."""
@@ -518,8 +518,8 @@ class RecordStore:
             key = (run_id, run.config.sha256, run.config.size, run.config.media_type)
             if key not in self._source_cache:
                 source = None
-                payload = self.read_payload(run.config)
-                if payload.media_type in JSON_TYPES:
+                if run.config.media_type in JSON_TYPES or is_shared(run.config.media_type):
+                    payload = self.read_payload(run.config)
                     data = decode(payload.data, payload.media_type)
                     try:
                         config = json.loads(data)

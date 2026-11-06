@@ -167,10 +167,10 @@ class PayloadStore:
                  if isinstance(value, dict) else ["value", value])
         return ["ref", self._save(token)] if len(json_bytes(token)) > INLINE_BYTES else token
 
-    def read(self, ref: ArtifactRef) -> Payload:
+    def read(self, ref: ArtifactRef, *, data: bytes | None = None) -> Payload:
         if not is_shared(ref.media_type):
-            return Payload(self.artifacts.read(ref), ref.media_type)
-        return _Reader(self.artifacts, ref).read()
+            return Payload(self.artifacts.read(ref) if data is None else data, ref.media_type)
+        return _Reader(self.artifacts, ref, data=data).read()
 
     def iter_artifacts(self, ref: ArtifactRef) -> Iterator[ArtifactRef]:
         if not is_shared(ref.media_type):
@@ -184,9 +184,10 @@ class PayloadStore:
 class _Reader:
     """A single expansion owns all caches; no proof survives the read boundary."""
 
-    def __init__(self, artifacts, root):
+    def __init__(self, artifacts, root, *, data=None):
         self.artifacts = artifacts
         self.root = root
+        self.root_data = data
         self.refs = {}
         self.nodes = {}
         self.maximum = None
@@ -251,7 +252,7 @@ class _Reader:
 
     def read(self):
         # Root bytes are checked by ArtifactStore before schema interpretation.
-        data = self.artifacts.read(self.root)
+        data = self.artifacts.read(self.root) if self.root_data is None else self.root_data
         self.refs[(self.root.sha256, self.root.size, self.root.media_type)] = self.root
         logical, token = _root(data)
         self.maximum = logical.size
