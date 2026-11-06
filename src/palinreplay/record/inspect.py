@@ -107,6 +107,14 @@ def node_document(store: RecordStore, node: Node, *, include_calls: bool = True)
     return document
 
 
+def store_file_bytes(store: RecordStore) -> int:
+    """Count directory bytes without reading facts or expanding payloads."""
+    return sum(
+        path.stat().st_size for path in store.root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+
+
 def storage_metrics(store: RecordStore) -> dict:
     refs = {
         ref.sha256: ref
@@ -116,13 +124,12 @@ def storage_metrics(store: RecordStore) -> dict:
         for ref in store.iter_payload_artifacts(direct)
     }
     # Filesystem sizes are logical bytes, not allocated blocks or device IO.
-    files = [p for p in store.root.rglob("*") if p.is_file() and not p.is_symlink()]
     metrics = {
         "scope": "whole-store-logical-bytes",
         "referenced_artifacts": len(refs),
         "referenced_artifact_bytes": sum(ref.size for ref in refs.values()),
         "catalog_bytes": (store.root / "catalog.sqlite").stat().st_size,
-        "store_file_bytes": sum(p.stat().st_size for p in files),
+        "store_file_bytes": store_file_bytes(store),
         "state_count": len(store.list(State)),
         "node_count": len(store.list(Node)),
     }
