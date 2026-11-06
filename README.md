@@ -179,6 +179,8 @@ PALIN_RESUME="outputs/resume/${PALIN_STAMP}_astropy__astropy-12907"
 
 `--preload` 选择上一阶段的基座，`--max-steps` 设置运行步数预算。录制复用 C0，后续 C1、C2 等文件状态通过 Btrfs 增量快照保存。产物包括 `report.json` 和 `record/`。
 
+新录制的轨迹材料也使用共享存储：消息、配置及累计记录中的相同内容可以复用，读取时还原为完整内容。旧录制仍可读取，文件快照继续使用 Btrfs。
+
 同一任务可以多次复用该基座：再次运行 `record run` 时，只需换一个新的 `--output` 目录，无需重复前面的准备步骤。
 
 ### 6. 查看、恢复校验与导出

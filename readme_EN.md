@@ -177,6 +177,8 @@ Create an independent task container from C0, run the agent, and record model in
 
 `--preload` selects the base from the previous stage, and `--max-steps` sets the step budget. The recording reuses C0 and saves later filesystem states, such as C1 and C2, as incremental Btrfs snapshots. Outputs include `report.json` and `record/`.
 
+New recordings also share repeated content within messages, configuration, and accumulated records. Reads reconstruct the complete original content. Existing recordings remain readable, and filesystem snapshots continue to use Btrfs.
+
 You can reuse the same base for multiple recordings of the task. Run `record run` again with a new `--output` directory; there is no need to repeat the preparation stages.
 
 ### 6. Inspect, verify restoration, and export
