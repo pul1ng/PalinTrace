@@ -331,9 +331,18 @@ class RecordStore:
         return ref
 
     @contextmanager
+    def _expansion_scope(self):
+        """Reuse logical expansions across one complete node operation."""
+        with self._payloads.expansion_scope():
+            yield
+
+    @contextmanager
     def _verification_scope(self):
         self._ensure_open(writing=True)
-        with self._artifacts.verification_scope(), self._payloads.scope():
+        with (
+            self._artifacts.verification_scope(), self._payloads.scope(),
+            self._payloads.expansion_scope(),
+        ):
             yield
 
     def _verify_artifact(self, ref):

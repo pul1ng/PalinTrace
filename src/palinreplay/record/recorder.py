@@ -292,9 +292,10 @@ class Recorder:
 
     def start(self) -> Node:
         self._require("new")
-        if self.store.recording_source(self.run.run_id) is not None:
-            raise IncompleteRecordError("source-reference recording must use start_from_source()")
-        return self._capture(None)
+        with self.store._expansion_scope():
+            if self.store.recording_source(self.run.run_id) is not None:
+                raise IncompleteRecordError("source-reference recording must use start_from_source()")
+            return self._capture(None)
 
     def start_from_source(self) -> None:
         """Enter a restored external prefix without capturing a local initial boundary."""
@@ -323,13 +324,14 @@ class Recorder:
 
     def commit_step(self) -> Node:
         self._require("step")
-        try:
-            with flow_scope("2.6", step=self._active.step.index, part="2.6.2"):
-                self._active._ready()
-                calls = self.store.accepted_step(self._active.step.step_id)
-        except BaseException as error:
-            self._abort("step-completeness", error)
-        return self._capture(calls)
+        with self.store._expansion_scope():
+            try:
+                with flow_scope("2.6", step=self._active.step.index, part="2.6.2"):
+                    self._active._ready()
+                    calls = self.store.accepted_step(self._active.step.step_id)
+            except BaseException as error:
+                self._abort("step-completeness", error)
+            return self._capture(calls)
 
     def _terminate(self, status: str, reason: str, details: dict | None = None) -> RunEnd:
         self._phase = "stopped"

@@ -126,6 +126,7 @@ class PayloadStore:
     def __init__(self, artifacts: ArtifactStore):
         self.artifacts = artifacts
         self._scope = ContextVar("shared_payload_scope", default=None)
+        self._expanded = ContextVar("expanded_payload_scope", default=None)
 
     @contextmanager
     def scope(self):
@@ -143,6 +144,18 @@ class PayloadStore:
             yield
         finally:
             self._scope.reset(token)
+
+    @contextmanager
+    def expansion_scope(self):
+        """Keep immutable expansion results for one recording boundary only."""
+        if self._expanded.get() is not None:
+            yield
+            return
+        token = self._expanded.set({})
+        try:
+            yield
+        finally:
+            self._expanded.reset(token)
 
     def put(self, payload: Payload) -> ArtifactRef:
         if not isinstance(payload, Payload):
@@ -220,15 +233,31 @@ class PayloadStore:
     def read(self, ref: ArtifactRef, *, data: bytes | None = None) -> Payload:
         if not is_shared(ref.media_type):
             return Payload(self.artifacts.read(ref) if data is None else data, ref.media_type)
-        return _Reader(self.artifacts, ref, data=data, cache=self._scope.get()).read()
+        return self._read_shared(ref, data=data)[0]
+
+    def _read_shared(self, ref, *, data=None):
+        cache = self._expanded.get()
+        key = (ref.sha256, ref.size, ref.media_type)
+        saved = cache.get(key) if cache is not None else None
+        if saved is not None:
+            payload, refs = saved
+            for item in refs:
+                # RecordStore.read_payload already checked the supplied root bytes.
+                if item != ref or data is None:
+                    self.artifacts.verify_internal(item)
+            return payload, refs
+        reader = _Reader(self.artifacts, ref, data=data, cache=self._scope.get())
+        payload = reader.read()
+        refs = tuple(reader.refs.values())
+        if cache is not None:
+            cache[key] = payload, refs
+        return payload, refs
 
     def iter_artifacts(self, ref: ArtifactRef) -> Iterator[ArtifactRef]:
         if not is_shared(ref.media_type):
             yield ref
             return
-        reader = _Reader(self.artifacts, ref, cache=self._scope.get())
-        reader.read()
-        yield from reader.refs.values()
+        yield from self._read_shared(ref)[1]
 
 
 class _Cache:
