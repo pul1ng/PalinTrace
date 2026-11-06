@@ -18,7 +18,13 @@ from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from palinreplay.core.errors import ConflictError, IncompleteRecordError, IntegrityError, StoreError
+from palinreplay.core.errors import (
+    ConflictError,
+    IncompleteRecordError,
+    IntegrityError,
+    RecordUsageError,
+    StoreError,
+)
 from palinreplay.core.models import (
     ArtifactRef,
     Attempt,
@@ -47,7 +53,9 @@ from palinreplay.diagnostics.metrics import CountingReader, timed
 from palinreplay.diagnostics.timing import span
 from palinreplay.storage.artifacts import ArtifactStore, plain_directory, sync_directory
 
-__all__ = ["ConflictError", "IncompleteRecordError", "IntegrityError", "RecordStore", "StoreError"]
+__all__ = [
+    "ConflictError", "IncompleteRecordError", "IntegrityError", "RecordStore", "StoreError", "store_path",
+]
 
 STORE_VERSION = "palinreplay.store.v1"
 MODELS = {
@@ -58,6 +66,14 @@ MODELS = {
     )
 }
 T = TypeVar("T", bound=Fact)
+
+
+def store_path(path: Path) -> Path:
+    if (path / "catalog.sqlite").exists():
+        return path
+    if (path / "record" / "catalog.sqlite").exists():
+        return path / "record"
+    raise RecordUsageError("expected a Record store or run/bundle directory containing record/")
 
 
 def identity(record: Fact) -> str:

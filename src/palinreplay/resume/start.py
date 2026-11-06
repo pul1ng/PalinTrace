@@ -3,11 +3,10 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from palinreplay.cli.record import store_path
 from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.models import Node, Run, State
 from palinreplay.record.inspect import resolve_node
-from palinreplay.storage.store import RecordStore
+from palinreplay.storage.store import RecordStore, store_path
 
 
 @dataclass(frozen=True)
