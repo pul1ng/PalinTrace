@@ -8,16 +8,16 @@ from palinreplay.agents.mini import load_native
 from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
 from palinreplay.core.models import Node
-from palinreplay.resume.decision import ResumeDecision, record_branch_decision
+from palinreplay.resume.decision import ResumeDecision
 from palinreplay.resume.environment import saved_execution_config
 from palinreplay.resume.record_context import ResumeRecordContext
-from palinreplay.resume.recording import begin_recording_step, finish_recording, open_recording
+from palinreplay.resume.recording import finish_recording, open_recording
 from palinreplay.resume.report import exception_evidence
 from palinreplay.storage.io import write_json
 
 
 @contextmanager
-def _claim_decision(session, decision):
+def _claim_decision(session, decision, *, allow_format_error=False):
     """Keep the session open and consume its saved decision before any execution."""
     if not session._decision_lock.acquire(blocking=False):
         raise RecordUsageError("Resume decision is already being consumed")
@@ -27,7 +27,9 @@ def _claim_decision(session, decision):
         if session._record_attempt:
             raise RecordUsageError("Resume decision was already consumed")
         saved = session._decision_evidence
-        if saved.get("status") != "succeeded":
+        if saved.get("status") not in (
+            {"succeeded", "format_error"} if allow_format_error else {"succeeded"}
+        ):
             raise RecordUsageError("Resume recording requires a successful saved decision")
         node = session.start.node
         source = {"store": str(session.start.source_store), "run_id": node.run_id,
@@ -38,7 +40,8 @@ def _claim_decision(session, decision):
             raise RecordUsageError("Resume decision differs from the saved fourth-step evidence")
         attempt = session._record_attempt
         attempt.update(status="consuming", source=deepcopy(source), model_requests=0,
-                       tool_executions=0, tool_results=0, complete_nodes=0, decisions=1,
+                       tool_executions=0, tool_results=0, complete_nodes=0,
+                       decisions=saved["accounting"]["decisions"],
                        max_steps=session.start.max_steps,
                        inherited_counters=deepcopy(saved["accounting"]["inherited_counters"]),
                        request_accounting=[{key: deepcopy(saved["accounting"][key]) for key in
@@ -77,37 +80,32 @@ def record_resume_step(session, decision) -> Node | None:
 
 
 def run_resume_steps(session, first_decision, *, llm_config=None) -> list[Node]:
-    """Run up to the new-decision budget in one restored workspace and branch."""
-    with _claim_decision(session, first_decision) as evidence:
-        nodes = []
+    """Continue through the same pinned native Agent loop used by Record."""
+    from palinreplay.resume.native import ResumeAgent
+
+    with _claim_decision(session, first_decision, allow_format_error=True) as evidence:
         try:
             context = ResumeRecordContext(session, evidence)
             with open_recording(session, context.export) as (recorder, step):
-                context.accept_decision(step, evidence)
-                actions = evidence["actions"]
-                for number in range(session.start.max_steps):
-                    if number:
-                        session._record_attempt["stage"] = "begin_step"
-                        step = begin_recording_step(session, recorder)
-                        session._record_attempt["stage"] = "model"
-                        decision = record_branch_decision(session, step, context, llm_config=llm_config)
-                        actions = decision.actions
-                    node, details = _execute_and_save_group(session, recorder, step, context, actions)
-                    if node is None:
-                        recorder.end_incomplete("Native Agent submitted with an incomplete tool group",
-                                                details=details)
-                        break
-                    nodes.append(node)
-                    if details is not None:
-                        recorder.finish("Native Agent submitted", details=details)
-                        break
+                agent = ResumeAgent(session, context, evidence, recorder, step,
+                                    llm_config=llm_config)
+                result = agent.run(task=agent.extra_template_vars.get("task", ""))
+                details = agent.end_details()
+                if result.get("exit_status") == "RepeatedFormatError":
+                    session._record_attempt["stage"] = "model"
+                    raise agent.model.format_error
+                if recorder.phase == "step":
+                    recorder.end_incomplete("Native Agent submitted with an incomplete tool group",
+                                            details=details)
+                elif result.get("exit_status") in ("LimitsExceeded", "TimeExceeded"):
+                    recorder.pause("Resume decision budget exhausted", details=details)
                 else:
-                    recorder.pause("Resume decision budget exhausted")
+                    recorder.finish("Native Agent submitted", details=details)
         except BaseException as error:
             finish_recording(session, error)
             raise
         finish_recording(session)
-        return nodes
+        return agent.nodes
 
 
 def _execute_and_save_group(session, recorder, step, context, actions):
@@ -139,9 +137,25 @@ def _execute_and_save_group(session, recorder, step, context, actions):
 
 def _execute_tools(session, step, actions):
     """Persist each actual return before entering the next tool in the saved order."""
-    config = saved_execution_config(session.materials)
     native = load_native()
     calls, results = [], []
+    for action in actions:
+        call, result = _execute_tool(session, step, action)
+        calls.append(call)
+        results.append(result)
+        try:
+            native.DockerEnvironment._check_finished(
+                session.executor, native.BorrowedEnvironment.output(result),
+            )
+        except native.Submitted as submitted:
+            return calls, results, submitted
+    return calls, results, None
+
+
+def _execute_tool(session, step, action):
+    """Execute one tool; the native Agent owns group ordering and submission control."""
+    config = saved_execution_config(session.materials)
+    native = load_native()
 
     def execute(request):
         session._record_attempt["tool_executions"] += 1
@@ -157,19 +171,10 @@ def _execute_tools(session, step, actions):
         ),
         visibility="observed-attempt",
     )
-    for action in actions:
-        request = {"action": deepcopy(action), "cwd": config["cwd"], "env": config["env"],
-                   "interpreter": config["interpreter"], "timeout_sec": config["timeout"]}
-        call = step.tool(adapter, request, tool_call_id=action["tool_call_id"])
-        calls.append(call)
-        results.append(call.invoke())
-        attempt = session._record_attempt
-        attempt["tool_results"] += 1
-        write_json(session.report_path, session.report, replace=True)
-        try:
-            native.DockerEnvironment._check_finished(
-                session.executor, native.BorrowedEnvironment.output(results[-1]),
-            )
-        except native.Submitted as submitted:
-            return calls, results, submitted
-    return calls, results, None
+    request = {"action": deepcopy(action), "cwd": config["cwd"], "env": config["env"],
+               "interpreter": config["interpreter"], "timeout_sec": config["timeout"]}
+    call = step.tool(adapter, request, tool_call_id=action["tool_call_id"])
+    result = call.invoke()
+    session._record_attempt["tool_results"] += 1
+    write_json(session.report_path, session.report, replace=True)
+    return call, result

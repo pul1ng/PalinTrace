@@ -75,7 +75,8 @@ def finish_report(report, output, *, restored, executor, client, own_client, pri
     report["cleanup_confirmed"] = not errors
     report["status"] = "failed"
     if (report["restore_status"] == "passed" and report["preparation"]["status"] in ("ready", "skipped")
-            and ("decision" not in report or report["decision"]["status"] == "succeeded")
+            and ("decision" not in report or report["decision"]["status"] in
+                 ("succeeded", "format_error"))
             and report["caller"]["status"] == "completed" and not errors):
         recording = report.get("recording", {}).get("status", "succeeded")
         report["status"] = {"succeeded": "passed", "incomplete": "incomplete"}.get(recording, "failed")

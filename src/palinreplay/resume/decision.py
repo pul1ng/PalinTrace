@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from palinreplay.agents.mini import (
     complete_decision_request,
     decision_cost,
+    load_native,
     parse_decision_actions,
     prepare_decision_request,
 )
@@ -54,13 +55,13 @@ def _failed_decision(session, category, error):
     return failure
 
 
-def decide_resume_start(session, *, instruction=None, llm_config=None):
-    """Ask the selected model once from a service-ready Resume boundary."""
+def decide_resume_start(session, *, instruction=None, llm_config=None, defer_format_errors=False):
+    """Ask once; the CLI defers native format feedback to run_resume_steps()."""
     with _first_attempt(session, instruction, llm_config) as prepared:
-        return _request_decision(session, prepared)
+        return _request_decision(session, prepared, defer_format_errors=defer_format_errors)
 
 
-def _request_decision(session, prepared):
+def _request_decision(session, prepared, *, defer_format_errors=False):
     evidence = session.report["decision"]
     dispatched = False
     category = "evidence"
@@ -79,9 +80,18 @@ def _request_decision(session, prepared):
         category = "evidence"
         write_json(session.report_path, session.report, replace=True)
         category = "tool_format"
-        actions = parse_decision_actions(prepared.native_model, response)
+        try:
+            actions = parse_decision_actions(prepared.native_model, response)
+        except load_native().FormatError as error:
+            if not defer_format_errors:
+                raise
+            actions = []
+            evidence.update(status="format_error", decisions=0,
+                            format_error={"messages": deepcopy(error.messages)})
+        else:
+            evidence.update(status="succeeded", decisions=1)
         category = "evidence"
-        evidence.update(status="succeeded", decisions=1, actions=deepcopy(actions))
+        evidence["actions"] = deepcopy(actions)
         write_json(session.report_path, session.report, replace=True)
     except BaseException as error:
         if not dispatched:
@@ -123,8 +133,8 @@ def prepare_branch_decision(session, messages, *, llm_config=None):
     return PreparedResumeDecision(messages, request, credentials, model)
 
 
-def record_branch_decision(session, step, context, *, llm_config=None):
-    """Request and adopt a new decision through the current Step's model port."""
+def request_branch_response(session, step, context, *, llm_config=None):
+    """Persist one actual response before the native Agent parses or adopts it."""
     prepared = prepare_branch_decision(session, context.messages, llm_config=llm_config)
     accounting = {}
 
@@ -153,6 +163,14 @@ def record_branch_decision(session, step, context, *, llm_config=None):
     call = step.model(adapter, prepared.request)
     response = call.invoke()
     context.account_decision(accounting)
+    return prepared, call, response, accounting
+
+
+def record_branch_decision(session, step, context, *, llm_config=None):
+    """Request and adopt one decision without running the native continuation loop."""
+    prepared, call, response, accounting = request_branch_response(
+        session, step, context, llm_config=llm_config,
+    )
     raw = response.model_dump(mode="json")
     assistant = deepcopy(raw["choices"][0]["message"])
     actions = parse_decision_actions(prepared.native_model, response)

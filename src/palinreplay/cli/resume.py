@@ -225,7 +225,7 @@ def execute(args):
                 print(f"Restored: C{session.start.node.index}; R1 passed; services {preparation}", flush=True)
                 phase = "first decision"
                 first = decide_resume_start(session, instruction=args.instruction,
-                                            llm_config=args.llm_config)
+                                            llm_config=args.llm_config, defer_format_errors=True)
                 phase = "recording"
                 run_resume_steps(session, first, llm_config=args.llm_config)
                 phase = "cleanup"

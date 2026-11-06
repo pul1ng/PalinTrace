@@ -631,6 +631,47 @@ def test_cli_runs_one_branch_with_full_cumulative_context(cli_case, budget, monk
     assert report["cleanup_confirmed"]
 
 
+@pytest.mark.parametrize("budget,expected_stop", [(1, "budget_exhausted"), (100, "submitted")])
+def test_cli_first_text_only_answer_enters_native_correction(cli_case, budget, expected_stop):
+    from palinreplay.core.models import Node, RunEnd
+    from palinreplay.sandbox.base import ExecResult
+    from tests.resume.test_multiturn_requests import api_messages
+    from tests.resume.test_run_steps import model_response
+
+    case = cli_case
+    reply = model_response(1, [])
+    reply.choices[0].finish_reason = "stop"
+    reply.choices[0].message.content = "Service B looks healthy."
+    case.responses[0] = reply
+    case.outcomes[0] = ExecResult("submit", b"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndone\n", 0, .1)
+    instruction = "Inspect B first"
+    assert main([*case.argv, "--max-steps", str(budget), "--instruction", instruction]) == 0
+    expected_calls = 1 if budget == 1 else 2
+    assert len(case.requests) == expected_calls
+    assert case.executor.execute.call_count == expected_calls - 1
+    assert case.events[:3] == ["r1", "start A", "start B"]
+    assert case.events.count("start A") == case.events.count("start B") == 1
+    assert case.events[-3:] == ["executor-close", "restore-close", "client-close"]
+    with RecordStore.open(case.output / "record", read_only=True) as store:
+        nodes = store.list(Node)
+        assert [node.index for node in nodes] == list(range(21, 21 + expected_calls))
+        first = store.read_json(nodes[0].context)
+        assert first["messages"][:42] == case.prefix
+        assert first["messages"][42] == {"role": "user", "content": instruction}
+        assert "No tool calls found" in first["messages"][-1]["content"]
+        assert first["messages"][-1]["extra"]["response"] == reply.model_dump(mode="json")
+        assert not nodes[0].tool_execution_ids
+        if budget > 1:
+            assert case.requests[1]["messages"] == api_messages(first["messages"])
+        assert store.list(RunEnd)[0].status == ("paused" if budget == 1 else "completed")
+        assert store.check_integrity().ok
+    report = json.loads((case.output / "report.json").read_text())
+    assert report["status"] == "passed" and report["cleanup_confirmed"]
+    assert report["decision"]["status"] == "format_error"
+    assert report["recording"]["total_model_requests"] == expected_calls
+    assert report["recording"]["stop_reason"] == expected_stop
+
+
 def test_cli_budget_100_stops_when_the_second_round_submits(cli_case):
     from palinreplay.core.models import Node, RunEnd
     from palinreplay.sandbox.base import ExecResult

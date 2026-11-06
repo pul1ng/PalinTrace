@@ -31,13 +31,27 @@ def test_text_only_second_answer_preserves_its_diagnostic(recordable, llm_config
     report = json.loads(case.session.report_path.read_text())["recording"]
     assert report["error"]["error"] == diagnosis
     assert report["stop_reason"] == "failed" and report["failure_stage"] == "model"
-    assert report["complete_nodes"] == case.session.executor.execute.call_count == 1
-    assert case.complete.call_count == 2
+    assert report["complete_nodes"] == 4
+    assert case.session.executor.execute.call_count == 1
+    assert case.complete.call_count == report["total_model_requests"] == 4
+    assert report["format_errors"] == 3
     with RecordStore.open(case.session.output / "record", read_only=True) as store:
         end, = store.list(RunEnd)
         failure, = store.list(Failure)
         assert store.read_json(end.details)["error"]["message"] == diagnosis
         assert store.read_json(failure.details)["error"]["message"] == diagnosis
+        nodes = store.list(Node)
+        assert [store.read_json(node.context)["counters"]["consecutive_format_errors"]
+                for node in nodes] == [0, 1, 2, 3]
+        assert all(not node.tool_execution_ids for node in nodes[1:])
+        context = store.read_json(nodes[-1].context)
+        assert context["messages"][-1]["extra"]["exit_status"] == "RepeatedFormatError"
+        for node in nodes[1:]:
+            trace = read_call(store, node.model_execution_id)
+            assert trace.phase == "accepted"
+            raw = store.read_json(next(event.payload for event in trace.events if event.kind == "result"))
+            assert raw["choices"][0]["message"]["content"] == "Finished the task."
+        assert store.check_integrity().ok
 
 
 @pytest.mark.parametrize("recordable", [{"tools": 1, "max_steps": 4}], indirect=True)
