@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +25,7 @@ from palinreplay.record.calls import read_call
 from palinreplay.record.replay import replay_execution
 from palinreplay.record.source import source_dependency
 from palinreplay.storage.btrfs.verification import verification_scope
-from palinreplay.storage.codec import JSON_TYPES
+from palinreplay.storage.codec import JSON_TYPES, decode
 from palinreplay.storage.io import export_directory, outside_store, write_json
 from palinreplay.storage.store import MODELS, IntegrityError, RecordStore, artifact_refs
 
@@ -36,7 +37,11 @@ def payload(store, ref):
     value = {"ref": ref.model_dump(mode="json")}
     logical = store.read_payload(ref)
     if logical.media_type in JSON_TYPES:
-        return value | {"encoding": "json", "value": store.read_json(ref)}
+        try:
+            content = json.loads(decode(logical.data, logical.media_type))
+        except (ValueError, UnicodeError) as error:
+            raise IntegrityError(f"artifact is not valid JSON: {ref.sha256}") from error
+        return value | {"encoding": "json", "value": content}
     data = logical.data
     try:
         return value | {"encoding": "utf-8", "value": data.decode("utf-8")}
