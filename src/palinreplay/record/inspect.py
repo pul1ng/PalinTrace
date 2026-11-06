@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +25,7 @@ from palinreplay.record.calls import read_call
 from palinreplay.record.replay import replay_execution
 from palinreplay.record.source import source_dependency
 from palinreplay.storage.btrfs.verification import verification_scope
-from palinreplay.storage.codec import JSON_TYPES
+from palinreplay.storage.codec import JSON_TYPES, decode
 from palinreplay.storage.io import export_directory, outside_store, write_json
 from palinreplay.storage.store import MODELS, IntegrityError, RecordStore, artifact_refs
 
@@ -34,9 +35,14 @@ def payload(store, ref):
     if ref is None:
         return None
     value = {"ref": ref.model_dump(mode="json")}
-    if ref.media_type in JSON_TYPES:
-        return value | {"encoding": "json", "value": store.read_json(ref)}
-    data = store.read_bytes(ref)
+    logical = store.read_payload(ref)
+    if logical.media_type in JSON_TYPES:
+        try:
+            content = json.loads(decode(logical.data, logical.media_type))
+        except (ValueError, UnicodeError) as error:
+            raise IntegrityError(f"artifact is not valid JSON: {ref.sha256}") from error
+        return value | {"encoding": "json", "value": content}
+    data = logical.data
     try:
         return value | {"encoding": "utf-8", "value": data.decode("utf-8")}
     except UnicodeError:
@@ -101,21 +107,29 @@ def node_document(store: RecordStore, node: Node, *, include_calls: bool = True)
     return document
 
 
+def store_file_bytes(store: RecordStore) -> int:
+    """Count directory bytes without reading facts or expanding payloads."""
+    return sum(
+        path.stat().st_size for path in store.root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+
+
 def storage_metrics(store: RecordStore) -> dict:
     refs = {
         ref.sha256: ref
         for model in MODELS.values()
         for record in store.list(model)
-        for ref in artifact_refs(record)
+        for direct in artifact_refs(record)
+        for ref in store.iter_payload_artifacts(direct)
     }
     # Filesystem sizes are logical bytes, not allocated blocks or device IO.
-    files = [p for p in store.root.rglob("*") if p.is_file() and not p.is_symlink()]
     metrics = {
         "scope": "whole-store-logical-bytes",
         "referenced_artifacts": len(refs),
         "referenced_artifact_bytes": sum(ref.size for ref in refs.values()),
         "catalog_bytes": (store.root / "catalog.sqlite").stat().st_size,
-        "store_file_bytes": sum(p.stat().st_size for p in files),
+        "store_file_bytes": store_file_bytes(store),
         "state_count": len(store.list(State)),
         "node_count": len(store.list(Node)),
     }
@@ -332,7 +346,8 @@ def export_record(source: str | Path, output: str | Path, *, bundle: bool = Fals
             ref.sha256: ref
             for facts in records.values()
             for record in facts
-            for ref in artifact_refs(record)
+            for direct in artifact_refs(record)
+            for ref in store.iter_payload_artifacts(direct)
         }
         copied = 0
         if bundle:

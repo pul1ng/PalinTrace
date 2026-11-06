@@ -705,7 +705,7 @@ class RecordingAgent(DefaultAgent):
                             attempt_id=self.recorder.attempt.attempt_id,
                             step_id=self.active.step.step_id if self.active else None,
                             category="recording" if isinstance(error, RecordingError) else "execution",
-                            details=self.recorder.store.put_json(
+                            details=self.recorder.store.put_payload_json(
                                 {"phase": "mini-termination", **self._end_details()}
                             ),
                         )

@@ -526,7 +526,7 @@ def test_backend_and_recording_errors_both_survive_when_diagnostics_also_fail(co
 
     def execute(request):
         monkeypatch.setattr(
-            store, "put_bytes", lambda *args, **kwargs: (_ for _ in ()).throw(disk_error)
+            store._artifacts, "put", lambda *args, **kwargs: (_ for _ in ()).throw(disk_error)
         )
         raise error
 
@@ -544,14 +544,14 @@ def test_observation_write_failure_prevents_receiver(context, monkeypatch):
     call = ports.model(json_adapter(), {})
     call.invoke()
     received = []
-    put = store.put_bytes
+    put = store.put_payload
 
-    def fail(data, **kwargs):
-        if data == b"offered view":
+    def fail(payload):
+        if payload.data == b"offered view":
             raise OSError("observation write failed")
-        return put(data, **kwargs)
+        return put(payload)
 
-    monkeypatch.setattr(store, "put_bytes", fail)
+    monkeypatch.setattr(store, "put_payload", fail)
     with pytest.raises(RecordingError) as caught:
         call.deliver("view", encode=lambda value: Payload(b"offered view"), receive=received.append)
     assert caught.value.phase == "observation" and not received

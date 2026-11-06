@@ -3,7 +3,9 @@
 import base64
 
 from palinreplay.core.errors import IntegrityError
+from palinreplay.core.serialization import json_bytes
 from palinreplay.restoration.services import PreparationError
+from palinreplay.storage.payloads import ROOT_MEDIA, logical_identity
 
 
 def replay_config(materials, *, r1=None, preparation=None):
@@ -35,6 +37,18 @@ def replay_config(materials, *, r1=None, preparation=None):
         "selected_history": [step.document() for step in materials.steps],
         "preparation_state_captured": False,
     }
+    logical = {}
+    for role, ref, data, value in (
+        ("context", plan.start.context, materials.context_bytes, materials.context),
+        ("input_position", plan.start.input_position,
+         materials.input_position_bytes, materials.input_position),
+    ):
+        if ref.media_type == ROOT_MEDIA:
+            _, _, media = logical_identity(data, ref.media_type)
+            logical[role] = {"data": base64.b64encode(json_bytes(value)).decode("ascii"),
+                             "media_type": media}
+    if logical:
+        replay["source_start"]["logical_materials"] = logical
     if r1 is not None:
         replay["r1"] = r1
     if preparation is not None:

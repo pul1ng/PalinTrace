@@ -17,7 +17,7 @@ from palinreplay.diagnostics.record_timing import flow_scope, record_phase, reco
 from palinreplay.diagnostics.timing import debug_timing, span
 from palinreplay.llm import LLMConfig, mini_model_name
 from palinreplay.preload.base import BtrfsPreloadRecord
-from palinreplay.record.inspect import inspect_record, storage_metrics
+from palinreplay.record.inspect import inspect_record, store_file_bytes
 from palinreplay.record.state import BtrfsStateBackend
 from palinreplay.sandbox import load_sandbox_task
 from palinreplay.sandbox.btrfs import BtrfsSandbox
@@ -191,7 +191,7 @@ def _run_record(
             report["phase"] = f"capturing_C{boundary.index}"
             journal()
             tick = time.monotonic()
-            before = storage_metrics(record_store)["store_file_bytes"]
+            before = store_file_bytes(record_store)
             state = backend.capture(record_store, boundary, previous)
             report["capture_boundaries"].append(
                 {
@@ -199,7 +199,7 @@ def _run_record(
                     "index": boundary.index,
                     "state_id": state.state_id,
                     "capture_sec": time.monotonic() - tick,
-                    "store_bytes_after_capture": storage_metrics(record_store)["store_file_bytes"],
+                    "store_bytes_after_capture": store_file_bytes(record_store),
                     "store_bytes_before_capture": before,
                 }
             )

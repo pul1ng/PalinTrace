@@ -1,14 +1,13 @@
 """A Resume branch pins one external boundary without a historical end range."""
 
 import base64
-import json
 from hashlib import sha256
 
 from palinreplay.core.errors import IntegrityError
 from palinreplay.core.models import Node, Run, State
 from palinreplay.core.replay_contract import SourceReference
 from palinreplay.core.serialization import json_bytes
-from palinreplay.storage.codec import JSON_TYPES, decode
+from palinreplay.core.source_payload import source_payload
 
 
 def resume_source_reference(config) -> SourceReference | None:
@@ -30,14 +29,16 @@ def resume_source_reference(config) -> SourceReference | None:
         run = Run.model_validate(source["run"])
         node = Node.model_validate(source["node"])
         state = State.model_validate(source["state"])
+        logical_materials = resume.get("logical_materials", {})
+        if not isinstance(logical_materials, dict):
+            raise ValueError("invalid logical source materials")
         if node.run_id != run.run_id or node.state_id != state.state_id:
             raise ValueError("source Run/Node/State identities differ")
         for role, ref in (("config", run.config), ("context", node.context),
                           ("input_position", node.input_position)):
             data = base64.b64decode(resume["raw_materials"][role], validate=True)
-            if (sha256(data).hexdigest() != ref.sha256 or len(data) != ref.size
-                    or ref.media_type not in JSON_TYPES
-                    or not isinstance(json.loads(decode(data, ref.media_type)), dict)):
+            value = source_payload(ref, data, logical_materials.get(role))
+            if not isinstance(value, dict):
                 raise ValueError(f"source {role} differs from its protected material reference")
         return SourceReference(source["store"], run, (node,), (state,), mode="resume")
     except (KeyError, TypeError, ValueError) as error:

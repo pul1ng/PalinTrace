@@ -100,7 +100,7 @@ def _call(store, node, execution_id, kind):
         "accepted_sequence": events[-1].sequence,
         "start": accepted["start"], "stop": accepted["stop"],
     }
-    return HistoricalCall(source, request, store.read_bytes(events[1].payload), details,
+    return HistoricalCall(source, request, store.read_payload(events[1].payload).data, details,
                           tuple(accepted["messages"]), tuple(offered), events[1].outcome)
 
 

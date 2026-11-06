@@ -15,8 +15,8 @@ from tests.helpers import recorder_smoke as fake
 from tests.replay.test_plan import history
 
 
-def configuration(tmp_path, start=20, end=22):
-    with RecordStore.create(tmp_path / "source") as source:
+def configuration(tmp_path, start=20, end=22, *, payload_layout="shared"):
+    with RecordStore.create(tmp_path / "source", payload_layout=payload_layout) as source:
         rec, _ = history(source, end)
         rec.finish()
         plan = pin_replay(source, f"C{start}", f"C{end}")
@@ -187,7 +187,7 @@ def test_changed_raw_prefix_cannot_authorize_source_initialization(tmp_path, fie
 
 
 def test_earlier_canonical_v2_prefix_remains_readable(tmp_path):
-    config = configuration(tmp_path, end=20)
+    config = configuration(tmp_path, end=20, payload_layout="flat")
     del config["replay"]["source_start"]["raw_materials"]
     with RecordStore.create(tmp_path / "actual") as store:
         rec = recorder(store, config)

@@ -325,15 +325,15 @@ def test_capture_and_publication_failure_keep_prefix_and_stop_next_step(context,
     if at == "capture":
         rec.boundary = BoundaryAdapter(agent.export, fail)
     elif at == "context-write":
-        real = store.put_bytes
-        wanted = agent.export(None).context.data
+        real = store.put_payload
+        wanted = agent.export(None).context
 
-        def put(data, **kwargs):
-            if data == wanted:
+        def put(payload):
+            if payload == wanted:
                 raise error
-            return real(data, **kwargs)
+            return real(payload)
 
-        monkeypatch.setattr(store, "put_bytes", put)
+        monkeypatch.setattr(store, "put_payload", put)
     else:
         # Fail after insertion but before COMMIT to exercise the real transaction rollback.
         real = store._insert
@@ -376,7 +376,7 @@ def test_total_write_failure_preserves_original_and_diagnostic_errors(context, m
     def fail(*args, **kwargs):
         raise error
 
-    monkeypatch.setattr(store, "put_bytes", fail)
+    monkeypatch.setattr(store._artifacts, "put", fail)
     with pytest.raises(RecordingError) as caught:
         rec.commit_step()
     assert caught.value.recording_error is error

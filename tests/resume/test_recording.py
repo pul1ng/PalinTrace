@@ -26,10 +26,14 @@ def branch_session(tmp_path):
         node = rec.current_node
         materials = SimpleNamespace(run=rec.run, node=node, state=store.get(State, node.state_id),
                                     config=store.read_json(rec.run.config),
-                                    runtime=SimpleNamespace(launch=SimpleNamespace(environment={})))
+                                    runtime=SimpleNamespace(launch=SimpleNamespace(environment={})),
+                                    physical_payloads={})
         for role, ref in (("config", rec.run.config), ("context", node.context),
                           ("input_position", node.input_position)):
-            setattr(materials, f"{role}_payload", Payload(store.read_bytes(ref), ref.media_type))
+            payload = store.read_payload(ref)
+            setattr(materials, f"{role}_payload", payload)
+            if ref.media_type != payload.media_type:
+                materials.physical_payloads[role] = store.read_bytes(ref)
     output = tmp_path / "out"
     output.mkdir()
     attempt = {"status": "consuming", "complete_nodes": 0}
@@ -63,12 +67,12 @@ def test_open_branch_at_final_source_node_has_no_complete_local_node(branch_sess
 def test_source_queries_share_one_config_read_per_snapshot(branch_session, monkeypatch):
     with open_recording(branch_session, fake.FakeAgent().export) as (rec, _step):
         reads = []
-        original = RecordStore.read_bytes
+        original = RecordStore.read_payload
         def read(store, ref):
             if store.root == rec.store.root and ref == rec.run.config:
                 reads.append(ref)
             return original(store, ref)
-        monkeypatch.setattr(RecordStore, "read_bytes", read)
+        monkeypatch.setattr(RecordStore, "read_payload", read)
         for count in (1, 2):
             with rec.store.snapshot():
                 source = rec.store.recording_source(rec.run.run_id)

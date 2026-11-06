@@ -144,7 +144,7 @@ class Recorder:
                 task_id=task_id,
                 agent_name=agent_name,
                 agent_version=agent_version,
-                config=store.put_bytes(config.data, media_type=config.media_type),
+                config=store.put_payload(config),
             )
         )
         self.attempt = store.save(Attempt(run_id=self.run.run_id))
@@ -179,7 +179,7 @@ class Recorder:
                 attempt_id=self.attempt.attempt_id,
                 step_id=self._active.step.step_id if self._active else None,
                 category=category,
-                details=self.store.put_json({"phase": phase, "error": _error_details(error)}),
+                details=self.store.put_payload_json({"phase": phase, "error": _error_details(error)}),
             )
         )
 
@@ -190,7 +190,7 @@ class Recorder:
                 attempt_id=self.attempt.attempt_id,
                 status=status,
                 last_node_id=self._head.node_id if self._head else None,
-                details=self.store.put_json(details),
+                details=self.store.put_payload_json(details),
             )
         )
         return self._end
@@ -279,12 +279,8 @@ class Recorder:
                         index=boundary.index,
                         step_id=boundary.step_id,
                         parent_node_id=boundary.parent_node_id,
-                        context=self.store.put_bytes(
-                            before.context.data, media_type=before.context.media_type
-                        ),
-                        input_position=self.store.put_bytes(
-                            before.input_position.data, media_type=before.input_position.media_type
-                        ),
+                        context=self.store.put_payload(before.context),
+                        input_position=self.store.put_payload(before.input_position),
                         state_id=state.state_id,
                         **(calls.model_dump() if calls else {"accepted_event_sequence": 0}),
                     )
@@ -296,9 +292,10 @@ class Recorder:
 
     def start(self) -> Node:
         self._require("new")
-        if self.store.recording_source(self.run.run_id) is not None:
-            raise IncompleteRecordError("source-reference recording must use start_from_source()")
-        return self._capture(None)
+        with self.store._expansion_scope():
+            if self.store.recording_source(self.run.run_id) is not None:
+                raise IncompleteRecordError("source-reference recording must use start_from_source()")
+            return self._capture(None)
 
     def start_from_source(self) -> None:
         """Enter a restored external prefix without capturing a local initial boundary."""
@@ -327,13 +324,14 @@ class Recorder:
 
     def commit_step(self) -> Node:
         self._require("step")
-        try:
-            with flow_scope("2.6", step=self._active.step.index, part="2.6.2"):
-                self._active._ready()
-                calls = self.store.accepted_step(self._active.step.step_id)
-        except BaseException as error:
-            self._abort("step-completeness", error)
-        return self._capture(calls)
+        with self.store._expansion_scope():
+            try:
+                with flow_scope("2.6", step=self._active.step.index, part="2.6.2"):
+                    self._active._ready()
+                    calls = self.store.accepted_step(self._active.step.step_id)
+            except BaseException as error:
+                self._abort("step-completeness", error)
+            return self._capture(calls)
 
     def _terminate(self, status: str, reason: str, details: dict | None = None) -> RunEnd:
         self._phase = "stopped"

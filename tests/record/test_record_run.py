@@ -117,6 +117,29 @@ def test_run_closes_resources_reopens_and_measures_storage(package, tmp_path, ru
     assert [step["index"] for step in assert_flow_accounting(report)["steps"]] == [0, 1, 2]
 
 
+def test_capture_size_accounting_does_not_expand_historical_payloads(
+    package, tmp_path, runtime, monkeypatch
+):
+    output = tmp_path / "run"
+    original = RecordStore.iter_payload_artifacts
+
+    def expand(store, ref):
+        phase = json.loads((output / "report.json").read_text())["phase"]
+        assert not phase.startswith("capturing_C"), phase
+        yield from original(store, ref)
+
+    monkeypatch.setattr(RecordStore, "iter_payload_artifacts", expand)
+    report = run_record(
+        package, output,
+        completion=Transport([response("long"), response("submit")]),
+        options=RunOptions(preload="base", network="none"),
+    )
+    assert report["status"] == "recorded" and report["verification"]["ok"]
+    assert len(report["capture_boundaries"]) == 3
+    assert all(row["store_bytes_after_capture"] >= row["store_bytes_before_capture"]
+               for row in report["capture_boundaries"])
+
+
 @pytest.mark.parametrize("debug", [False, True])
 def test_timings_cover_requests_retries_tools_boundaries_and_final_check(
     package, tmp_path, runtime, debug
