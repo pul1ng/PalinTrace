@@ -82,7 +82,7 @@ def execute(args):
         phase = "restoration"
         from palinreplay.resume import restore_resume_start
 
-        with restore_resume_start(start, output=output) as session:
+        with restore_resume_start(start, output=output, services_config=args.services_config) as session:
             print(f"Restored: C{session.start.node.index}; R1 passed")
         return 0
     except ValidationError as error:

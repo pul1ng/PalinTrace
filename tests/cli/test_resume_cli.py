@@ -6,10 +6,13 @@ import pytest
 from palinreplay.cli import main
 from palinreplay.cli.app import build_parser
 from palinreplay.storage.store import RecordStore
+from tests.resume import test_services as service_tests
 from tests.resume import test_session as session_tests
 from tests.resume.test_start import history
 
 restoration = session_tests.setup
+setup = session_tests.setup
+prepared = service_tests.prepared
 
 
 def test_resume_help(capsys):
@@ -329,3 +332,81 @@ def test_cli_reuses_output_rejection_without_changing_source(
         assert marker.read_text() == "existing evidence"
     else:
         assert not restoration.output.exists()
+
+
+def test_cli_prepares_services_once_after_r1(prepared, private_config):
+    restoration = prepared.session
+    assert main(_restoration_args(restoration, private_config,
+                                  "--services-config", str(prepared.path))) == 0
+    assert prepared.events == ["r1", "start A", "start B"]
+    report = json.loads((restoration.output / "report.json").read_text())
+    assert report["preparation"]["status"] == "ready"
+    assert [item["name"] for item in report["preparation"]["services"]] == ["A", "B"]
+    assert report["cleanup_confirmed"]
+    restoration.restore.assert_called_once()
+    restoration.executor.close.assert_called_once()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_cli_distinguishes_skipped_and_empty_preparation(
+    restoration, private_config, tmp_path, configured,
+):
+    config = tmp_path / "empty-services.json"
+    config.write_text('{"services": []}')
+    options = ["--services-config", str(config)] if configured else []
+    assert main(_restoration_args(restoration, private_config, *options)) == 0
+    report = json.loads((restoration.output / "report.json").read_text())
+    assert report["preparation"]["status"] == ("ready" if configured else "skipped")
+    restoration.executor.exec.assert_not_called()
+    assert (restoration.output / "preparation.json").exists() is configured
+
+
+@pytest.mark.parametrize("fault", ["exit", "timeout"])
+def test_cli_service_failure_preserves_evidence_and_never_requests_model(
+    prepared, private_config, monkeypatch, fault,
+):
+    import palinreplay.resume as resume
+    from palinreplay.sandbox.base import ExecResult, SandboxTimeout
+
+    restoration = prepared.session
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("failed preparation must not reach the model")
+
+    monkeypatch.setattr(resume, "decide_resume_start", forbidden)
+
+    def execute(command, **kwargs):
+        if command == "start B":
+            if fault == "timeout":
+                raise SandboxTimeout("startup timed out")
+            return ExecResult(command, b"failed", 17, 0.1)
+        return ExecResult(command, b"started", 0, 0.1)
+
+    restoration.executor.exec.side_effect = execute
+    assert main(_restoration_args(restoration, private_config,
+                                  "--services-config", str(prepared.path))) == 1
+    report = json.loads((restoration.output / "report.json").read_text())
+    assert report["r1"]["status"] == "passed"
+    assert report["preparation"]["status"] == "failed"
+    assert report["caller"]["status"] == "not_started"
+    assert report["cleanup_confirmed"]
+    restoration.executor.close.assert_called_once()
+    restoration.restored.close.assert_called_once()
+    restoration.connect.return_value.close.assert_called_once()
+
+
+def test_cli_mismatched_manifest_fails_before_container(restoration, private_config, tmp_path):
+    from tests.replay.test_service_config import _manifest
+
+    _, manifest = _manifest(tmp_path)
+    config = tmp_path / "manifest.json"
+    document = manifest.model_dump(mode="json")
+    document["source"]["run_id"] = "another-run"
+    config.write_text(json.dumps(document))
+    assert main(_restoration_args(restoration, private_config,
+                                  "--services-config", str(config))) == 1
+    restoration.connect.assert_not_called()
+    restoration.restore.assert_not_called()
+    report = json.loads((restoration.output / "report.json").read_text())
+    assert report["restore_status"] == "not_started"
+    assert "services_error" in report and report["cleanup_confirmed"]
