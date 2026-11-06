@@ -1,9 +1,11 @@
 import hashlib
 import json
 import sqlite3
+import tempfile
 
 import pytest
 
+import palinreplay.storage.payloads as payload_storage
 from palinreplay.core.interfaces import Payload
 from palinreplay.core.models import Run
 from palinreplay.core.serialization import json_bytes
@@ -72,7 +74,7 @@ def test_shared_physical_and_logical_identity_are_distinct_and_exact(tmp_path):
 
 @pytest.mark.parametrize("count", [FANOUT ** 2, FANOUT ** 2 + FANOUT])
 def test_append_shares_prefix_blocks_and_keeps_bounded_branch_fanout(tmp_path, count):
-    before = list(range(count))
+    before = [f"item {index:016d}" for index in range(count)]
     with RecordStore.create(tmp_path / "store") as store:
         first = store.put_payload_json(before)
         old = closure(store, first)
@@ -92,6 +94,7 @@ def test_append_shares_prefix_blocks_and_keeps_bounded_branch_fanout(tmp_path, c
 
 def test_arbitrary_edits_and_duplicate_positions_preserve_old_snapshots(tmp_path):
     original = messages(80)
+    original[1]["content"] += "stable large message" * 1000
     original[35] = original[4]
     edited = [*original]
     edited[2] = {"role": "system", "content": "new instructions" * 200}
@@ -242,7 +245,7 @@ def test_malformed_ordinary_run_configuration_remains_compatible(tmp_path, paylo
 
 
 def test_deep_canonical_json_uses_lossless_raw_fallback(tmp_path):
-    value = "large" * 1000
+    value = "large" * 3000
     for _ in range(80):
         value = {"nested": value}
     payload = Payload.json(value)
@@ -250,3 +253,108 @@ def test_deep_canonical_json_uses_lossless_raw_fallback(tmp_path):
         ref = store.put_payload(payload)
         assert ref.media_type == "application/json"
         assert store.read_payload(ref) == payload
+
+
+def test_snapshot_reuses_parsing_but_rechecks_files_and_expires_its_cache(tmp_path, monkeypatch):
+    with RecordStore.create(tmp_path / "store") as store:
+        ref = store.put_payload_json(messages())
+        parsed = []
+        original = payload_storage._json
+
+        def observe(data):
+            parsed.append(len(data))
+            return original(data)
+
+        monkeypatch.setattr(payload_storage, "_json", observe)
+        with store.snapshot():
+            value = store.read_json(ref)
+            first = len(parsed)
+            assert first > 1
+            value[0]["content"] = "mutating a returned value must not change cached nodes"
+            assert store.read_json(ref) == messages()
+            assert len(parsed) == first + 1  # Only the independently checked root reparses.
+        assert store._payloads._scope.get() is None
+        assert store.read_json(ref) == messages()
+        assert len(parsed) == first * 2 + 1
+
+
+@pytest.mark.parametrize("scope", ["snapshot", "_verification_scope"])
+def test_cached_nodes_do_not_hide_corruption_within_a_boundary(tmp_path, scope):
+    with RecordStore.create(tmp_path / "store") as store:
+        ref = store.put_payload_json(messages())
+        refs = list(store.iter_payload_artifacts(ref))
+        child = next(item for item in refs if item.media_type == NODE_MEDIA)
+        with getattr(store, scope)():
+            assert store.read_json(ref) == messages()
+            assert store.read_json(ref) == messages()
+            data = path(store, child).read_bytes()
+            path(store, child).chmod(0o600)
+            path(store, child).write_bytes(data[:-2] + b"!\n")
+            path(store, child).chmod(0o400)
+            with pytest.raises(IntegrityError):
+                store.read_payload(ref)
+
+
+def test_scope_cache_is_bounded_without_changing_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(payload_storage, "_CACHE_BYTES", 16 * 1024)
+    with RecordStore.create(tmp_path / "store") as store, store._verification_scope():
+        for count in range(60, 65):
+            payload = Payload.json(messages(count))
+            ref = store.put_payload(payload)
+            assert store.read_payload(ref) == payload
+            assert store._payloads._scope.get().size <= 16 * 1024
+
+
+def test_nested_snapshot_shares_cache_and_error_discards_it(tmp_path):
+    with RecordStore.create(tmp_path / "store") as store:
+        ref = store.put_payload_json(messages())
+        with pytest.raises(RuntimeError, match="boundary failed"), store.snapshot():
+            cache = store._payloads._scope.get()
+            assert store.read_json(ref) == messages()
+            with store.snapshot():
+                assert store._payloads._scope.get() is cache
+                assert store.read_json(ref) == messages()
+            raise RuntimeError("boundary failed")
+        assert store._payloads._scope.get() is None
+        assert not store._db.in_transaction
+        with store.snapshot():
+            assert store._payloads._scope.get() is not cache
+            assert store.read_json(ref) == messages()
+
+
+def test_read_only_snapshot_cache_creates_no_artifacts_or_clock_files(tmp_path, monkeypatch):
+    location = tmp_path / "store"
+    with RecordStore.create(location) as store:
+        ref = store.put_payload_json(messages())
+    before = {path.relative_to(location): path.stat().st_mtime_ns
+              for path in (location / "artifacts").rglob("*")}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("read-only payload cache must not create a clock file")
+
+    monkeypatch.setattr(tempfile, "TemporaryFile", forbidden)
+    with RecordStore.open(location) as store, store.snapshot():
+        assert store.read_json(ref) == messages()
+        assert store.read_json(ref) == messages()
+    after = {path.relative_to(location): path.stat().st_mtime_ns
+             for path in (location / "artifacts").rglob("*")}
+    assert after == before
+
+
+def test_parsed_cache_obeys_strict_physical_checks(tmp_path, monkeypatch):
+    with RecordStore.create(tmp_path / "store") as store:
+        ref = store.put_payload_json(messages())
+        verified = []
+        original = store._artifacts.verify
+
+        def observe(item):
+            verified.append(item)
+            return original(item)
+
+        with store._verification_scope():
+            assert store.read_json(ref) == messages()
+            assert store.read_json(ref) == messages()
+            monkeypatch.setattr(store._artifacts, "verify", observe)
+            with store._artifacts.strict_checks():
+                assert store.read_json(ref) == messages()
+        assert verified and all(item.media_type == NODE_MEDIA for item in verified)

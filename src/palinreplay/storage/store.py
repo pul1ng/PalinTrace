@@ -230,7 +230,8 @@ class RecordStore:
             if not nested:
                 self._db.execute("BEGIN")
             try:
-                yield
+                with self._payloads.scope():
+                    yield
             finally:
                 if not nested:
                     self._db.execute("ROLLBACK")
@@ -332,7 +333,7 @@ class RecordStore:
     @contextmanager
     def _verification_scope(self):
         self._ensure_open(writing=True)
-        with self._artifacts.verification_scope():
+        with self._artifacts.verification_scope(), self._payloads.scope():
             yield
 
     def _verify_artifact(self, ref):
