@@ -23,6 +23,11 @@ from minisweagent.models.utils.retry import retry
 from minisweagent.utils.serialize import recursive_merge
 from tenacity import stop_after_attempt
 
+from palinreplay.agents._mini_tools import (
+    encode_tool_result,
+    make_tool_adapter,
+    pair_tool_messages,
+)
 from palinreplay.core.interfaces import (
     AgentSnapshot,
     BoundaryAdapter,
@@ -391,22 +396,17 @@ class BorrowedEnvironment:
             "interpreter": self.config.interpreter,
             "timeout_sec": timeout or self.config.timeout,
         }
-        adapter = CallAdapter(
+        adapter = make_tool_adapter(
             name="mini.bash",
-            capture_request=Payload.json,
             execute=lambda req: self.sandbox.exec(
                 req["action"].get("command", ""),
                 cwd=req["cwd"],
                 env=req["env"],
                 timeout_sec=req["timeout_sec"],
             ),
-            capture_result=lambda result: ResultCapture(
-                Payload(result.output),
-                "sandbox-merged-output-bytes",
-                details={"decoded": self.output(result), "duration_sec": result.duration_sec},
-                outcome="error" if result.exit_code else "returned",
+            capture_result=lambda result: encode_tool_result(
+                result, self.output(result), "error" if result.exit_code else "returned",
             ),
-            visibility="observed-attempt",
         )
         call = session.active.tool(adapter, request, tool_call_id=action["tool_call_id"])
         session.tool_calls.append(call)
@@ -624,20 +624,13 @@ class RecordingAgent(DefaultAgent):
             self.submission_call = None
             return result
         if self.tool_calls and self._step_error is None:
-            if len(messages) != len(self.tool_calls) or any(
-                message.get("tool_call_id") != call.operation.tool_call_id
-                for message, call in zip(messages, self.tool_calls, strict=False)
-            ):
-                self.recorder._abort(
-                    "adoption-map", ValueError("native tool message group differs")
+            try:
+                deliveries = pair_tool_messages(
+                    self.tool_calls, messages, error_message="native tool message group differs",
                 )
-            return self._adopt(
-                [
-                    (call, [message])
-                    for call, message in zip(self.tool_calls, messages, strict=True)
-                ],
-                messages,
-            )
+            except ValueError as error:
+                self.recorder._abort("adoption-map", error)
+            return self._adopt(deliveries, messages)
         return super().add_messages(*messages)
 
     def save(self, path, *extra_dicts):

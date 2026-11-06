@@ -40,7 +40,7 @@ def test_terminal_ends_at_real_progress_without_filling_the_budget(mode, status)
     output = StringIO()
     console = rich.Console(file=output, force_terminal=True, width=130)
     with ResumeProgressDisplay(100, mode, stream=output, console=console) as progress:
-        display = progress._progress
+        display = progress._live
         progress(ProgressEvent("restoring", source_step=20))
         progress(ProgressEvent("committed", step=34, completed_steps=14))
         progress(ProgressEvent("finished", status=status, completed_steps=14, step=34))
@@ -67,7 +67,7 @@ def test_early_failure_restores_the_terminal(error):
     output = StringIO()
     console = rich.Console(file=output, force_terminal=True, width=130)
     with pytest.raises(error), ResumeProgressDisplay(100, console=console) as progress:
-        display = progress._progress
+        display = progress._live
         raise error("private details")
     assert not display.live.is_started and "\x1b[?25h" in output.getvalue()
     assert "private details" not in output.getvalue()
@@ -92,7 +92,7 @@ def test_render_failure_stops_display_without_aborting_execution():
     output = StringIO()
     console = rich.Console(file=output, force_terminal=True, width=130)
     with ResumeProgressDisplay(2, console=console) as progress:
-        display = progress._progress
+        display = progress._live
 
         def broken(event):
             raise OSError("broken terminal")

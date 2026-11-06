@@ -12,7 +12,7 @@ from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.models import Run
 from palinreplay.record.inspect import export_record, inspect_record, resolve_node
 from palinreplay.storage.io import outside_store
-from palinreplay.storage.store import RecordStore
+from palinreplay.storage.store import RecordStore, store_path
 from palinreplay.tasks import json_text
 
 
@@ -94,14 +94,6 @@ def add_commands(commands):
     visual.add_argument(
         "--output", type=Path, help="new HTML file (default: outputs/visual/DATE_TASK.html)"
     )
-
-
-def store_path(path: Path) -> Path:
-    if (path / "catalog.sqlite").exists():
-        return path
-    if (path / "record" / "catalog.sqlite").exists():
-        return path / "record"
-    raise RecordUsageError("expected a Record store or run/bundle directory containing record/")
 
 
 def _summary(view):

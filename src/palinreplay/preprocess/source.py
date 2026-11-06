@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.models import Node, Run
-from palinreplay.replay.plan import ReplayPlan, pin_replay
+from palinreplay.record.selection import SourceSelection, pin_source_selection
 from palinreplay.storage.store import RecordStore
 
 
@@ -12,7 +12,7 @@ from palinreplay.storage.store import RecordStore
 class PinnedSource:
     """An immutable, fully verified view of one Run's committed node chain."""
 
-    plan: ReplayPlan
+    plan: SourceSelection
 
     @property
     def run(self) -> Run:
@@ -61,13 +61,13 @@ def _select_run(store: RecordStore, run_id: str | None) -> Run:
 def pin_source(store: RecordStore, run_id: str | None = None) -> PinnedSource:
     """Freeze C0 through the last committed node, ignoring incomplete tails.
 
-    ``pin_replay`` performs the contiguous-chain, state and full-range provenance
+    ``pin_source_selection`` performs the contiguous-chain, state and full-range provenance
     checks. A Run without its own C0 therefore fails instead of producing a
     partial analysis range.
     """
     with store.snapshot():
         run = _select_run(store, run_id)
-        plan = pin_replay(store, "C0", run_id=run.run_id)
+        plan = pin_source_selection(store, "C0", run_id=run.run_id)
         if plan.run != run:
             raise RecordUsageError("selected Run changed while pinning the source")
         if plan.start.index != 0:

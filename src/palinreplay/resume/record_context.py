@@ -3,6 +3,7 @@
 import logging
 from copy import deepcopy
 
+from palinreplay.agents._mini_tools import pair_tool_messages
 from palinreplay.agents.mini import load_native
 from palinreplay.core.interfaces import AgentSnapshot, CallAdapter, Payload, ResultCapture
 
@@ -100,12 +101,10 @@ class ResumeRecordContext:
             template_vars=deepcopy(self.context.get("template_vars", {})),
             multimodal_regex=config.get("multimodal_regex", ""),
         )
-        if len(messages) != len(calls) or any(
-            message.get("tool_call_id") != call.operation.tool_call_id
-            for message, call in zip(messages, calls, strict=True)
-        ):
-            raise ValueError("mini observations do not align with Resume tool calls")
-        self.adopt([(call, [message]) for call, message in zip(calls, messages, strict=True)], messages)
+        deliveries = pair_tool_messages(
+            calls, messages, error_message="mini observations do not align with Resume tool calls",
+        )
+        self.adopt(deliveries, messages)
         return True
 
     @property

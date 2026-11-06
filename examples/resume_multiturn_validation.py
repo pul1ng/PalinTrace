@@ -21,8 +21,8 @@ from palinreplay.core.models import Execution, Node, Operation, Run, RunEnd
 from palinreplay.record.calls import read_call
 from palinreplay.record.recorder import Recorder
 from palinreplay.record.state import BtrfsStateBackend
-from palinreplay.replay import services as service_module
 from palinreplay.replay.environment import RestoredExecutor
+from palinreplay.restoration import services as service_module
 from palinreplay.resume import (
     decide_resume_start,
     restore_resume_start,

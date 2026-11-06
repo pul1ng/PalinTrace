@@ -8,8 +8,8 @@ from threading import RLock
 
 from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressReporter
 from palinreplay.record.restore import RestoredNode, RestoreMaterials
-from palinreplay.replay.environment import RestoredExecutor
-from palinreplay.replay.services import PreparationJournal, prepare_services
+from palinreplay.restoration.environment import RestoredExecutor
+from palinreplay.restoration.services import PreparationJournal, prepare_services
 from palinreplay.resume.context import ResumePrefix, validate_resume_context
 from palinreplay.resume.environment import restore_environment, saved_execution_config
 from palinreplay.resume.materials import load_resume_materials

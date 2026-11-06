@@ -455,6 +455,28 @@ def test_c0_capture_failure_exposes_no_model_request(tmp_path):
     store.close()
 
 
+@pytest.mark.parametrize("fault", ["missing", "swapped"])
+def test_malformed_tool_messages_abort_before_native_admission(tmp_path, monkeypatch, fault):
+    store, sandbox, _, transport, adapter = integrated(tmp_path, [response("one", "two")])
+    original = adapter._model.format_observation_messages
+
+    def malformed(*args, **kwargs):
+        messages = original(*args, **kwargs)
+        return messages[:1] if fault == "missing" else messages[::-1]
+
+    monkeypatch.setattr(adapter._model, "format_observation_messages", malformed)
+    try:
+        with pytest.raises(RecordingError) as caught:
+            adapter.run(AgentTask("task", "Task"))
+        assert caught.value.phase == "adoption-map"
+        assert len(transport.requests) == 1 and len(sandbox.calls) == 2
+        assert [node.index for node in store.list(Node)] == [0]
+        assert not [message for message in adapter.native_agent.messages if message["role"] == "tool"]
+        assert store.check_integrity().ok and store.check_integrity().incomplete_steps
+    finally:
+        store.close()
+
+
 def test_native_add_messages_partial_write_is_not_repeated(tmp_path, monkeypatch):
     store, sandbox, _, transport, adapter = integrated(tmp_path, [response("one", "two")])
     original_add = DefaultAgent.add_messages

@@ -3,7 +3,8 @@
 import sys
 import time
 
-from palinreplay.core.progress import ProgressEvent, ProgressReporter
+from palinreplay.cli._progress import ProgressDisplay
+from palinreplay.core.progress import ProgressEvent
 
 
 def describe(event: ProgressEvent) -> str:
@@ -40,35 +41,18 @@ def describe(event: ProgressEvent) -> str:
     }[event.phase]
 
 
-class ResumeProgressDisplay:
+class ResumeProgressDisplay(ProgressDisplay):
     """Best-effort live view on stderr; redirected output stays plain text."""
 
+    _close_on_finish = True
+
     def __init__(self, max_steps, mode="auto", *, stream=None, console=None):
-        self.max_steps, self.mode = max_steps, mode
-        self.stream = stream if stream is not None else sys.stderr
-        self.console = console
+        super().__init__(mode, stream=stream, console=console)
+        self.max_steps = max_steps
         self.completed = 0
         self.last_node = "尚无"
-        self.finished = False
-        self._progress = None
-        self._notify = ProgressReporter(self._update)
-
-    def __enter__(self):
-        self._started = time.monotonic()
-        if self.mode == "auto":
-            try:
-                terminal = self.console.is_terminal if self.console is not None else self.stream.isatty()
-                if terminal:
-                    self._start_live()
-            except Exception:
-                self._stop_live()
-            except BaseException:
-                self._stop_live()
-                raise
-        return self
 
     def _start_live(self):
-        from rich.console import Console
         from rich.progress import (
             BarColumn,
             MofNCompleteColumn,
@@ -78,10 +62,10 @@ class ResumeProgressDisplay:
             TimeElapsedColumn,
         )
 
-        console = self.console if self.console is not None else Console(file=self.stream)
-        if console.is_dumb_terminal:
+        console = self._terminal_console()
+        if console is None:
             return
-        self._progress = Progress(
+        self._live = Progress(
             SpinnerColumn("dots2"),
             TextColumn("Resume · {task.description}", markup=False),
             BarColumn(bar_width=20),
@@ -93,15 +77,10 @@ class ResumeProgressDisplay:
             # retains the CLI's normal output stream.
             redirect_stdout=sys.stdout.isatty(), redirect_stderr=True,
         )
-        self._task = self._progress.add_task(
+        self._task = self._live.add_task(
             "读取配置与来源轨迹", total=self.max_steps, node=self.last_node,
         )
-        self._progress.start()
-
-    def __call__(self, event: ProgressEvent):
-        self._notify(event)
-        if self._notify.callback is None or self.finished:
-            self._stop_live()
+        self._live.start()
 
     def _update(self, event: ProgressEvent):
         if event.source_step is not None and not self.completed:
@@ -114,29 +93,13 @@ class ResumeProgressDisplay:
         if self.mode == "off":
             return
         message = describe(event)
-        if self._progress is not None:
-            self._progress.update(self._task, description=message,
+        if self._live is not None:
+            self._live.update(self._task, description=message,
                                   completed=self.completed, node=self.last_node)
             if self.finished:
-                self._progress.stop_task(self._task)
-                self._progress.refresh()
+                self._live.stop_task(self._task)
+                self._live.refresh()
         else:
             elapsed = time.monotonic() - self._started
             print(f"[resume {elapsed:.1f}s {self.completed}/{self.max_steps} 已保存/预算"
                   f" · {self.last_node}] {message}", file=self.stream, flush=True)
-
-    def _stop_live(self):
-        progress, self._progress = self._progress, None
-        if progress is not None:
-            try:
-                progress.stop()
-            except Exception:
-                pass
-
-    def __exit__(self, exc_type, exc, traceback):
-        try:
-            if exc_type is not None and not self.finished:
-                self(ProgressEvent("finished",
-                                   status="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed"))
-        finally:
-            self._stop_live()

@@ -4,7 +4,7 @@ import math
 
 from palinreplay.core.errors import IntegrityError
 from palinreplay.record.restore import load_restore_materials, restore_r1_node
-from palinreplay.replay.environment import RestoredExecutor
+from palinreplay.restoration.environment import RestoredExecutor
 from palinreplay.sandbox.client import docker_endpoint
 from palinreplay.storage.store import RecordStore
 

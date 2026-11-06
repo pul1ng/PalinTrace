@@ -47,6 +47,29 @@ def test_c20_and_full_id_from_recording_or_store_directory(record):
         assert _select_source(directory, node.node_id) == (source, selected)
 
 
+def test_direct_store_precedes_its_nested_record_store(tmp_path):
+    root = tmp_path / "both"
+    with RecordStore.create(root) as store:
+        rec, _ = history(store, count=0)
+        direct = rec.current_node
+        rec.finish()
+    with RecordStore.create(root / "record") as store:
+        rec, _ = history(store, count=0)
+        nested = rec.current_node
+        rec.finish()
+    assert _select_source(root, "C0") == (root, direct)
+    assert _select_source(root / "record", "C0") == (root / "record", nested)
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_invalid_store_path_reports_the_existing_usage_error(tmp_path, exists):
+    path = tmp_path / "invalid"
+    if exists:
+        path.mkdir()
+    with pytest.raises(RecordUsageError, match="expected a Record store or run/bundle directory"):
+        _select_source(path, "C0")
+
+
 def test_relative_path_keeps_absolute_source(record, monkeypatch):
     path, node = record
     monkeypatch.chdir(path.parent)

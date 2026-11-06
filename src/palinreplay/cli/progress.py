@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import sys
 import time
 
-from palinreplay.core.progress import ProgressEvent, ProgressReporter
+from palinreplay.cli._progress import ProgressDisplay
+from palinreplay.core.progress import ProgressEvent
 
 
 def describe(event: ProgressEvent) -> str:
@@ -62,7 +62,7 @@ def describe(event: ProgressEvent) -> str:
     }[event.phase]
 
 
-class RecordProgressDisplay:
+class RecordProgressDisplay(ProgressDisplay):
     """Mini-style Live/spinner view on stderr; plain events when redirected.
 
     The bar measures committed steps against a budget, not task completion.
@@ -70,36 +70,14 @@ class RecordProgressDisplay:
     """
 
     def __init__(self, max_steps: int, mode="auto", *, stream=None, console=None):
-        self.max_steps, self.mode = max_steps, mode
-        self.stream = stream if stream is not None else sys.stderr
-        self.console = console
+        super().__init__(mode, stream=stream, console=console)
+        self.max_steps = max_steps
         self.committed_steps = 0
         self.last_node = "none"
         self.task_id = ""
-        self.finished = False
-        self._live = None
-        self._started = 0.0
-        self._notify = ProgressReporter(self._update)
-
-    def __enter__(self):
-        self._started = time.monotonic()
-        if self.mode == "auto":
-            try:
-                terminal = (
-                    self.console.is_terminal if self.console is not None else self.stream.isatty()
-                )
-                if terminal:
-                    self._start_live()
-            except Exception:
-                # UI setup is best-effort; a redirected/plain run needs no Rich.
-                self._stop_live()
-            except BaseException:
-                self._stop_live()
-                raise
-        return self
 
     def _start_live(self):
-        from rich.console import Console, Group
+        from rich.console import Group
         from rich.live import Live
         from rich.progress import (
             BarColumn,
@@ -111,8 +89,8 @@ class RecordProgressDisplay:
         )
         from rich.text import Text
 
-        console = self.console if self.console is not None else Console(file=self.stream)
-        if console.is_dumb_terminal:
+        console = self._terminal_console()
+        if console is None:
             return
         self._title = Text("Record", style="bold cyan")
         self._activity = Progress(
@@ -142,11 +120,6 @@ class RecordProgressDisplay:
             redirect_stderr=False,
         )
         self._live.start(refresh=True)
-
-    def __call__(self, event: ProgressEvent):
-        self._notify(event)
-        if self._notify.callback is None:
-            self._stop_live()
 
     def _update(self, event: ProgressEvent):
         if self.mode == "off":
@@ -178,23 +151,3 @@ class RecordProgressDisplay:
         else:
             elapsed = time.monotonic() - self._started
             print(f"[record {elapsed:.1f}s] {message}", file=self.stream, flush=True)
-
-    def _stop_live(self):
-        live, self._live = self._live, None
-        if live is not None:
-            try:
-                live.stop()
-            except Exception:
-                pass
-
-    def __exit__(self, exc_type, exc, traceback):
-        try:
-            if exc_type is not None and not self.finished:
-                self(
-                    ProgressEvent(
-                        "finished",
-                        status="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed",
-                    )
-                )
-        finally:
-            self._stop_live()

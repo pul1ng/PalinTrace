@@ -5,7 +5,7 @@ from pathlib import Path
 
 from palinreplay.cli.common import cancellation_signals
 from palinreplay.cli.outputs import default_output, record_name
-from palinreplay.cli.record import store_path
+from palinreplay.storage.store import store_path
 
 
 def add_commands(commands):

@@ -1,10 +1,11 @@
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 from palinreplay.core.errors import RecordUsageError
-from palinreplay.core.models import Node, Run
+from palinreplay.core.models import Node, Run, State
 from palinreplay.preprocess.source import pin_source
 from palinreplay.replay.plan import pin_replay
 from palinreplay.storage.store import RecordStore
@@ -27,6 +28,17 @@ def test_pins_full_committed_range_and_binds_its_provenance(tmp_path):
         source = pin_source(store)
         expected = pin_replay(store, "C0").provenance()
         assert source.run.run_id == store.list(Run)[0].run_id
+        legacy_selection = {
+            "schema_version": "palinreplay.replay-source.v1",
+            "source_store": str(root.resolve()),
+            "run": source.run.model_dump(mode="json"),
+            "nodes": [node.model_dump(mode="json") for node in source.nodes],
+            "states": [store.get(State, node.state_id).model_dump(mode="json") for node in source.nodes],
+        }
+        canonical = (json.dumps(legacy_selection, sort_keys=True, ensure_ascii=True,
+                                separators=(",", ":")) + "\n").encode()
+        assert expected["digest_scheme"] == "sha256-canonical-selection-json-v1"
+        assert expected["selection_sha256"] == hashlib.sha256(canonical).hexdigest()
     assert source.start_index == 0 and source.end_index == 3
     assert source.document() == {
         "run_id": expected["run"]["run_id"],
