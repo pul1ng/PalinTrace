@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import OrderedDict
 from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from pydantic import ValidationError
 
@@ -18,13 +21,14 @@ from palinreplay.core.errors import IntegrityError
 from palinreplay.core.interfaces import Payload
 from palinreplay.core.models import ArtifactRef
 from palinreplay.core.serialization import json_bytes
-from palinreplay.storage.artifacts import ArtifactStore
+from palinreplay.storage.artifacts import ArtifactStore, sync_directory
 
 ROOT_MEDIA = "application/vnd.palinreplay.payload+json;version=1"
 NODE_MEDIA = "application/vnd.palinreplay.payload-node+json;version=1"
 FORMAT = "palinreplay.payload.v1"
 FANOUT = 32
-INLINE_BYTES = 1024
+INLINE_BYTES = 8192
+_CACHE_BYTES = 8 * 1024 * 1024
 _RESERVED = ("application/vnd.palinreplay.payload+", "application/vnd.palinreplay.payload-node+")
 
 
@@ -54,15 +58,16 @@ def _ref(value) -> ArtifactRef:
     return ref
 
 
-def _token(value):
+def _token(value, *, recursive=True):
     if not isinstance(value, list) or not value or not isinstance(value[0], str):
         raise IntegrityError("invalid shared payload value token")
     kind = value[0]
     if kind == "value" and len(value) == 2:
-        try:
-            json_bytes(value[1])
-        except (TypeError, ValueError, RecursionError) as error:
-            raise IntegrityError("invalid shared payload inline value") from error
+        if recursive:
+            try:
+                json_bytes(value[1])
+            except (TypeError, ValueError, RecursionError) as error:
+                raise IntegrityError("invalid shared payload inline value") from error
     elif kind == "ref" and len(value) == 2:
         _ref(value[1])
     elif kind == "object" and len(value) == 2 and isinstance(value[1], list):
@@ -72,7 +77,14 @@ def _token(value):
                     or (previous is not None and pair[0] <= previous)):
                 raise IntegrityError("invalid shared payload object entries")
             previous = pair[0]
-            _token(pair[1])
+            if recursive:
+                _token(pair[1])
+    elif kind == "list" and len(value) == 2 and isinstance(value[1], list):
+        if len(value[1]) > FANOUT:
+            raise IntegrityError("shared payload inline sequence exceeds its fanout")
+        if recursive:
+            for child in value[1]:
+                _token(child)
     elif kind == "array" and len(value) == 4:
         count, height = value[1:3]
         if (type(count) is not int or count < 1 or type(height) is not int
@@ -113,6 +125,24 @@ def logical_identity(data: bytes, media_type: str) -> tuple[str, int, str]:
 class PayloadStore:
     def __init__(self, artifacts: ArtifactStore):
         self.artifacts = artifacts
+        self._scope = ContextVar("shared_payload_scope", default=None)
+
+    @contextmanager
+    def scope(self):
+        """Retain bounded parsed data only during one read/recording boundary.
+
+        Every reuse still verifies the physical file through ArtifactStore. Its
+        existing boundary-local proofs may avoid rehashing unchanged files.
+        This cache never itself grants permission to trust persisted bytes.
+        """
+        if self._scope.get() is not None:
+            yield
+            return
+        token = self._scope.set(_Cache())
+        try:
+            yield
+        finally:
+            self._scope.reset(token)
 
     def put(self, payload: Payload) -> ArtifactRef:
         if not isinstance(payload, Payload):
@@ -129,7 +159,8 @@ class PayloadStore:
         if canonical != payload.data or len(canonical) <= INLINE_BYTES:
             return self.artifacts.put(payload.data, payload.media_type)
         try:
-            token = self._encode(value)
+            with self.scope():
+                token = self._encode(value)
         except (ValueError, RecursionError):
             # Deep but otherwise valid canonical JSON remains a raw payload.
             return self.artifacts.put(payload.data, payload.media_type)
@@ -145,7 +176,17 @@ class PayloadStore:
         return self.artifacts.put(json_bytes(root), ROOT_MEDIA)
 
     def _save(self, value):
-        return self.artifacts.put(json_bytes(value), NODE_MEDIA).model_dump(mode="json")
+        data = json_bytes(value)
+        cache = self._scope.get()
+        ref = cache.published.get(data) if cache is not None else None
+        if ref is not None:
+            self.artifacts.verify_internal(ref)
+            sync_directory(self.artifacts.root / ref.sha256[:2])
+        else:
+            ref = self.artifacts.put(data, NODE_MEDIA)
+            if cache is not None:
+                cache.remember(cache.published, data, ref, len(data))
+        return ref.model_dump(mode="json")
 
     def _encode(self, value, depth=0):
         if len(json_bytes(value)) <= INLINE_BYTES:
@@ -153,6 +194,12 @@ class PayloadStore:
         if depth > 64:
             raise ValueError("payload exceeds the shared encoding depth")
         if isinstance(value, list):
+            if len(value) <= FANOUT:
+                items = [self._encode(item, depth + 1) for item in value]
+                token = ["list", items]
+                if len(json_bytes(token)) <= INLINE_BYTES:
+                    return token
+                return ["array", len(value), 0, self._save(["items", items])]
             level = [self._save(["items", [self._encode(item, depth + 1)
                                          for item in value[start:start + FANOUT]]])
                      for start in range(0, len(value), FANOUT)]
@@ -170,32 +217,61 @@ class PayloadStore:
     def read(self, ref: ArtifactRef, *, data: bytes | None = None) -> Payload:
         if not is_shared(ref.media_type):
             return Payload(self.artifacts.read(ref) if data is None else data, ref.media_type)
-        return _Reader(self.artifacts, ref, data=data).read()
+        return _Reader(self.artifacts, ref, data=data, cache=self._scope.get()).read()
 
     def iter_artifacts(self, ref: ArtifactRef) -> Iterator[ArtifactRef]:
         if not is_shared(ref.media_type):
             yield ref
             return
-        reader = _Reader(self.artifacts, ref)
+        reader = _Reader(self.artifacts, ref, cache=self._scope.get())
         reader.read()
         yield from reader.refs.values()
 
 
-class _Reader:
-    """A single expansion owns all caches; no proof survives the read boundary."""
+class _Cache:
+    def __init__(self):
+        self.published = OrderedDict()
+        self.nodes = OrderedDict()
+        self.sizes = {}
+        self.size = 0
 
-    def __init__(self, artifacts, root, *, data=None):
+    def remember(self, target, key, value, size):
+        if size > _CACHE_BYTES or key in target:
+            return
+        target[key] = value
+        identity = (id(target), key)
+        self.sizes[identity] = size
+        self.size += size
+        # Both entry count and bytes are bounded, including very small nodes.
+        while self.size > _CACHE_BYTES or len(target) > 1024:
+            oldest, _ = target.popitem(last=False)
+            self.size -= self.sizes.pop((id(target), oldest))
+
+
+class _Reader:
+    """Expand one root; reconstructed values remain private to this operation."""
+
+    def __init__(self, artifacts, root, *, data=None, cache=None):
         self.artifacts = artifacts
         self.root = root
         self.root_data = data
+        self.cache = cache
         self.refs = {}
         self.nodes = {}
+        self.values = {}
+        self.key_sizes = {}
         self.maximum = None
 
     def _load(self, ref):
         key = (ref.sha256, ref.size, ref.media_type)
         if key not in self.nodes:
-            self.nodes[key] = _json(self.artifacts.read(ref))
+            if self.cache is not None and key in self.cache.nodes:
+                self.artifacts.verify_internal(ref)
+                self.nodes[key] = self.cache.nodes[key]
+            else:
+                self.nodes[key] = _json(self.artifacts.read(ref))
+                if self.cache is not None:
+                    self.cache.remember(self.cache.nodes, key, self.nodes[key], ref.size)
             self.refs[key] = ref
         return self.nodes[key]
 
@@ -207,20 +283,34 @@ class _Reader:
     def _decode(self, token, depth=0):
         if depth > 256:
             raise IntegrityError("shared payload nesting exceeds the supported depth")
-        _token(token)
+        _token(token, recursive=False)
         kind = token[0]
         if kind == "value":
             value = token[1]
             return value, self._bounded(len(json_bytes(value)) - 1)
         if kind == "ref":
-            return self._decode(self._load(_ref(token[1])), depth + 1)
+            ref = _ref(token[1])
+            key = (ref.sha256, ref.size, ref.media_type)
+            if key not in self.values:
+                self.values[key] = self._decode(self._load(ref), depth + 1)
+            return self.values[key]
         if kind == "object":
             result, size = {}, 2
             for key, child in token[1]:
                 value, length = self._decode(child, depth + 1)
-                size += len(json_bytes(key)) + length + bool(result)
+                if key not in self.key_sizes:
+                    self.key_sizes[key] = len(json_bytes(key))
+                size += self.key_sizes[key] + length + bool(result)
                 self._bounded(size)
                 result[key] = value
+            return result, size
+        if kind == "list":
+            result, size = [], 2
+            for child in token[1]:
+                value, length = self._decode(child, depth + 1)
+                size += length + bool(result)
+                self._bounded(size)
+                result.append(value)
             return result, size
         count, height, ref = token[1:]
         result, size = self._array(_ref(ref), height, depth + 1)
