@@ -1,12 +1,12 @@
 # PalinTrace
 
-Execution trace recording, environment restoration, and historical replay for coding agents.
+Execution trace recording, historical replay, and branching from saved nodes for coding agents.
 
-PalinTrace links an agent's model interactions, tool calls, execution results, context, and task environment state. The goal is to let users select any saved node, restore its associated environment, and replay recorded interactions from that point, keeping playback and environment state aligned with the same position in history.
+PalinTrace saves model interactions and tool results alongside the agent context and file state at each step. From a saved node, you can restore the environment and execute the recorded operations that follow, or let the model continue the restored conversation on a new branch.
 
 - **Record · Trace recording (MVP implemented)**: Record model interactions, tool calls, and results together with the corresponding context, task files, and runtime configuration. These records provide the basis for inspecting history, restoring environments, and historical replay.
 - **Replay · Historical re-execution (MVP implemented)**: Restore a committed source node and execute subsequent tools from a fixed history without model requests or credentials. Save actual results and snapshots; stop on a definite exit-code mismatch or a framework failure. Full consistency checking is planned as separate Verify work.
-- **Resume · Fork and continue (implemented in stages)**: Restore a saved node, validate its context and writable environment, prepare optional services, then obtain one new decision and record its tool group as an independent branch node.
+- **Resume · Fork and continue (Python MVP)** restores the environment and full conversation at a saved node. The model makes new decisions, tools run in the same container, and each complete step becomes a node on the new branch.
 
 ## Demo (Chinese)
 
@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/c46a93c8-3cd9-43a4-b142-0c557c4bb7b7
 
 ## Quickstart
 
-Run the following commands from the project root. After installation and configuration, use the script to start Record. The resulting traces and snapshots can be used for Replay and provide inputs for future Resume workflows.
+Run the following commands from the project root. After installation and configuration, use the script to start Record. Its traces and snapshots can be used for both Replay and Resume.
 
 ### 1. Install dependencies
 
@@ -81,51 +81,42 @@ PALIN_SERVICES="/path/to/services.json"
 
 This example runs from C0 to the recorded end. Use `--from` and `--to` to select a range. Results default to `outputs/replay/YYMMDD_HHMMSS_TASK/`; an exit-code mismatch stops execution and preserves actual results. See the [command reference (Chinese)](docs/命令参考.md#replay) for all parameters and restoration scope.
 
-### 5. Resume: restore a starting node and record one branch step
+### 5. Resume a branch from a saved node (Python)
 
-The Python API restores the saved conversation and writable environment, passes R1,
-and prepares optional services. It can then obtain one decision and record the tools
-in that same container:
+Use the source Record in `$PALIN_RUN`. Set `$PALIN_SERVICES` to the service manifest path if you have one, or leave it empty. This example starts at C0 and allows up to two new model decisions. To start at C20, choose a recording that contains that node and change `"C0"` to `"C20"`.
 
-```python
+```bash
+.venv/bin/python - "$PALIN_RUN" "${PALIN_SERVICES:-}" <<'PY'
+import sys
+
+from palinreplay.llm import LLMConfig
 from palinreplay.resume import (
-    select_resume_start, restore_resume_start, decide_resume_start, record_resume_step,
+    decide_resume_start, restore_resume_start, run_resume_steps, select_resume_start,
 )
 
-start = select_resume_start("outputs/record/SOURCE", "C20", model="openai/M", max_steps=1)
-with restore_resume_start(start, services_config="outputs/preprocess/SOURCE/services.json") as session:
-    decision = decide_resume_start(session, llm_config="config/llm/llm.toml")
-    node = record_resume_step(session, decision)
-    if node is not None:
-        print(node.run_id, node.node_id, node.index)  # independent branch C21
+source, services = sys.argv[1:]
+llm_config = "config/llm/llm.toml"
+model = LLMConfig.load(llm_config).model
+start = select_resume_start(source, "C0", model=model, max_steps=2)
+with restore_resume_start(start, services_config=services or None) as session:
+    print("Output", session.output, flush=True)
+    first = decide_resume_start(session, llm_config=llm_config)
+    nodes = run_resume_steps(session, first, llm_config=llm_config)
+
+if nodes:
+    last = nodes[-1]
+    print("Run", last.run_id, "node", f"C{last.index}", last.node_id)
+print("Stop reason", session.report["recording"]["stop_reason"])
+PY
 ```
 
-Omit `services_config` to skip preparation. A valid manifest selecting no services
-completes preparation with zero items. Manifest source, digest, evidence and range
-checks happen before creating a task container. After R1, v2 startup commands run
-once each without added readiness probes; explicitly configured legacy readiness
-remains supported. Preparation failure prevents delivery and cleans up resources.
+Use `instruction=` on `decide_resume_start()` to append a user message to the source conversation. The first decision counts toward `max_steps`. Each later request includes the full branch conversation and all previously accepted tool results. Once the whole tool group has executed and its results have been accepted, the recorder commits the node and its file snapshot. The [single-step API](docs/resume-stage5-acceptance.md) `record_resume_step()` is also available for executing one saved decision.
 
-Outputs default to `outputs/resume/<timestamp>_C20-restore/`. `report.json` preserves
-restoration, preparation, caller and cleanup outcomes separately; `restore-report.json`
-contains R1 and resource evidence, and `preparation.json` records configured startups.
-The context manager releases the container and writable workspace on normal or
-exceptional exit. A caller-supplied Docker client remains caller-owned.
+File restoration covers `rootfs-files-v1`. If you supply a manifest, the session prepares the services selected for the starting node in the restored container after the R1 check. Each v2 startup command runs once. Legacy configurations can also specify readiness checks. Omit the manifest to skip preparation.
 
-`decide_resume_start()` accepts an optional `instruction=` after the inherited prefix.
-`record_resume_step()` consumes that saved response once, without another model request,
-including when the decision used the last budget slot. Modified decisions, repeated
-consumption and closed sessions are rejected before execution. Actual results are saved
-as each tool returns; the complete group is admitted before one node is published under
-`session.output / "record"`. Ordinary nonzero exits retain their actual output and status.
-On native submission, mini accepts the submitting tool's `exit` message. A single-tool submission
-publishes a node. When submission cuts a multi-tool group short, the function returns `None`,
-the recording and session report `incomplete`, and the Store retains the tools' actual returns.
-Interruptions and recording failures preserve the call tail, and `report.json.recording`
-reports the actual published node count. `session.context` remains the source prefix;
-the new node contains the updated branch messages and input position. This API handles
-one round; an autonomous decision loop remains future work. See the
-[stage 5 acceptance record](docs/resume-stage5-acceptance.md) for evidence and reproduction.
+Session directories are created under `outputs/resume/` by default. Set `output=` to use a new directory outside the source recording. The session's `report.json` identifies the source, completed rounds, last node, stop reason, and cleanup result. The `record/` directory holds the calls and updated conversation at each branch node. The inherited prefix is available in `session.context`. The R1 evidence is in `restore-report.json`, and `preparation.json` records any service preparation requested through a manifest. On submission, budget exhaustion, interruption or failure, committed nodes and calls that already occurred remain available. Exiting the session releases the temporary container and writable workspace. The caller owns any Docker client it supplies.
+
+In the live run from C20, the model submitted in round 10 at branch C30. See the [stage 6 acceptance summary (Chinese)](docs/validation/resume-stage6-20261106.md) for the report fields, the snapshot inspection command and other stopping cases.
 
 ## Getting Started
 
@@ -228,7 +219,7 @@ Export a readable trace:
 .venv/bin/palin record export "$PALIN_RUN"
 ```
 
-The export does not include the Btrfs storage pool. Keep the recording directory, the base, and their associated storage pool for restoration verification, Replay, and future Resume. When exporting Replay results, also retain the original source Store, artifacts, and snapshots; the export declares these external dependencies without packaging them. See the [command reference (Chinese)](docs/命令参考.md) for complete options.
+The exported recording relies on a separate Btrfs storage pool. Keep the recording directory, the base, and that pool for restoration verification, Replay, and Resume. Replay exports declare their external dependencies, so also retain the original source Store, artifacts, and snapshots. See the [command reference (Chinese)](docs/命令参考.md) for complete options.
 
 ### 7. record visualize: Generate a visualization
 
@@ -257,7 +248,7 @@ Set `model`, `base_url`, and `api_key` in the config, then run:
   --output "$PALIN_PREPROCESS"
 ```
 
-This step calls a model and writes `$PALIN_PREPROCESS/services.json` and an analysis report. It does not start task services. Reuse the same manifest for different Replay starting nodes.
+This step calls a model and writes `$PALIN_PREPROCESS/services.json` and an analysis report. Replay and Resume can use the same manifest to select services at different starting nodes.
 
 ### 9. replay: Restore and re-execute history
 
@@ -297,7 +288,8 @@ outputs/             Local outputs grouped by type and timestamp (Git-ignored)
 
 - [x] Replay MVP: Restore a committed source node, pass R1 and explicitly configured service preparation, and execute fixed historical tools without model requests. Reference the source baseline, save only actually completed steps, and use definite historical exit codes to control continuation while retaining actual evidence.
 - [ ] Verify: Independently check actual Replay results against the pinned source; no Verify command is implemented yet.
-- [ ] Resume: Restore agent context and a runnable environment, then create an independent branch from a historical node while preserving the original trace.
+- [x] Resume (Python MVP) supports restoring a saved node, multi-turn decisions, branch snapshots, and a final report.
+- [ ] Resume command-line entry point.
 - [ ] Rewrite: Generate and actually execute replacement operations for a selected historical interval, validate its exit conditions and context handoff, and save a separate derived trace while preserving the original Record.
 - [ ] Incremental storage management: Merge and split storage increments while retaining historical nodes.
 - [ ] Portable backups and migration across machines.

@@ -2,13 +2,13 @@
 
 [English](readme_EN.md)
 
-面向 Coding Agent 的轨迹记录、环境恢复与历史回放工具。
+面向 Coding Agent 的轨迹录制、历史回放与分叉续跑工具。
 
-PalinTrace 将 Agent 的模型交互、工具调用、执行结果、上下文和任务环境状态关联保存。项目目标是让使用者能够定位到轨迹中的任意已保存节点，恢复该节点对应的环境，并从该位置回放历史执行过程，使回放内容与环境状态始终对应同一个历史位置。
+PalinTrace 将模型交互、工具调用和结果与当时的 Agent 上下文、文件状态关联保存。选择一个已保存节点，可以恢复环境并沿历史执行后续操作，也可以让模型从恢复的会话开始新的分支。
 
 - **Record · 轨迹录制（已实现 MVP）**：记录 Agent 的模型交互、工具调用与结果，关联当时的上下文、任务文件和运行配置，为历史查看、环境恢复与后续回放提供依据。
 - **Replay · 历史重执行（已实现 MVP）**：从已提交的来源节点恢复环境，按固定历史真实执行后续工具，不调用模型、不需要模型凭据；保存真实结果与快照，确定的退出码不符或框架故障会停止执行。完整一致性校验另列为后续 Verify 工作。
-- **Resume · 分叉续跑（分阶段实现）**：可恢复已保存节点、校验上下文与可写环境、准备所需服务，再取得一次新决策并将其整组工具录制为独立分支节点。
+- **Resume · 分叉续跑（Python MVP）** 从历史节点恢复环境和完整会话，让模型继续决策，在同一容器执行工具，并将每个完整步骤保存为独立分支上的新节点。
 
 ## 演示视频
 
@@ -18,7 +18,7 @@ https://github.com/user-attachments/assets/c46a93c8-3cd9-43a4-b142-0c557c4bb7b7
 
 ## Quickstart
 
-以下命令在项目根目录执行。安装和配置完成后，通过脚本启动 Record；生成的轨迹与快照可用于 Replay，并为后续 Resume 提供输入。
+以下命令在项目根目录执行。安装和配置完成后，通过脚本启动 Record，生成的轨迹与快照可用于 Replay 和 Resume。
 
 ### 1. 安装依赖
 
@@ -83,49 +83,42 @@ PALIN_SERVICES="/path/to/services.json"
 
 示例从 C0 执行到录制末尾，可用 `--from`、`--to` 选择区间。结果默认保存到 `outputs/replay/YYMMDD_HHMMSS_任务名/`；退出码与历史不一致时停止并保留结果。完整参数和恢复范围见[命令参考](docs/命令参考.md#replay)。
 
-### 5. Resume：恢复起点并录制一轮分支
+### 5. 用 Python 从历史节点分叉续跑（Resume）
 
-Python 入口可恢复原始对话前缀和可写环境，通过 R1 文件校验并准备可选服务，然后在同一容器执行一份新决策、保存分支节点：
+使用前面选定的来源录制 `$PALIN_RUN`，有服务清单时将 `$PALIN_SERVICES` 设为它的路径，否则留空。以下示例从 C0 出发，给模型最多两轮新决策。要从 C20 开始，选择包含该节点的录制，并将 `"C0"` 改为 `"C20"`。
 
-```python
+```bash
+.venv/bin/python - "$PALIN_RUN" "${PALIN_SERVICES:-}" <<'PY'
+import sys
+
+from palinreplay.llm import LLMConfig
 from palinreplay.resume import (
-    select_resume_start, restore_resume_start, decide_resume_start, record_resume_step,
+    decide_resume_start, restore_resume_start, run_resume_steps, select_resume_start,
 )
 
-start = select_resume_start("outputs/record/来源录制", "C20", model="openai/M", max_steps=1)
-with restore_resume_start(start, services_config="outputs/preprocess/来源清单/services.json") as session:
-    decision = decide_resume_start(session, llm_config="config/llm/llm.toml")
-    node = record_resume_step(session, decision)
-    if node is not None:
-        print(node.run_id, node.node_id, node.index)  # 独立分支 C21
+source, services = sys.argv[1:]
+llm_config = "config/llm/llm.toml"
+model = LLMConfig.load(llm_config).model
+start = select_resume_start(source, "C0", model=model, max_steps=2)
+with restore_resume_start(start, services_config=services or None) as session:
+    print("Output", session.output, flush=True)
+    first = decide_resume_start(session, llm_config=llm_config)
+    nodes = run_resume_steps(session, first, llm_config=llm_config)
+
+if nodes:
+    last = nodes[-1]
+    print("Run", last.run_id, "node", f"C{last.index}", last.node_id)
+print("Stop reason", session.report["recording"]["stop_reason"])
+PY
 ```
 
-`session` 提供 `start`、`materials`、`restored`、`executor`、`prefix`、`context`、
-`input_position`、`output`、`report` 和 `report_path`。原始运行配置通过
-`session.materials.config` 访问；本次模型与新增预算留在 `start`，历史计数保持原值。
-默认输出为当前目录的 `outputs/resume/YYMMDD_HHMMSS_C20-restore/`，也可传入来源录制目录之外的
-新 `output` 目录。`report.json` 分别记录恢复、服务准备、调用方错误及清理结果；`restore-report.json`
-保留底层资源与 R1 证据，提供清单时的 `preparation.json` 保存选中服务的实际命令、返回和耗时。
-退出上下文时清理执行器和恢复资源，自行创建的 Docker 客户端也会关闭；
-传入的 `client` 仍由调用方管理。
+`decide_resume_start()` 可通过 `instruction=` 在来源会话末尾追加一条用户指令。首轮决策计入 `max_steps`。之后模型每轮都收到完整的分支会话，包括此前已接纳的工具返回。整组工具执行完毕、结果被接纳后，程序提交该步的节点和文件快照。只执行一份已取得的回答时，也可以使用[单步入口](docs/resume-stage5-acceptance.md) `record_resume_step()`。
 
-`services_config` 可省略，此时跳过准备；有效清单未选中服务时，记录零项准备完成。
-清单来源、摘要、证据及起点范围在创建任务容器前校验。R1 通过后，v2 清单中的选中服务按顺序
-各执行一次启动命令，不添加 readiness 或业务请求；旧配置显式提供的 readiness 继续兼容。
-准备失败不交付会话，保留已完成的恢复和准备证据并清理资源。调用方之后抛错不会改写先前结论。
+文件恢复范围为 `rootfs-files-v1`。提供清单时，通过 R1 检查后会在同一容器准备起点所需的服务。v2 清单中的启动命令各执行一次，旧配置显式指定的就绪检查也会执行。省略清单可跳过服务准备。
 
-`decide_resume_start()` 取得一次回答，可通过 `instruction=` 在来源前缀之后追加引导。
-`record_resume_step()` 消费这份已保存的回答。即使决策预算已用完，本轮工具也会继续执行，新增模型请求数为零。
-两者须使用同一个打开的会话，修改决策、重复消费或关闭后调用会在执行前被拒绝。
-工具逐条保存实际输出和退出码，全部接纳后才在 `session.output / "record"` 提交一个新节点。
-mini 收到任务提交标记时，会接纳提交工具的 `exit` 消息。单工具提交会保存节点。多工具组因此提前结束时，
-函数返回 `None`，录制和会话报告记为 `incomplete`，已执行工具的真实返回保存在 Store 中。
-普通非零退出照实接纳；中断和录制故障保留已发生的调用，并在 `report.json.recording` 中报告实际完整节点数。
-来源前缀仍由 `session.context` 保留，分支更新后的消息与输入位置保存在新节点中。
-当前入口完成一轮；自动请求下一轮决策的循环留待后续。验收与重跑方式见[第五步验收记录](docs/resume-stage5-acceptance.md)。
+默认会话目录位于 `outputs/resume/`，也可通过 `output=` 指定来源录制目录外的新目录。`report.json` 给出来源、完整轮数、最后节点、停止原因和清理结果。`record/` 保存分支调用和各步更新后的会话，`session.context` 仍可查看继承的前缀。`restore-report.json` 保留 R1 恢复证据，提供清单时的 `preparation.json` 记录准备动作。模型提交、预算用尽、中断或故障时，已提交节点和已发生的调用都会保留。退出会话后释放临时容器和可写工作区，调用方提供的 Docker 客户端由调用方管理。
 
-R1 范围是 `rootfs-files-v1`，完整排除项、属性和限制保存在报告中；它不恢复进程内存，后台服务由清单重新启动。
-明确包含 `exit` 消息的终止前缀会被拒绝，父 Run 已结束不妨碍恢复中间节点。
+真实模型从 C20 分叉，在第 10 轮主动提交并保存了 C30。如何读报告、查快照和区分停止原因，见[第 6 步最终验收](docs/validation/resume-stage6-20261106.md)。
 
 ## Getting Started
 
@@ -242,7 +235,7 @@ PALIN_REPLAY="outputs/replay/${PALIN_STAMP}_astropy__astropy-12907"
 
 ### 8. preprocess：生成服务清单
 
-分析已完成的 Record，提取后台服务的启动命令和启停区间，生成清单，供 Replay 及后续 Resume 恢复环境时使用。
+分析已完成的 Record，提取后台服务的启动命令和启停区间，生成清单，供 Replay 和 Resume 在恢复起点时选择服务。
 
 复制专用[模型配置模板](config/llm/preprocess_llm.toml.example)：
 
@@ -257,7 +250,7 @@ cp -n config/llm/preprocess_llm.toml.example config/llm/preprocess_llm.toml
   --output "$PALIN_PREPROCESS"
 ```
 
-此过程会调用模型，生成 `$PALIN_PREPROCESS/services.json` 和分析报告，不启动任务服务。同一份清单可供不同 Replay 起点复用。
+此过程会调用模型，生成 `$PALIN_PREPROCESS/services.json` 和分析报告。同一份清单可供 Replay 和 Resume 在不同起点选择服务。
 
 ### 9. replay：恢复并重执行历史
 
@@ -297,7 +290,8 @@ outputs/             按类型和时间戳分类的本地产物（Git 忽略）
 
 - [x] Replay MVP：从已提交的来源节点恢复，通过 R1 与显式服务准备后沿固定历史真实执行工具，不调用模型；引用源起点，只保存实际完成步骤，按确定的历史退出码控制继续或停止并保留真实证据。
 - [ ] Verify：独立检查 Replay 实际结果与固定来源的一致性；当前尚无已实现的 Verify 命令。
-- [ ] Resume：恢复 Agent 上下文与可运行环境，从历史节点产生独立分支，保留原轨迹。
+- [x] Resume（Python MVP）支持恢复已保存的节点、多步决策、分支快照和结束报告。
+- [ ] Resume 命令行入口。
 - [ ] Rewrite：为指定历史区间生成并实际执行替代流程，校验出口与上下文衔接，保存独立派生轨迹并保留原 Record。
 - [ ] 增量整理：合并、拆分存储增量并保留历史节点。
 - [ ] 便携备份与跨机器迁移。

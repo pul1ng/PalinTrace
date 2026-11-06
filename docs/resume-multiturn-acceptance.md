@@ -2,6 +2,8 @@
 
 Multi-turn Resume keeps one restored container, workspace, branch Store, Recorder and complete conversation for all new decision rounds. The first `ResumeDecision` is imported once; later requests are recorded in their own Step. Each complete group publishes one independently restorable node. The budget counts new decisions, including the first, independently of the source index or endpoint.
 
+The live Astropy run submitted at branch C30 after 10 rounds. The [stage 6 acceptance summary (Chinese)](validation/resume-stage6-20261106.md) shows how to read its report and locate the snapshot. Archived `outputs/resume/` paths below are relative to the root of `archives/261106_082856_stage-5-5/worktree-evidence.tar.gz` in the local project collection.
+
 ```python
 from palinreplay.resume import (
     select_resume_start, restore_resume_start, decide_resume_start, run_resume_steps,
@@ -21,33 +23,31 @@ New node contexts store the budget at that node in `resume.remaining_steps` and 
 
 ## Sequential task commits
 
-The worktree began clean on `stage-5-5` at `284582b`. Each row was verified and committed before the next task began. Test selections overlap and must not be added.
+The worktree began clean on `stage-5-5` at `13b881e`. Each row was verified and committed before the next task began. Test selections overlap and must not be added.
 
 | Task | Commit | Verification |
 | --- | --- | --- |
-| 1. Reusable execution and commit of one tool group | `a6c035b` | 35 passed; helper leaves recording open; existing single consumption and failure paths preserved |
-| 2. One recording across branch steps | `0babbe1` | 25 passed; C21/C22 local chain and one paused RunEnd; an initial test-field typo was corrected |
-| 3. Shared growing branch conversation | `9f88fcb` | 25 passed; source prefix, optional instruction once, ordered tool IDs and input positions |
-| 4. Full-history model requests | `60ce2bb` | 51 passed; actual model-call arguments match 43/45/47/49 messages with instruction and 42/44/46/48 without; expected native null field corrected |
-| 5. Later model decisions recorded in their own Step | `7b9e9f4` | 57 passed; two actual requests; request and raw response survive dispatch/parse failure |
-| 6. Public bounded multi-step runner | `6c53c48` | 23 passed; budgets 1/2, real local shell file continuity, duplicate rejection |
-| 7. Native nonzero and task-submission semantics | `becc5e9` | 54 passed; ordinary exit 7 continues; single-tool submission complete; multi-tool submission incomplete; no later model request |
-| 8. Failure/interruption and publication reconciliation | `dbdc7ab` | 157 passed; second-round faults and post-publication RunEnd recovery across Resume/Recorder/Replay |
-| 9. Cumulative branch report | `d9c3785` | Resume 302 passed; final progress/report-stage assertions 9 passed; variable tool counts and unknown costs retained |
-| 10. Real C20 four-round execution | `074e2f4` | Passed in 45.56 s; 4 model requests, 4 real tools, 4 Btrfs captures, C21–C24, one budget-paused RunEnd |
-| 11. Independent branch-node recovery | `8ea2792` | C21/C24 both passed in new containers after execution-container deletion; exact files, messages and input positions; 46.63 s |
-| 12. Cross-source multi-turn regression | `e89d06e` | All 3 sources passed; 2 requests/tools/nodes per source; all 6 new nodes independently restored |
-| 13. Long-run and final acceptance | This acceptance commit | Controlled 100 passed; starts 3/3 and real fault boundaries 4/4 passed; 17 node recoveries; Resume 302 passed, full 1809 passed / 3 skipped; live-model service faults recorded separately |
+| 1. Reusable execution and commit of one tool group | `43a1ec7` | 35 passed; helper leaves recording open; existing single consumption and failure paths preserved |
+| 2. One recording across branch steps | `4585946` | 25 passed; C21/C22 local chain and one paused RunEnd; an initial test-field typo was corrected |
+| 3. Shared growing branch conversation | `3969593` | 25 passed; source prefix, optional instruction once, ordered tool IDs and input positions |
+| 4. Full-history model requests | `ebcfc5f` | 51 passed; actual model-call arguments match 43/45/47/49 messages with instruction and 42/44/46/48 without; expected native null field corrected |
+| 5. Later model decisions recorded in their own Step | `b268fda` | 57 passed; two actual requests; request and raw response survive dispatch/parse failure |
+| 6. Public bounded multi-step runner | `260ebe9` | 23 passed; budgets 1/2, real local shell file continuity, duplicate rejection |
+| 7. Native nonzero and task-submission semantics | `f08916a` | 54 passed; ordinary exit 7 continues; single-tool submission complete; multi-tool submission incomplete; no later model request |
+| 8. Failure/interruption and publication reconciliation | `3c037cd` | 157 passed; second-round faults and post-publication RunEnd recovery across Resume/Recorder/Replay |
+| 9. Cumulative branch report | `ed8f356` | Resume 302 passed; final progress/report-stage assertions 9 passed; variable tool counts and unknown costs retained |
+| 10. Real C20 four-round execution | `ed255ba` | Passed in 45.56 s; 4 model requests, 4 real tools, 4 Btrfs captures, C21–C24, one budget-paused RunEnd |
+| 11. Independent branch-node recovery | `e9d1523` | C21/C24 both passed in new containers after execution-container deletion; exact files, messages and input positions; 46.63 s |
+| 12. Cross-source multi-turn regression | `4887924` | All 3 sources passed; 2 requests/tools/nodes per source; all 6 new nodes independently restored |
+| 13. Initial long-run acceptance | `ab14567` | The controlled 100-round run, three same-source starts, four fault cases and 17 node recoveries passed. The Resume suite passed 302 tests and the full suite passed 1809 with 3 skipped. The early live-model attempts recorded provider faults. |
 
-Ruff and `git diff --check` passed for each completed task. The implementation checks observed existing LiteLLM/Pydantic warnings; final regression totals will be recorded separately.
+Ruff and `git diff --check` passed for each completed task. The initial checks recorded LiteLLM/Pydantic warnings.
 
 ## Task 10: real four-round C20 execution
 
 The opt-in runner is `examples/resume_multiturn_validation.py`. Its controlled model provides one tool per round; Docker execution, service startup, Btrfs capture, node publication and source audits use the real implementation. The first tool generates a UUID inside the execution container and returns it. Later tools append to and read the same marker file.
 
-The current run writes independent evidence to:
-
-`outputs/resume/261106_004858_multiturn/main4/`
+The four-round run saved its evidence under `outputs/resume/261106_004858_multiturn/main4/`.
 
 The run passed. C20 was restored once; A and B each started once and returned their expected HTTP response, with no C startup. All four tools ran in container `826f46d29c6ed2b257bf609b3c9b20e02753c2f0228c0326bf0e315226f48a10`. The first tool generated `5dde914f-13d4-407b-a90b-d51df04e95a0` inside that container. Its actual return remains in the fourth request.
 
@@ -81,7 +81,7 @@ The recovery command opens the persisted branch Store after independently confir
 TERM=xterm-256color LITELLM_LOCAL_MODEL_COST_MAP=True .venv/bin/python -B \
   -m examples.resume_multiturn_validation \
   --output outputs/resume/NEW-multiturn/main4-recovery \
-  --recover-from outputs/resume/261106_004858_multiturn/main4
+  --recover-from outputs/resume/NEW-multiturn/main4
 ```
 
 Both recoveries passed. C21 used container `b2908a7600b5784478c049855185f75599ed2939014808f2091e6be5875cb408` and contained only the first UUID marker, with 45 messages and `next_message=45`. C24 used container `d79be49d3cfab8fcdc98549c1a76319053a5a2be4a2e347a2dff9582b2abbdf9` and contained all four ordered markers, with 51 messages and `next_message=51`.
@@ -130,7 +130,7 @@ A second fresh attempt in `real100-verified/` used the previously accepted `open
 
 The model catalogue was read once and saved in `model-catalog.json`. A third independent attempt in `real100-catalog/` used its advertised `openai/deepseek-v4.1-flash` name and stopped on the first request with an upstream `Invalid 'Authorization' header or token` error, in 31.00 seconds. It also produced zero successful decisions, tools and new nodes, retained C20 as the last complete node, and confirmed cleanup and source integrity.
 
-Thus the live-model result is **a model-service fault at the first request, with zero complete new rounds and no branch node**. Each of the three isolated attempts sent exactly one model request and one HTTP request; none retried automatically. No submission content or natural stopping round was obtained. A functioning provider and valid upstream authorization are required to obtain a natural model result. These are classified failure results permitted by the acceptance checklist, and are not reported as a successful live-model continuation.
+These three early attempts each sent one HTTP request and ended with a provider fault. The last complete position in each report was source C20. Their evidence is retained under `outputs/resume/261106_004858_multiturn/`.
 
 All three same-source starts passed in `starts/starts.json` (141.51 seconds), using source Run `a9261e45064b44029fa21e2cd2c3635e`, the same manifest, controlled model and instruction:
 
@@ -153,7 +153,7 @@ All four real fault scenarios passed in `faults/faults.json` (199.38 seconds). T
 
 Each case made zero third-round requests. Actual Store nodes, report totals and the RunEnd's last node agreed. The interruption preserves an unknown second tool attempt without claiming a second physical command. All five saved nodes recovered the appropriate file prefix, context and input position after execution-container removal. Source file/node/manifest audits and temporary-resource cleanup passed.
 
-Final checks are saved in `checks/verification.json` with command, exit code, duration, log/JUnit paths and SHA-256 hashes:
+The initial checks are saved in `checks/verification.json` with their commands, exit codes, durations and log hashes.
 
 | Check | Actual result |
 | --- | --- |
@@ -164,16 +164,24 @@ Final checks are saved in `checks/verification.json` with command, exit code, du
 
 The three skips are the existing ordinary-Record parameter cases in `tests/record/test_replay_verification_scope.py` that require an external source. They do not skip any real source used in this acceptance. Resume and full pytest took 41.05 and 138.13 seconds respectively; their counts overlap and must not be summed.
 
-The full machine-readable conclusion is `outputs/resume/261106_004858_multiturn/final-acceptance.json`. It links the evidence JSON files and their SHA-256 hashes, the regression logs and JUnit, and all live-model failure results. Its status is `completed_with_live_model_faults`.
+The machine-readable summary for this initial batch is `outputs/resume/261106_004858_multiturn/final-acceptance.json`. Its historical status, `completed_with_live_model_faults`, describes the runs in that directory.
+
+## Live model submitted at C30
+
+The later experiment is in `outputs/resume/261106_081238_C20_live100/real100/`. A separate preflight confirmed that the configured DeepSeek model could return a bash tool call. Resume then restored source C20, prepared A and B, and gave the model a budget of 100 new decisions. The model made 10 requests, executed 12 tools and committed 10 nodes (C21–C30) in branch Run `f43f5f405f934f069dfb9edaa18a5424`.
+
+In round 10 the model issued `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt`, which exited with code 0. The Store's `RunEnd` records `completed` at C30. The session report records `submitted`, 90 decisions remaining, confirmed cleanup and an unknown total cost (`cost: null`). The session report and branch Store are in `session/report.json` and `session/record/` inside this experiment.
+
+The regression suite after the four review fixes passed 1816 tests with 3 skipped. Its log is `outputs/resume/261106_074235_stage55_review_fixes/pytest.log`. The controlled 100-round repeat in the same directory independently restored C120 and checked the budget saved at every node, from 99 remaining at C21 to 0 at C120.
 
 ## Final conclusions
 
-- **Complete conversation: passed.** Actual model-call requests matched the full source prefix, the instruction appended once, and all prior accepted branch exchanges. Four-round requests were 43/45/47/49 messages; the controlled long run retained the full history through request 100. Live first-request HTTP bodies were also compared with their public request.
+- **Complete conversation.** The four-round requests contained 43, 45, 47 and 49 messages. The controlled long run retained the full history through request 100. All 10 HTTP requests in the later live run matched the recorded conversations, including the source prefix, the instruction appended once, and all prior accepted branch exchanges.
 - **Continuous files and environment: passed.** Four-round and 100-round controlled cases each restored once, prepared A/B once and used one execution container/workspace throughout. Later tools observed earlier writes.
-- **Independent restoration: passed.** Seventeen saved branch nodes were actually restored in new containers after their execution containers were removed, including C21/C24, C120, all six cross-source nodes, three same-source endpoints and five fault-case nodes. Files, exact contexts and input positions matched.
-- **Real-model stopping result: fault.** The live attempts completed zero new rounds and stopped at C20 on their first model requests because of gateway/provider/authorization failures. Natural submission or budget exhaustion with the real model remains unverified and requires a functioning provider with valid upstream authorization.
+- **Independent restoration.** The initial batch restored 17 saved branch nodes in new containers after their execution containers were removed, including C21/C24, C120, all six cross-source nodes, three same-source endpoints and five fault-case nodes. Files, contexts and input positions matched.
+- **Real-model stopping result.** The model submitted its patch after 10 complete rounds at branch C30 with 90 decisions remaining.
 - **100-round budget: passed with the controlled model.** Exactly 100 requests, tools and nodes C21–C120; no request 101; one budget-paused RunEnd; C120 independently recovered all 100 markers.
 - **Multiple starting points: 3/3 passed.** C1/C12/C31 selected the correct prefixes and services and created isolated branches.
 - **Cross-source regression: 3/3 passed.** Astropy 14182, Django 10914 and long Astropy 12907 each produced and restored two consecutive nodes.
 
-The 13 meta tasks have implementation or acceptance commits. The remaining external condition is live-model provider availability and authorization; this acceptance does not claim a successful natural live-model continuation. No additional product feature was introduced.
+The Python multi-turn runner and its review fixes were merged into `main` at `baff5ee`.
