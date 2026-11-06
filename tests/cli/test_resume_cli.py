@@ -273,6 +273,7 @@ def restored_cli(monkeypatch):
 
     decision = Mock(return_value=SimpleNamespace(messages=[]))
     monkeypatch.setattr(resume, "decide_resume_start", decision)
+    monkeypatch.setattr(resume, "run_resume_steps", Mock(return_value=[]))
     return decision
 
 
@@ -462,6 +463,8 @@ def test_cli_first_decision_uses_the_full_prefix_once_without_executing_tools(
     monkeypatch.setattr(cli, "_select_start", select)
     monkeypatch.setattr(cli, "_output_path", lambda *args: session.output)
     monkeypatch.setattr(resume, "restore_resume_start", restore)
+    runner = Mock(return_value=[])
+    monkeypatch.setattr(resume, "run_resume_steps", runner)
     transport = Mock(side_effect=complete)
     monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
     options = [] if instruction is None else ["--instruction", instruction]
@@ -476,3 +479,189 @@ def test_cli_first_decision_uses_the_full_prefix_once_without_executing_tools(
     assert session.context == inherited
     assert not session.executor.mock_calls
     assert "test-resume-secret" not in session.report_path.read_text()
+
+
+@pytest.fixture
+def cli_case(tmp_path, monkeypatch, decision_session, private_config):
+    import palinreplay.resume.session as sessions
+    from palinreplay.agents.mini import MINI_COMMIT, MINI_VERSION
+    from palinreplay.core.interfaces import Payload
+    from palinreplay.core.models import Attempt, State
+    from palinreplay.sandbox.base import ExecResult
+    from tests.helpers.recorder_smoke import FakeStateBackend
+    from tests.record.test_restore_materials import _record_run
+    from tests.resume.test_run_steps import model_response
+    from tests.storage.test_store import begin_step, call, candidate
+
+    context = deepcopy(decision_session.context)
+    execution = {"cwd": "/testbed", "env": {}, "interpreter": ["bash", "-c"],
+                 "timeout": 17, "forward_env": []}
+    context["config"]["environment"] = execution
+    context["config"].setdefault("agent", {})
+    context["config"]["model"]["observation_template"] = "{{output.returncode}}:{{output.output}}"
+    context["counters"]["consecutive_format_errors"] = 0
+    for key in ("extra_template_vars", "template_vars", "clock", "global_stats", "model_accounting"):
+        context.setdefault(key, {})
+    context["template_vars"]["model_name"] = "parent-A"
+    source = tmp_path / "source-c20" / "record"
+    monkeypatch.setattr("palinreplay.storage.btrfs.verification.verify_state", lambda *args: None)
+    with RecordStore.create(source) as store:
+        run, _, node, *_ = _record_run(store, "parent", payloads={
+            "config": Payload.json(context["config"]), "context": Payload.json(context),
+            "input_position": Payload.json({"next_message": 42, "adoptions": []}),
+        }, agent_name="mini-swe-agent", agent_version=f"{MINI_VERSION}+{MINI_COMMIT}")
+        attempt = store.get(Attempt, node.attempt_id)
+        state = store.get(State, node.state_id)
+        for _ in range(2, 21):
+            step = begin_step(store, run, attempt, node)
+            model = call(store, step, kind="model")
+            node = store.commit_node(candidate(store, step, state, model).model_copy(update={
+                "context": store.put_json(context),
+                "input_position": store.put_json({"next_message": 42, "adoptions": []}),
+            }))
+    backend = FakeStateBackend()
+    executor = Mock(state="running")
+    restored = Mock(report={"cleanup_confirmed": True, "cleanup_errors": []})
+    client = Mock()
+    events, requests = [], []
+    responses = [model_response(1, ["first branch command"]), model_response(2, ["second command"])]
+    outcomes = [ExecResult("first", b"actual branch one\n", 0, .1),
+                ExecResult("second", b"actual branch two\n", 0, .1)]
+
+    def validate(*args):
+        events.append("r1")
+        return {"status": "passed"}
+
+    def prepare(command, **kwargs):
+        events.append(command)
+        return ExecResult(command, b"started", 0, .1)
+
+    def complete(request, credentials):
+        requests.append(deepcopy(request))
+        events.append(f"model-{len(requests)}")
+        assert credentials.model == "openai/branch-model"
+        return responses[len(requests) - 1]
+
+    def execute(request):
+        index = executor.execute.call_count - 1
+        events.append(f"tool-{index + 1}")
+        backend.files["/testbed/branch"] = {"hex": f"branch-{index + 1}".encode().hex(), "mode": 0o644}
+        return outcomes[index]
+
+    executor.exec.side_effect = prepare
+    executor.execute.side_effect = execute
+    executor.close.side_effect = lambda: events.append("executor-close")
+    restored.close.side_effect = lambda: events.append("restore-close")
+    client.close.side_effect = lambda: events.append("client-close")
+    monkeypatch.setattr(sessions, "connect_docker", lambda *args: client)
+    monkeypatch.setattr(sessions, "restore_environment", lambda *args, **kwargs: (restored, executor))
+    monkeypatch.setattr(sessions, "validate_workspace", validate)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", complete)
+    monkeypatch.setattr("palinreplay.resume.recording.BtrfsStateBackend", lambda *a, **kw: backend)
+    output = tmp_path / "cli-branch"
+    services = tmp_path / "branch-services.json"
+    services.write_text(json.dumps({"services": [
+        {"name": name, "start_command": "start " + name, "timeout_sec": 10} for name in ("A", "B")
+    ]}))
+    argv = ["resume", str(source.parent), "--from", "C20", "--llm-config", str(private_config),
+            "--output", str(output), "--services-config", str(services)]
+    return SimpleNamespace(source=source, node=node, prefix=context["messages"], output=output,
+                           argv=argv, executor=executor, restored=restored, client=client,
+                           backend=backend, events=events, requests=requests, responses=responses,
+                           outcomes=outcomes)
+
+
+@pytest.mark.parametrize("budget", [1, 2])
+def test_cli_runs_one_branch_with_full_cumulative_context(cli_case, budget, monkeypatch):
+    import palinreplay.resume as resume
+    from palinreplay.core.models import Node, Run, RunEnd
+    from tests.resume.test_multiturn_requests import api_messages
+
+    case = cli_case
+    decisions = []
+    original_decide = resume.decide_resume_start
+
+    def capture_decision(*args, **kwargs):
+        decision = original_decide(*args, **kwargs)
+        decisions.append(decision)
+        return decision
+
+    decide = Mock(side_effect=capture_decision)
+    run = Mock(wraps=resume.run_resume_steps)
+    monkeypatch.setattr(resume, "decide_resume_start", decide)
+    monkeypatch.setattr(resume, "run_resume_steps", run)
+    instruction = "下一步先检查 B 的日志"
+    assert main([*case.argv, "--max-steps", str(budget), "--instruction", instruction]) == 0
+    assert decide.call_count == run.call_count == 1
+    assert decide.call_args.args[0] is run.call_args.args[0]
+    assert run.call_args.args[1] is decisions[0]
+    assert decide.call_args.kwargs["llm_config"] == run.call_args.kwargs["llm_config"]
+    assert len(case.requests) == case.executor.execute.call_count == budget
+    assert case.events[:3] == ["r1", "start A", "start B"]
+    assert case.events[-3:] == ["executor-close", "restore-close", "client-close"]
+    assert len(case.backend.captures) == budget
+    assert case.requests[0]["messages"][:42] == api_messages(case.prefix)
+    assert case.requests[0]["messages"][42] == {"role": "user", "content": instruction}
+    with RecordStore.open(case.output / "record") as store:
+        nodes = store.list(Node)
+        assert [node.index for node in nodes] == list(range(21, 21 + budget))
+        branch, = store.list(Run)
+        assert nodes[0].parent_node_id is None
+        source = store.read_json(branch.config)["resume"]["source"]
+        assert source["node"]["node_id"] == case.node.node_id
+        assert store.list(RunEnd)[0].status == "paused"
+        assert store.check_integrity().ok
+        for index, node in enumerate(nodes):
+            messages = store.read_json(node.context)["messages"]
+            assert messages[-1]["content"].endswith(f"actual branch {'one' if index == 0 else 'two'}\n")
+        if budget == 2:
+            assert nodes[1].parent_node_id == nodes[0].node_id
+            assert case.requests[1]["messages"] == api_messages(store.read_json(nodes[0].context)["messages"])
+    assert all(sum(message.get("content") == instruction for message in request["messages"]) == 1
+               for request in case.requests)
+    report = json.loads((case.output / "report.json").read_text())
+    assert report["recording"]["complete_nodes"] == report["recording"]["total_model_requests"] == budget
+    assert report["recording"]["stop_reason"] == "budget_exhausted"
+    assert report["cleanup_confirmed"]
+
+
+def test_cli_budget_100_stops_when_the_second_round_submits(cli_case):
+    from palinreplay.core.models import Node, RunEnd
+    from palinreplay.sandbox.base import ExecResult
+
+    cli_case.outcomes[1] = ExecResult("submit", b"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndone\n", 0, .1)
+    assert main([*cli_case.argv, "--max-steps", "100"]) == 0
+    assert len(cli_case.requests) == cli_case.executor.execute.call_count == 2
+    with RecordStore.open(cli_case.output / "record") as store:
+        assert [node.index for node in store.list(Node)] == [21, 22]
+        assert store.list(RunEnd)[0].status == "completed"
+    report = json.loads((cli_case.output / "report.json").read_text())
+    assert report["recording"]["stop_reason"] == "submitted"
+
+
+def test_cli_gives_a_nonzero_tool_result_to_the_next_request(cli_case):
+    from palinreplay.sandbox.base import ExecResult
+
+    cli_case.outcomes[0] = ExecResult("first", b"ordinary tool failure\n", 7, .1)
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 0
+    assert cli_case.requests[1]["messages"][-1]["content"] == "7:ordinary tool failure\n"
+    report = json.loads((cli_case.output / "report.json").read_text())
+    assert report["recording"]["complete_nodes"] == 2
+
+
+def test_cli_keeps_an_incomplete_group_tail_without_publishing_a_node(cli_case):
+    from palinreplay.core.models import Node, RunEnd, ToolGroup
+    from palinreplay.sandbox.base import ExecResult
+    from tests.resume.test_run_steps import model_response
+
+    cli_case.responses[1] = model_response(2, ["submit", "never executed"])
+    cli_case.outcomes[1] = ExecResult("submit", b"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndone\n", 0, .1)
+    main([*cli_case.argv, "--max-steps", "2"])
+    assert len(cli_case.requests) == cli_case.executor.execute.call_count == 2
+    with RecordStore.open(cli_case.output / "record") as store:
+        assert [node.index for node in store.list(Node)] == [21]
+        assert store.list(RunEnd)[0].status == "incomplete"
+        assert len(store.list(ToolGroup)[-1].tool_call_ids) == 2
+        assert store.check_integrity().ok
+    report = json.loads((cli_case.output / "report.json").read_text())
+    assert report["recording"]["stop_reason"] == "incomplete_tool_group"

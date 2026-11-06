@@ -21,7 +21,8 @@ from palinreplay.storage.store import IntegrityError, RecordStore
 from tests.storage.test_store import begin_step, call, candidate
 
 
-def _record_run(store, name, *, payloads=None, oracle_sha256="e" * 64):
+def _record_run(store, name, *, payloads=None, oracle_sha256="e" * 64,
+                agent_name="fixture", agent_version="1"):
     payloads = payloads or {}
 
     def put_payload(role, default):
@@ -58,8 +59,8 @@ def _record_run(store, name, *, payloads=None, oracle_sha256="e" * 64):
     run = store.save(Run(
         run_id=name,
         task_id="fixture",
-        agent_name="fixture",
-        agent_version="1",
+        agent_name=agent_name,
+        agent_version=agent_version,
         config=put_payload("config", lambda: store.put_json(
             {"name": name, "text": "repeated " * 700}, compress=True
         )),
