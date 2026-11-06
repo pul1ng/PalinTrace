@@ -3,6 +3,7 @@
 import sys
 import time
 
+from palinreplay.cli._progress import ProgressDisplay
 from palinreplay.core.progress import ProgressEvent, ProgressReporter
 
 
@@ -40,35 +41,18 @@ def describe(event: ProgressEvent) -> str:
     }[event.phase]
 
 
-class ResumeProgressDisplay:
+class ResumeProgressDisplay(ProgressDisplay):
     """Best-effort live view on stderr; redirected output stays plain text."""
 
     def __init__(self, max_steps, mode="auto", *, stream=None, console=None):
-        self.max_steps, self.mode = max_steps, mode
-        self.stream = stream if stream is not None else sys.stderr
-        self.console = console
+        super().__init__(mode, stream=stream, console=console)
+        self.max_steps = max_steps
         self.completed = 0
         self.last_node = "尚无"
-        self.finished = False
         self._progress = None
         self._notify = ProgressReporter(self._update)
 
-    def __enter__(self):
-        self._started = time.monotonic()
-        if self.mode == "auto":
-            try:
-                terminal = self.console.is_terminal if self.console is not None else self.stream.isatty()
-                if terminal:
-                    self._start_live()
-            except Exception:
-                self._stop_live()
-            except BaseException:
-                self._stop_live()
-                raise
-        return self
-
     def _start_live(self):
-        from rich.console import Console
         from rich.progress import (
             BarColumn,
             MofNCompleteColumn,
@@ -78,8 +62,8 @@ class ResumeProgressDisplay:
             TimeElapsedColumn,
         )
 
-        console = self.console if self.console is not None else Console(file=self.stream)
-        if console.is_dumb_terminal:
+        console = self._terminal_console()
+        if console is None:
             return
         self._progress = Progress(
             SpinnerColumn("dots2"),

@@ -1,8 +1,8 @@
 """Terminal progress for Replay; only completed historical steps advance the bar."""
 
-import sys
 import time
 
+from palinreplay.cli._progress import ProgressDisplay
 from palinreplay.core.progress import ProgressEvent, ProgressReporter
 
 
@@ -28,35 +28,17 @@ def describe(event: ProgressEvent) -> str:
     }[event.phase]
 
 
-class ReplayProgressDisplay:
+class ReplayProgressDisplay(ProgressDisplay):
     """Live progress on stderr, plain stage updates when redirected."""
 
     def __init__(self, mode="auto", *, stream=None, console=None):
-        self.mode = mode
-        self.stream = stream if stream is not None else sys.stderr
-        self.console = console
+        super().__init__(mode, stream=stream, console=console)
         self.completed = 0
         self.total = None
-        self.finished = False
         self._progress = None
         self._notify = ProgressReporter(self._update)
 
-    def __enter__(self):
-        self._started = time.monotonic()
-        if self.mode == "auto":
-            try:
-                terminal = self.console.is_terminal if self.console is not None else self.stream.isatty()
-                if terminal:
-                    self._start_live()
-            except Exception:
-                self._stop_live()
-            except BaseException:
-                self._stop_live()
-                raise
-        return self
-
     def _start_live(self):
-        from rich.console import Console
         from rich.progress import (
             BarColumn,
             MofNCompleteColumn,
@@ -66,8 +48,8 @@ class ReplayProgressDisplay:
             TimeElapsedColumn,
         )
 
-        console = self.console if self.console is not None else Console(file=self.stream)
-        if console.is_dumb_terminal:
+        console = self._terminal_console()
+        if console is None:
             return
         self._progress = Progress(
             SpinnerColumn("dots2"),
