@@ -6,13 +6,13 @@ There is no implicit retry, acceptance, step completion or Node publication.
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any, Generic, TypeVar
 
 from palinreplay.core.interfaces import CallAdapter, Payload, RequestT, ResultCapture, ResultT
@@ -27,6 +27,7 @@ from palinreplay.core.models import (
 )
 from palinreplay.diagnostics.metrics import timed
 from palinreplay.diagnostics.timing import span
+from palinreplay.storage.payloads import ROOT_MEDIA, logical_identity
 from palinreplay.storage.store import ConflictError, IncompleteRecordError, RecordStore, StoreError
 
 ValueT = TypeVar("ValueT")
@@ -154,7 +155,7 @@ class RecordingPorts:
 
     def _put(self, payload: Payload) -> ArtifactRef:
         payload = _payload(payload)
-        return self.store.put_bytes(payload.data, media_type=payload.media_type)
+        return self.store.put_payload(payload)
 
     def _failure_record(
         self, category: str, phase: str, details: dict, execution_id: str | None
@@ -166,7 +167,7 @@ class RecordingPorts:
                 step_id=self.step.step_id,
                 execution_id=execution_id,
                 category=category,
-                details=self.store.put_json({"phase": phase, **details}),
+                details=self.store.put_payload_json({"phase": phase, **details}),
             )
         )
 
@@ -425,11 +426,9 @@ class RecordedCall(Generic[RequestT, ResultT]):
 
     def _unchanged(self, payload: Payload, ref: ArtifactRef) -> None:
         payload = _payload(payload)
-        if (
-            len(payload.data) != ref.size
-            or hashlib.sha256(payload.data).hexdigest() != ref.sha256
-            or payload.media_type != ref.media_type
-        ):
+        identity = ((ref.sha256, ref.size, ref.media_type) if ref.media_type != ROOT_MEDIA
+                    else logical_identity(self._ports.store.read_bytes(ref), ref.media_type))
+        if (sha256(payload.data).hexdigest(), len(payload.data), payload.media_type) != identity:
             raise ValueError("request/context changed after preparation; backend was not invoked")
 
     @timed("call.save_result")
@@ -452,7 +451,7 @@ class RecordedCall(Generic[RequestT, ResultT]):
             "exception": _error_details(backend_error) if backend_error is not None else None,
         }
         raw_ref = self._ports._put(capture.raw)
-        details_ref = self._ports.store.put_json(details)
+        details_ref = self._ports.store.put_payload_json(details)
         self._ports.store.append_event(
             self.execution_id,
             "result",
@@ -493,7 +492,7 @@ class RecordedCall(Generic[RequestT, ResultT]):
                 ports.store.append_event(
                     self.execution_id,
                     "dispatched",
-                    details=ports.store.put_json(
+                    details=ports.store.put_payload_json(
                         {
                             "boundary": "before_backend_entry",
                             "visibility": self.execution.visibility,

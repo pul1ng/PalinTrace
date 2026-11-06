@@ -35,9 +35,19 @@ def branch_config(session):
         "node_numbering": "source-index-v1",
         "model": session.start.model, "max_steps": session.start.max_steps,
         "source": source, "source_sha256": sha256(json_bytes(source)).hexdigest(),
-        "raw_materials": {role: base64.b64encode(getattr(materials, f"{role}_payload").data)
-                          .decode("ascii") for role in ("config", "context", "input_position")},
+        "raw_materials": {
+            role: base64.b64encode(getattr(materials, "physical_payloads", {}).get(
+                role, getattr(materials, f"{role}_payload").data)).decode("ascii")
+            for role in ("config", "context", "input_position")
+        },
     }
+    logical = {
+        role: {"data": base64.b64encode(getattr(materials, f"{role}_payload").data).decode("ascii"),
+               "media_type": getattr(materials, f"{role}_payload").media_type}
+        for role in getattr(materials, "physical_payloads", {})
+    }
+    if logical:
+        config["resume"]["logical_materials"] = logical
     return config
 
 

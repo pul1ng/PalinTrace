@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from uuid import uuid4
@@ -73,6 +73,7 @@ class RestoreMaterials(_SavedContext):
     config_payload: Payload
     context_payload: Payload
     input_position_payload: Payload
+    physical_payloads: dict[str, bytes] = field(default_factory=dict)
 
 
 def load_restore_materials(
@@ -94,7 +95,7 @@ def load_restore_materials(
 
         def read_payload(role, ref):
             try:
-                return Payload(store.read_bytes(ref), ref.media_type)
+                return store.read_payload(ref)
             except IntegrityError as error:
                 raise IntegrityError(f"invalid {role} material: {error}") from error
 
@@ -118,7 +119,13 @@ def load_restore_materials(
                 except IntegrityError as error:
                     raise IntegrityError(f"invalid state artifact {ref.sha256}: {error}") from error
 
-        return RestoreMaterials(run, node, state, snapshot, runtime, config, context, input_position)
+        return RestoreMaterials(
+            run, node, state, snapshot, runtime, config, context, input_position,
+            {role: store.read_bytes(ref) for role, ref, payload in (
+                ("config", run.config, config), ("context", node.context, context),
+                ("input_position", node.input_position, input_position),
+            ) if ref.media_type != payload.media_type},
+        )
 
 
 class RestoredNode(_SavedContext):

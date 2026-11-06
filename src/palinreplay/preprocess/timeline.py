@@ -116,7 +116,7 @@ def _result(store: RecordStore, trace: CallTrace) -> tuple[TimelineResult, Timel
     exit_code = decoded.get("returncode") if isinstance(decoded, dict) else None
     if isinstance(exit_code, bool) or not isinstance(exit_code, int):
         exit_code = None
-    output = store.read_bytes(event.payload)
+    output = store.read_payload(event.payload).data
     try:
         output_text = output.decode("utf-8")
     except UnicodeDecodeError:

@@ -34,9 +34,10 @@ def payload(store, ref):
     if ref is None:
         return None
     value = {"ref": ref.model_dump(mode="json")}
-    if ref.media_type in JSON_TYPES:
+    logical = store.read_payload(ref)
+    if logical.media_type in JSON_TYPES:
         return value | {"encoding": "json", "value": store.read_json(ref)}
-    data = store.read_bytes(ref)
+    data = logical.data
     try:
         return value | {"encoding": "utf-8", "value": data.decode("utf-8")}
     except UnicodeError:
@@ -106,7 +107,8 @@ def storage_metrics(store: RecordStore) -> dict:
         ref.sha256: ref
         for model in MODELS.values()
         for record in store.list(model)
-        for ref in artifact_refs(record)
+        for direct in artifact_refs(record)
+        for ref in store.iter_payload_artifacts(direct)
     }
     # Filesystem sizes are logical bytes, not allocated blocks or device IO.
     files = [p for p in store.root.rglob("*") if p.is_file() and not p.is_symlink()]
@@ -332,7 +334,8 @@ def export_record(source: str | Path, output: str | Path, *, bundle: bool = Fals
             ref.sha256: ref
             for facts in records.values()
             for record in facts
-            for ref in artifact_refs(record)
+            for direct in artifact_refs(record)
+            for ref in store.iter_payload_artifacts(direct)
         }
         copied = 0
         if bundle:

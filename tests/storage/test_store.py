@@ -34,7 +34,7 @@ def test_catalog_format_identifier_is_independent_of_python_module_path(tmp_path
     with sqlite3.connect(path / "catalog.sqlite") as catalog:
         assert catalog.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("palinreplay.store.v1",)
+        ).fetchone() == ("palinreplay.store.v2",)
     with RecordStore.open(path) as store:
         assert store.check_integrity().ok
 
