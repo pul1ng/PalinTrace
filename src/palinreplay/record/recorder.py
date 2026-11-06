@@ -199,6 +199,9 @@ class Recorder:
         self._phase = "stopped"
         if self._end is None:
             try:
+                # Publication may have succeeded before commit_node raised.
+                self._head = max(self.store.list(Node, run_id=self.run.run_id),
+                                 key=lambda node: node.index, default=None)
                 self._write_end(
                     "cancelled" if not isinstance(error, Exception) else "failed",
                     {"error": _error_details(error)},

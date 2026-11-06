@@ -1,4 +1,4 @@
-"""Mini message admission for one saved Resume decision, without an Agent loop."""
+"""Mini message admission and accounting for a growing Resume conversation."""
 
 import logging
 from copy import deepcopy
@@ -17,18 +17,29 @@ class ResumeRecordContext:
         self.adoptions = []
         self.logger = logging.getLogger("agent")
         self.context["config"]["model"]["model_name"] = evidence["model"]
-        accounting = evidence["accounting"]
+        self.context["resume"] = {
+            "inherited_input_position": self.inherited_position,
+            "first_decision_accounting": deepcopy(evidence["accounting"]),
+            "recording_model_requests": 0,
+        }
+        self.account_decision(evidence["accounting"], recording=False)
+
+    def account_decision(self, accounting, *, recording=True):
+        """Extend inherited counters once for each actual branch model request."""
         counters = self.context["counters"]
         counters["n_calls"] += accounting["model_requests"]
         counters["consecutive_format_errors"] = 0
         counters["cost"] = counters.get("cost", 0) + (accounting["cost"] or 0)
         self.context.setdefault("template_vars", {}).update(
-            model_name=evidence["model"], n_model_calls=counters["n_calls"], model_cost=counters["cost"],
+            model_name=self.context["config"]["model"]["model_name"],
+            n_model_calls=counters["n_calls"], model_cost=counters["cost"],
         )
-        self.context["resume"] = {
-            "inherited_input_position": self.inherited_position,
-            "decision_accounting": deepcopy(accounting), "recording_model_requests": 0,
-        }
+        resume = self.context["resume"]
+        if recording:
+            resume["recording_model_requests"] += accounting["model_requests"]
+        resume["remaining_steps"] = (
+            resume["first_decision_accounting"]["remaining_steps"] - resume["recording_model_requests"]
+        )
         model = self.context.setdefault("model_accounting", {})
         model.setdefault("calls", []).append({"known": accounting["cost_known"],
                                               "cost": accounting["cost"]})
@@ -57,11 +68,15 @@ class ResumeRecordContext:
         )
         call = step.model(adapter, deepcopy(evidence["request"]))
         call.invoke()
-        assistant = deepcopy(evidence["assistant_message"])
-        assistant.setdefault("extra", {}).update(actions=deepcopy(evidence["actions"]))
-        self.adopt([(call, [assistant])], [assistant])
-        step.declare_tools(call, tuple(action["tool_call_id"] for action in evidence["actions"]))
+        self.accept_response(step, call, evidence["assistant_message"], evidence["actions"])
         return call
+
+    def accept_response(self, step, call, assistant_message, actions):
+        """Adopt this round's answer into the same growing branch conversation."""
+        assistant = deepcopy(assistant_message)
+        assistant.setdefault("extra", {}).update(actions=deepcopy(actions))
+        self.adopt([(call, [assistant])], [assistant])
+        step.declare_tools(call, tuple(action["tool_call_id"] for action in actions))
 
     def accept_results(self, actions, calls, results, *, submission=None) -> bool:
         """Admit what mini received and report whether the whole declared group was adopted."""

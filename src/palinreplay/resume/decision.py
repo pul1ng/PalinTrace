@@ -1,4 +1,4 @@
-"""One model decision from a restored boundary, without execution or node commits."""
+"""Prepare the initial Resume decision and record later branch model calls."""
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -13,6 +13,7 @@ from palinreplay.agents.mini import (
     prepare_decision_request,
 )
 from palinreplay.core.errors import RecordUsageError
+from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
 from palinreplay.llm import LLMConfig, mini_model_name
 from palinreplay.resume.report import exception_evidence
 from palinreplay.storage.io import write_json
@@ -103,6 +104,63 @@ class PreparedResumeDecision:
     native_model: object = field(repr=False)
 
 
+def prepare_branch_decision(session, messages, *, llm_config=None):
+    """Prepare mini input from the complete conversation supplied by the branch."""
+    messages = deepcopy(messages)
+    credentials = resolve_resume_model(session, llm_config=llm_config)
+    config = deepcopy(session.prefix.config["model"])
+    config.update(model_name=credentials.model, cost_tracking="ignore_errors")
+    options = config.get("model_kwargs", {})
+    for location, values in (("model_kwargs", options),
+                             ("model_kwargs.extra_body", options.get("extra_body") or {})):
+        for key in ("model", "messages", "tools"):
+            if key in values:
+                raise ValueError(f"{location}.{key} cannot override the Resume request")
+    config["model_kwargs"] = options | {
+        "timeout": credentials.timeout, "num_retries": 0, "max_retries": 0,
+    }
+    model, request = prepare_decision_request(messages, config)
+    return PreparedResumeDecision(messages, request, credentials, model)
+
+
+def record_branch_decision(session, step, context, *, llm_config=None):
+    """Request and adopt a new decision through the current Step's model port."""
+    prepared = prepare_branch_decision(session, context.messages, llm_config=llm_config)
+    accounting = {}
+
+    def execute(request):
+        session._record_attempt["model_requests"] += 1
+        accounting.update(model_requests=1, usage=None, cost=None, cost_known=False,
+                          execution_id=call.execution_id, step_id=step.step.step_id)
+        session._record_attempt["request_accounting"].append(accounting)
+        response = complete_decision_request(request, prepared.credentials)
+        raw = response.model_dump(mode="json")
+        call.observe("response", Payload.json(raw))
+        accounting.update(model_requests=1, usage=deepcopy(raw.get("usage")),
+                          **decision_cost(prepared.native_model, response))
+        return response
+
+    adapter = CallAdapter(
+        name="resume.model", execute=execute, capture_request=Payload.json,
+        capture_context=lambda request: Payload.json(prepared.messages),
+        capture_result=lambda response: ResultCapture(
+            Payload.json(response.model_dump(mode="json")), "litellm-sdk-response-json",
+            details={"accounting": deepcopy(accounting), "actual_model_calls": 1},
+            limitations=("SDK representation, not HTTP wire bytes.",),
+        ),
+        visibility="observed-attempt",
+    )
+    call = step.model(adapter, prepared.request)
+    response = call.invoke()
+    context.account_decision(accounting)
+    raw = response.model_dump(mode="json")
+    assistant = deepcopy(raw["choices"][0]["message"])
+    actions = parse_decision_actions(prepared.native_model, response)
+    session._record_attempt["decisions"] += 1
+    context.accept_response(step, call, assistant, actions)
+    return ResumeDecision(prepared.messages, assistant, raw, actions, accounting)
+
+
 def prepare_resume_decision(session, *, instruction=None, llm_config=None):
     """Persist the exact public model input before it can be sent."""
     with _first_attempt(session, instruction, llm_config) as prepared:
@@ -144,25 +202,14 @@ def _prepare_decision(session, instruction, llm_config):
     try:
         messages = build_resume_messages(session, instruction=instruction)
         evidence["messages"] = deepcopy(messages)
-        credentials = resolve_resume_model(session, llm_config=llm_config)
-        config = deepcopy(session.prefix.config["model"])
-        config.update(model_name=credentials.model, cost_tracking="ignore_errors")
-        options = config.get("model_kwargs", {})
-        for location, values in (("model_kwargs", options),
-                                 ("model_kwargs.extra_body", options.get("extra_body") or {})):
-            for key in ("model", "messages", "tools"):
-                if key in values:
-                    raise ValueError(f"{location}.{key} cannot override the Resume request")
-        config["model_kwargs"] = options | {
-            "timeout": credentials.timeout, "num_retries": 0, "max_retries": 0,
-        }
-        model, request = prepare_decision_request(messages, config)
+        prepared = prepare_branch_decision(session, messages, llm_config=llm_config)
         category = "evidence"
-        evidence.update(status="prepared", model=credentials.model, request=deepcopy(request))
+        evidence.update(status="prepared", model=prepared.credentials.model,
+                        request=deepcopy(prepared.request))
         write_json(session.report_path, session.report, replace=True)
     except BaseException as error:
         raise _failed_decision(session, category, error) from None
-    return PreparedResumeDecision(messages, request, credentials, model)
+    return prepared
 
 
 def resolve_resume_model(session, *, llm_config=None):

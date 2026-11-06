@@ -296,6 +296,10 @@ def test_invalid_group_delivers_no_partial_actions(session, llm_config, response
         decide_resume_start(session, llm_config=llm_config)
     assert raised.value.category == "tool_format"
     evidence = json.loads(session.report_path.read_text())["decision"]
+    if fault == "no_tools":
+        assert "No tool calls found" in evidence["error"]["error"]
+    elif fault == "json":
+        assert "Error parsing tool call arguments" in evidence["error"]["error"]
     assert evidence["raw_response"] == response.model_dump(mode="json")
     assert evidence["usage"] == response.model_dump(mode="json")["usage"]
     assert not evidence.get("actions")

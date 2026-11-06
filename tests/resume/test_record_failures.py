@@ -91,6 +91,7 @@ def test_unreadable_publication_facts_are_unknown_not_zero(recordable, monkeypat
     attempt = recordable.session.report["recording"]
     assert attempt["status"] == "failed" and attempt["complete_nodes"] is None
     assert attempt["progress_error"]["error_type"] == "OSError"
+    assert attempt["stop_reason"] == "failed" and attempt["failure_stage"] == "progress"
     with real(recordable.session.output / "record") as store:
         assert len(store.list(Node)) == 1
 
@@ -109,4 +110,5 @@ def test_report_failure_after_commit_preserves_node_and_marks_failure(recordable
     attempt = recordable.session.report["recording"]
     assert attempt["status"] == "failed" and attempt["complete_nodes"] == 1
     assert attempt["report_error"]["error_type"] == "OSError"
+    assert attempt["stop_reason"] == "failed" and attempt["failure_stage"] == "report"
     assert recordable.session.report["decision"]["status"] == "succeeded"

@@ -17,6 +17,9 @@ from palinreplay.resume import (
 )
 from palinreplay.resume.context import ResumePrefix
 from palinreplay.resume.materials import load_resume_materials
+from palinreplay.resume.record import _claim_decision, _execute_and_save_group
+from palinreplay.resume.record_context import ResumeRecordContext
+from palinreplay.resume.recording import open_recording
 from palinreplay.resume.report import finish_report
 from palinreplay.sandbox.base import ExecResult
 from palinreplay.storage.store import RecordStore
@@ -49,7 +52,9 @@ def recordable(tmp_path, session, llm_config, response, execution_config, monkey
             "config": Payload.json(context["config"]), "context": Payload.json(context),
             "input_position": Payload.json({"next_message": 42, "adoptions": []}),
         })
-    start = select_resume_start(source, node.node_id, model="M", max_steps=1)
+    options = getattr(request, "param", 2)
+    options = options if isinstance(options, dict) else {"tools": options}
+    start = select_resume_start(source, node.node_id, model="M", max_steps=options.get("max_steps", 1))
     materials = load_resume_materials(start)
     output = tmp_path / "branch"
     output.mkdir()
@@ -59,18 +64,38 @@ def recordable(tmp_path, session, llm_config, response, execution_config, monkey
                             executor=executor, prefix=ResumePrefix(materials), output=output,
                             report={"phase": "caller", "restore_status": "passed",
                                     "preparation": {"status": "skipped"}})
-    for index in range(2, getattr(request, "param", 2) + 1):
+    for index in range(2, options.get("tools", 2) + 1):
         extra = response.choices[0].message.tool_calls[0].model_copy(deep=True)
         extra.id = f"branch-tool-{index}"
         extra.function.arguments = '{"command":"cat /tmp/marker"}'
         response.choices[0].message.tool_calls.append(extra)
     complete = Mock(return_value=response)
     monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", complete)
-    decision = decide_resume_start(session, llm_config=llm_config)
+    decision = decide_resume_start(session, instruction=options.get("instruction"), llm_config=llm_config)
     backend = fake.FakeStateBackend()
     monkeypatch.setattr("palinreplay.resume.recording.BtrfsStateBackend", lambda *a, **kw: backend)
     return SimpleNamespace(session=session, decision=decision, backend=backend,
                            complete=complete, parent_next=parent_next)
+
+
+def test_group_commit_leaves_recording_open_for_its_caller(recordable):
+    case = recordable
+    with _claim_decision(case.session, case.decision) as saved:
+        context = ResumeRecordContext(case.session, saved)
+        with open_recording(case.session, context.export) as (recorder, step):
+            context.accept_decision(step, saved)
+            node, details = _execute_and_save_group(
+                case.session, recorder, step, context, saved["actions"],
+            )
+            assert node.index == case.session.start.node.index + 1
+            assert details is None
+            assert recorder.phase == "ready" and recorder.end is None
+            assert recorder.store.list(Node) == (node,)
+            assert not recorder.store.list(RunEnd)
+            assert case.session.executor.execute.call_count == 2
+            assert case.complete.call_count == 1
+            recorder.finish()
+            assert len(recorder.store.list(RunEnd)) == 1
 
 
 def test_public_entry_commits_one_independent_node_and_does_not_query_again(recordable):

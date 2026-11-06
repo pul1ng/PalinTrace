@@ -1,4 +1,4 @@
-"""Record one tool group from an already obtained Resume decision."""
+"""Record saved and subsequent Resume decisions in the active workspace."""
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -8,10 +8,10 @@ from palinreplay.agents.mini import load_native
 from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
 from palinreplay.core.models import Node
-from palinreplay.resume.decision import ResumeDecision
+from palinreplay.resume.decision import ResumeDecision, record_branch_decision
 from palinreplay.resume.environment import saved_execution_config
 from palinreplay.resume.record_context import ResumeRecordContext
-from palinreplay.resume.recording import finish_recording, open_recording
+from palinreplay.resume.recording import begin_recording_step, finish_recording, open_recording
 from palinreplay.resume.report import exception_evidence
 from palinreplay.storage.io import write_json
 
@@ -38,7 +38,11 @@ def _claim_decision(session, decision):
             raise RecordUsageError("Resume decision differs from the saved fourth-step evidence")
         attempt = session._record_attempt
         attempt.update(status="consuming", source=deepcopy(source), model_requests=0,
-                       tool_executions=0, complete_nodes=0)
+                       tool_executions=0, tool_results=0, complete_nodes=0, decisions=1,
+                       max_steps=session.start.max_steps,
+                       inherited_counters=deepcopy(saved["accounting"]["inherited_counters"]),
+                       request_accounting=[{key: deepcopy(saved["accounting"][key]) for key in
+                                            ("model_requests", "usage", "cost", "cost_known")}])
         session.report["recording"] = attempt
         try:
             write_json(session.report_path, session.report, replace=True)
@@ -53,36 +57,84 @@ def _claim_decision(session, decision):
 def record_resume_step(session, decision) -> Node | None:
     """Return the committed node, or None if submission left the tool group incomplete."""
     with _claim_decision(session, decision) as evidence:
-        attempt = session._record_attempt
         try:
             context = ResumeRecordContext(session, evidence)
             with open_recording(session, context.export) as (recorder, step):
                 context.accept_decision(step, evidence)
-                actions = evidence["actions"]
-                calls, results, submission = _execute_tools(session, step, actions)
-                complete = context.accept_results(actions, calls, results, submission=submission)
-                details = None
-                if submission is not None:
-                    details = {
-                        "agent_exit_status": context.messages[-1]["extra"]["exit_status"],
-                        "record_complete": complete,
-                        "final_control_context": context.context,
-                        "final_input_position": context.input_position,
-                    }
-                if complete:
-                    node = recorder.commit_step()
-                    attempt.update(complete_nodes=1, node_id=node.node_id, state_id=node.state_id,
-                                   message_count=len(context.messages))
+                node, details = _execute_and_save_group(
+                    session, recorder, step, context, evidence["actions"],
+                )
+                if node is not None:
                     recorder.finish("Saved Resume decision completed", details=details)
                 else:
                     recorder.end_incomplete("Native Agent submitted with an incomplete tool group",
                                             details=details)
-                    node = None
         except BaseException as error:
             finish_recording(session, error)
             raise
         finish_recording(session)
         return node
+
+
+def run_resume_steps(session, first_decision, *, llm_config=None) -> list[Node]:
+    """Run up to the new-decision budget in one restored workspace and branch."""
+    with _claim_decision(session, first_decision) as evidence:
+        nodes = []
+        try:
+            context = ResumeRecordContext(session, evidence)
+            with open_recording(session, context.export) as (recorder, step):
+                context.accept_decision(step, evidence)
+                actions = evidence["actions"]
+                for number in range(session.start.max_steps):
+                    if number:
+                        session._record_attempt["stage"] = "begin_step"
+                        step = begin_recording_step(session, recorder)
+                        session._record_attempt["stage"] = "model"
+                        decision = record_branch_decision(session, step, context, llm_config=llm_config)
+                        actions = decision.actions
+                    node, details = _execute_and_save_group(session, recorder, step, context, actions)
+                    if node is None:
+                        recorder.end_incomplete("Native Agent submitted with an incomplete tool group",
+                                                details=details)
+                        break
+                    nodes.append(node)
+                    if details is not None:
+                        recorder.finish("Native Agent submitted", details=details)
+                        break
+                else:
+                    recorder.pause("Resume decision budget exhausted")
+        except BaseException as error:
+            finish_recording(session, error)
+            raise
+        finish_recording(session)
+        return nodes
+
+
+def _execute_and_save_group(session, recorder, step, context, actions):
+    """Execute and commit one group; the caller owns the recording's RunEnd."""
+    attempt = session._record_attempt
+    attempt["stage"] = "tools"
+    calls, results, submission = _execute_tools(session, step, actions)
+    attempt["stage"] = "admission"
+    complete = context.accept_results(actions, calls, results, submission=submission)
+    details = None
+    if submission is not None:
+        details = {
+            "agent_exit_status": context.messages[-1]["extra"]["exit_status"],
+            "record_complete": complete,
+            "final_control_context": context.context,
+            "final_input_position": context.input_position,
+        }
+    if complete:
+        attempt["stage"] = "commit"
+        node = recorder.commit_step()
+    else:
+        node = None
+    if node is not None:
+        attempt.update(stage="step_committed", complete_nodes=attempt["complete_nodes"] + 1,
+                       node_id=node.node_id, state_id=node.state_id,
+                       message_count=len(context.messages))
+    return node, details
 
 
 def _execute_tools(session, step, actions):
@@ -111,7 +163,8 @@ def _execute_tools(session, step, actions):
         call = step.tool(adapter, request, tool_call_id=action["tool_call_id"])
         calls.append(call)
         results.append(call.invoke())
-        session._record_attempt["tool_results"] = len(results)
+        attempt = session._record_attempt
+        attempt["tool_results"] += 1
         write_json(session.report_path, session.report, replace=True)
         try:
             native.DockerEnvironment._check_finished(

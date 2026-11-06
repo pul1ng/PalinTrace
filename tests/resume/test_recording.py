@@ -8,7 +8,7 @@ import pytest
 
 from palinreplay.core.errors import IntegrityError
 from palinreplay.core.interfaces import AgentSnapshot, Payload
-from palinreplay.core.models import Node, Run, State, Step
+from palinreplay.core.models import Node, Run, RunEnd, State, Step
 from palinreplay.record.source import source_dependency
 from palinreplay.resume.recording import branch_config, open_recording
 from palinreplay.storage.store import RecordStore
@@ -92,8 +92,11 @@ def test_resume_has_no_historical_endpoint_and_keeps_local_parent_chain(branch_s
         assert [n.index for n in store.list(Node)] == [21, 22]
         assert first.parent_node_id is None and second.parent_node_id == first.node_id
         assert store.get(State, first.state_id).logical_parent_id is None
-        rec.finish()
+        assert not store.list(RunEnd)
+        rec.pause("controlled two-step budget")
         rec.close()
+        end, = store.list(RunEnd)
+        assert end.status == "paused" and end.last_node_id == second.node_id
         assert store.check_integrity().ok
 
 

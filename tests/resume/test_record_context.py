@@ -62,7 +62,8 @@ def test_saved_response_is_adopted_and_seals_original_tools(
             assert context.adoptions[0]["stop"] == 43 + guided
             assert context.context["counters"]["n_calls"] == 21
             assert context.context["config"]["model"]["model_name"] == "openai/M"
-            assert context.context["resume"]["decision_accounting"]["remaining_steps"] == 0
+            assert context.context["resume"]["first_decision_accounting"] == decision.accounting
+            assert context.context["resume"]["remaining_steps"] == 0
             rec.cancel()
             rec.close()
     assert session.prefix.context == original
