@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import palinreplay.replay.services as services
-from palinreplay.replay.service_config import ServicesConfig, ServiceSpec
-from palinreplay.replay.services import (
+import palinreplay.restoration.services as services
+from palinreplay.restoration.service_config import ServicesConfig, ServiceSpec
+from palinreplay.restoration.services import (
     PreparationError,
     PreparationJournal,
     prepare_services,

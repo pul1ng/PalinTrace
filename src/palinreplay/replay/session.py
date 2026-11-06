@@ -13,10 +13,10 @@ from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.report import exception_evidence, execution_facts, final_execution_status
 from palinreplay.replay.run import replay_range
-from palinreplay.replay.service_config import load_service_input, resolve_services
-from palinreplay.replay.services import PreparationJournal, prepare_services
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.restoration.environment import RestoredExecutor
+from palinreplay.restoration.service_config import load_service_input, resolve_services
+from palinreplay.restoration.services import PreparationJournal, prepare_services
 from palinreplay.restoration.validation import validate_r1
 from palinreplay.sandbox.client import connect_docker, docker_endpoint
 from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, Snapshot

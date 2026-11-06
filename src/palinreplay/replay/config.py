@@ -3,7 +3,7 @@
 import base64
 
 from palinreplay.core.errors import IntegrityError
-from palinreplay.replay.services import PreparationError
+from palinreplay.restoration.services import PreparationError
 
 
 def replay_config(materials, *, r1=None, preparation=None):

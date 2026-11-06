@@ -1,7 +1,7 @@
 """Service configuration at a saved Resume boundary."""
 
 from palinreplay.replay.plan import pin_replay
-from palinreplay.replay.service_config import load_service_input, resolve_services
+from palinreplay.restoration.service_config import load_service_input, resolve_services
 from palinreplay.storage.store import RecordStore
 
 

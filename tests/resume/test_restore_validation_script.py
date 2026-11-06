@@ -34,7 +34,7 @@ def test_guards_count_and_reject_unapproved_work():
                            "branch_node_commits", "native_initializations"), 0)
     with validation.no_new_work(counts):
         from palinreplay.agents.mini import load_native
-        from palinreplay.replay.services import prepare_services
+        from palinreplay.restoration.services import prepare_services
 
         for call in (lambda: OpenAIChatClient.complete(None),
                      lambda: RestoredExecutor.exec(object(), "history command"),

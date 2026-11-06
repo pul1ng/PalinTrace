@@ -8,7 +8,7 @@ import pytest
 import palinreplay.resume.services as services_module
 import palinreplay.resume.session as session_module
 from palinreplay.core.errors import IntegrityError, RecordUsageError
-from palinreplay.replay.services import PreparationError
+from palinreplay.restoration.services import PreparationError
 from palinreplay.resume import restore_resume_start, select_resume_start
 from palinreplay.resume.services import load_resume_service_input, resolve_resume_services
 from palinreplay.sandbox.base import ExecResult, SandboxTimeout

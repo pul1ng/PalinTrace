@@ -72,9 +72,9 @@ def no_new_work(counts):
             ("palinreplay.agents.mini.MiniSweAgent.__init__", "native_initializations"),
             ("palinreplay.replay.step.execute_step", "historical_tool_reexecutions"),
             ("palinreplay.replay.run.execute_step", "historical_tool_reexecutions"),
-            ("palinreplay.replay.services.prepare_services", "service_preparations"),
+            ("palinreplay.restoration.services.prepare_services", "service_preparations"),
             ("palinreplay.replay.session.prepare_services", "service_preparations"),
-            ("palinreplay.replay.services.start_service", "service_preparations"),
+            ("palinreplay.restoration.services.start_service", "service_preparations"),
             ("openai.resources.chat.completions.Completions.create", "model_requests"),
             ("openai.resources.chat.completions.AsyncCompletions.create", "model_requests"),
         ):
