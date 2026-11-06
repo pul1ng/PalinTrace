@@ -5,6 +5,7 @@ from copy import deepcopy
 
 from palinreplay.agents.mini import load_native, parse_decision_actions
 from palinreplay.core.errors import IncompleteRecordError
+from palinreplay.core.progress import ProgressEvent
 from palinreplay.resume.decision import prepare_branch_decision, request_branch_response
 from palinreplay.resume.environment import saved_execution_config
 from palinreplay.resume.record import _execute_tool
@@ -86,8 +87,12 @@ class ResumeEnvironment:
     def execute(self, action):
         agent = self.agent
         self.session._record_attempt["stage"] = "tools"
+        counters = {"step": agent.active.step.index,
+                    "tool": len(agent.tool_calls) + 1, "tools": len(agent.actions)}
+        self.session.progress(ProgressEvent("tool", **counters))
         call, result = _execute_tool(self.session, agent.active, action)
         agent.tool_calls.append(call)
+        self.session.progress(ProgressEvent("tool_returned", **counters))
         output = native.BorrowedEnvironment.output(result)
         try:
             native.DockerEnvironment._check_finished(self, output)
@@ -207,6 +212,8 @@ class ResumeAgent(native.DefaultAgent):
         self.nodes.append(node)
         attempt.update(stage="step_committed", complete_nodes=len(self.nodes), node_id=node.node_id,
                        state_id=node.state_id, message_count=len(self.messages))
+        self.session.progress(ProgressEvent("committed", step=node.index,
+                                            completed_steps=len(self.nodes)))
         return self.context.context
 
     def end_details(self):

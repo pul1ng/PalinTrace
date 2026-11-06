@@ -8,8 +8,10 @@ from pydantic import ValidationError
 
 from palinreplay.cli.common import cancellation_signals
 from palinreplay.cli.outputs import default_output
+from palinreplay.cli.resume_progress import ResumeProgressDisplay
 from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.models import Run
+from palinreplay.core.progress import ProgressEvent
 from palinreplay.storage.store import RecordStore
 
 
@@ -47,6 +49,8 @@ def add_commands(commands):
                         help="service manifest (default: skip service preparation)")
     resume.add_argument("--output", type=Path, metavar="DIR",
                         help="new independent directory (default: outputs/resume/YYMMDD_HHMMSS_TASK/)")
+    resume.add_argument("--progress", choices=("auto", "plain", "off"), default="auto",
+                        help="auto: live progress on a terminal, plain logs when redirected; off: no progress")
 
 
 def _load_model(config_path):
@@ -201,10 +205,16 @@ def _print_summary(report, start, output, report_path, code, failure, phase):
 
 
 def execute(args):
+    with ResumeProgressDisplay(args.max_steps, args.progress) as progress:
+        return _execute(args, progress)
+
+
+def _execute(args, progress):
     phase = "configuration"
     start = output = session = failure = None
     try:
         with cancellation_signals():
+            progress(ProgressEvent("preparing"))
             model = _load_model(args.llm_config)
             phase = "source selection"
             start = _select_start(args, model)
@@ -220,7 +230,7 @@ def execute(args):
             )
 
             with restore_resume_start(start, output=output,
-                                      services_config=args.services_config) as session:
+                                      services_config=args.services_config, progress=progress) as session:
                 preparation = session.report["preparation"]["status"]
                 print(f"Restored: C{session.start.node.index}; R1 passed; services {preparation}", flush=True)
                 phase = "first decision"
@@ -260,5 +270,15 @@ def execute(args):
     report_path = getattr(failure, "resume_report_path", None)
     if report_path is None and session is not None:
         report_path = session.report_path
+    recording = report.get("recording", {})
+    status = recording.get("stop_reason") if code == 0 else {
+        1: "failed", 3: "incomplete", 130: "cancelled",
+    }[code]
+    try:
+        progress(ProgressEvent("finished", status=status,
+                               completed_steps=recording.get("complete_nodes"),
+                               step=(recording.get("last_complete_node") or {}).get("index")))
+    except KeyboardInterrupt:
+        pass  # A final display update cannot replace the saved outcome.
     _print_summary(report, start, output, report_path, code, failure, phase)
     return code

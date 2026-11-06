@@ -32,12 +32,12 @@ def test_resume_help(capsys):
     assert stopped.value.code == 0
     help_text = capsys.readouterr().out
     for option in ("SOURCE", "--from", "--run", "--max-steps", "--llm-config",
-                   "--instruction", "--services-config", "--output"):
+                   "--instruction", "--services-config", "--output", "--progress"):
         assert option in help_text
     assert "default: 20" in help_text
     assert "including the first request" in help_text
     assert "submit early" in help_text
-    assert "--to" not in help_text and "--progress" not in help_text
+    assert "--to" not in help_text
 
 
 @pytest.mark.parametrize("options", [
@@ -87,6 +87,7 @@ def test_resume_defaults():
     assert args.max_steps == 20
     assert args.run_id is args.llm_config is args.instruction is args.services_config is None
     assert args.output is None
+    assert args.progress == "auto"
 
 
 @pytest.fixture
@@ -443,7 +444,7 @@ def test_cli_first_decision_uses_the_full_prefix_once_without_executing_tools(
         return session.start
 
     @contextmanager
-    def restore(start, output, *, services_config):
+    def restore(start, output, *, services_config, progress):
         assert start is session.start and output == session.output
         assert services_config == Path("services.json")
         events.append("ready")
@@ -670,6 +671,90 @@ def test_cli_first_text_only_answer_enters_native_correction(cli_case, budget, e
     assert report["decision"]["status"] == "format_error"
     assert report["recording"]["total_model_requests"] == expected_calls
     assert report["recording"]["stop_reason"] == expected_stop
+
+
+@pytest.mark.parametrize("outcome,code,status", [
+    ("submit", 0, "submitted"), ("budget", 0, "budget_exhausted"),
+    ("model_failure", 1, "failed"), ("cancel", 130, "cancelled"),
+])
+def test_cli_progress_tracks_real_boundaries_and_finishes_after_cleanup(
+    cli_case, monkeypatch, outcome, code, status,
+):
+    import palinreplay.cli.resume as cli
+    from palinreplay.core.progress import ProgressReporter
+    from palinreplay.sandbox.base import ExecResult
+
+    case, events = cli_case, []
+
+    def observe(event):
+        if event.phase == "finished":
+            assert case.events[-3:] == ["executor-close", "restore-close", "client-close"]
+        events.append(event)
+
+    @contextmanager
+    def display(max_steps, mode):
+        assert max_steps == 2 and mode == "plain"
+        yield ProgressReporter(observe)
+
+    monkeypatch.setattr(cli, "ResumeProgressDisplay", display)
+    if outcome == "submit":
+        case.outcomes[1] = ExecResult("submit", b"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndone\n", 0, .1)
+    elif outcome in ("model_failure", "cancel"):
+        case.responses[1] = (RuntimeError("model unavailable") if outcome == "model_failure"
+                             else KeyboardInterrupt())
+    assert main([*case.argv, "--max-steps", "2", "--progress", "plain"]) == code
+    phases = [event.phase for event in events]
+    assert phases.index("restoring") < phases.index("verifying") < phases.index("service-preparation")
+    assert phases.index("service-preparation") < phases.index("source-reference") < phases.index("model")
+    assert [(event.step, event.request) for event in events if event.phase == "model"] == [(21, 1), (22, 2)]
+    complete = 1 if outcome in ("model_failure", "cancel") else 2
+    commits = [event for event in events if event.phase == "committed"]
+    assert [(event.step, event.completed_steps) for event in commits] == [
+        (20 + i, i) for i in range(1, complete + 1)
+    ]
+    for event in commits:
+        positions = {phase: next(i for i, item in enumerate(events)
+                                 if item.step == event.step and item.phase == phase)
+                     for phase in ("tool", "tool_returned", "capturing", "committing", "committed")}
+        assert list(positions.values()) == sorted(positions.values())
+    assert len(case.requests) == 2 and case.executor.execute.call_count == complete
+    assert phases[-2:] == ["cleanup", "finished"]
+    assert events[-1].status == status
+    assert events[-1].completed_steps == complete and events[-1].step == 20 + complete
+
+
+@pytest.mark.parametrize("mode", ["plain", "off"])
+def test_cli_progress_mode_preserves_the_final_summary(cli_case, capsys, mode):
+    assert main([*cli_case.argv, "--max-steps", "2", "--progress", mode]) == 0
+    text = capsys.readouterr()
+    assert "Resume FINISHED" in text.out and "Last complete node: C22" in text.out
+    assert "\x1b" not in text.err
+    if mode == "plain":
+        assert "[resume " in text.err and "2/2" in text.err and "源 C20 (引用)" in text.err
+    else:
+        assert "[resume " not in text.err
+
+
+def test_progress_observer_failure_does_not_change_resume_execution(cli_case, monkeypatch):
+    import palinreplay.cli.resume as cli
+    from palinreplay.core.progress import ProgressReporter
+
+    observed = []
+
+    def broken(event):
+        observed.append(event.phase)
+        raise OSError("terminal disconnected")
+
+    @contextmanager
+    def display(*args):
+        yield ProgressReporter(broken)
+
+    monkeypatch.setattr(cli, "ResumeProgressDisplay", display)
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 0
+    assert observed == ["preparing"]
+    assert len(cli_case.requests) == cli_case.executor.execute.call_count == 2
+    report = json.loads((cli_case.output / "report.json").read_text())
+    assert report["recording"]["complete_nodes"] == 2 and report["cleanup_confirmed"]
 
 
 def test_cli_budget_100_stops_when_the_second_round_submits(cli_case):

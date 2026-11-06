@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import RLock
 
+from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressReporter
 from palinreplay.record.restore import RestoredNode, RestoreMaterials
 from palinreplay.replay.environment import RestoredExecutor
 from palinreplay.replay.services import PreparationJournal, prepare_services
@@ -29,6 +30,8 @@ class ResumeSession:
     prefix: ResumePrefix
     output: Path
     report: dict
+    progress: ProgressReporter = field(default_factory=ProgressReporter, repr=False, compare=False,
+                                       kw_only=True)
     _decision_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
     _decision_evidence: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _record_attempt: dict = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -60,14 +63,17 @@ def prepare_output(start, output):
 
 
 @contextmanager
-def restore_resume_start(start: ResumeStart, output=None, client=None, *, services_config=None):
+def restore_resume_start(start: ResumeStart, output=None, client=None, *, services_config=None,
+                         progress: ProgressCallback | None = None):
     """Yield after R1 and optional service preparation; own only newly created resources."""
     output = prepare_output(start, output)
     own_client = client is None
     report = new_report(start, output, own_client)
     restored = executor = journal = primary = None
     delivered = False
+    notify = ProgressReporter(progress)
     try:
+        notify(ProgressEvent("preparing", source_step=start.node.index))
         if services_config is not None:
             report["phase"] = "services"
         services = resolve_resume_services(start, load_resume_service_input(services_config))
@@ -88,15 +94,19 @@ def restore_resume_start(start: ResumeStart, output=None, client=None, *, servic
         )
         write_json(output / "report.json", report, replace=True)
         if own_client:
+            notify(ProgressEvent("connecting"))
             client = connect_docker(600)
+        notify(ProgressEvent("restoring", source_step=start.node.index))
         restored, executor = restore_environment(
             start, materials, client=client, report_path=output / "restore-report.json",
         )
         report["phase"] = "validate_r1"
+        notify(ProgressEvent("verifying", source_step=start.node.index))
         report["r1"] = validate_workspace(materials, executor)
         report["restore_status"] = "passed"
         if services is not None:
             report["phase"] = "service_preparation"
+            notify(ProgressEvent("service-preparation"))
             services = services.model_copy(update={"services": tuple(
                 service.model_copy(update={"cwd": service.cwd or execution["cwd"]})
                 for service in services.services
@@ -110,12 +120,15 @@ def restore_resume_start(start: ResumeStart, output=None, client=None, *, servic
         write_json(output / "report.json", report, replace=True)
         delivered = True
         report.update(phase="caller", caller={"status": "running"})
-        session = ResumeSession(start, materials, restored, executor, prefix, output, report)
+        session = ResumeSession(start, materials, restored, executor, prefix, output, report,
+                                progress=notify)
         try:
+            notify(ProgressEvent("source-reference", source_step=start.node.index, completed_steps=0))
             yield session
         finally:
             with session._decision_lock:
                 report["phase"] = "closing"
+            notify(ProgressEvent("cleanup"))
         report["caller"] = {"status": "completed"}
     except BaseException as error:
         primary = error

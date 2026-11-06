@@ -7,6 +7,7 @@ from hashlib import sha256
 
 from palinreplay.core.interfaces import BoundaryAdapter, Payload
 from palinreplay.core.models import Event, Execution, Node, Operation, Run, RunEnd
+from palinreplay.core.progress import ProgressEvent
 from palinreplay.core.serialization import json_bytes
 from palinreplay.record.recorder import Recorder
 from palinreplay.record.state import BtrfsStateBackend
@@ -50,10 +51,17 @@ def open_recording(session, export_agent):
             materials = session.materials
             backend = BtrfsStateBackend(session.executor, runtime=materials.runtime,
                                        public_env_keys=materials.runtime.launch.environment)
+
+            def capture(store, boundary, previous):
+                session.progress(ProgressEvent("capturing", step=boundary.index))
+                state = backend.capture(store, boundary, previous)
+                session.progress(ProgressEvent("committing", step=boundary.index))
+                return state
+
             recorder = Recorder(
                 store, task_id=materials.run.task_id, agent_name=materials.run.agent_name,
                 agent_version=materials.run.agent_version, config=Payload.json(branch_config(session)),
-                boundary=BoundaryAdapter(export_agent, backend.capture),
+                boundary=BoundaryAdapter(export_agent, capture),
             )
             recorder.start_from_source()
             step = begin_recording_step(session, recorder)

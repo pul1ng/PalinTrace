@@ -15,6 +15,7 @@ from palinreplay.agents.mini import (
 )
 from palinreplay.core.errors import RecordUsageError
 from palinreplay.core.interfaces import CallAdapter, Payload, ResultCapture
+from palinreplay.core.progress import ProgressEvent
 from palinreplay.llm import LLMConfig, mini_model_name
 from palinreplay.resume.report import exception_evidence
 from palinreplay.storage.io import write_json
@@ -70,6 +71,7 @@ def _request_decision(session, prepared, *, defer_format_errors=False):
                         remaining_steps=session.start.max_steps - 1)
         write_json(session.report_path, session.report, replace=True)
         category = "request"
+        session.progress(ProgressEvent("model", step=session.start.node.index + 1, request=1))
         dispatched = True
         response = complete_decision_request(prepared.request, prepared.credentials)
         category = "tool_format"
@@ -79,6 +81,7 @@ def _request_decision(session, prepared, *, defer_format_errors=False):
         evidence.update(assistant_message=assistant, **decision_cost(prepared.native_model, response))
         category = "evidence"
         write_json(session.report_path, session.report, replace=True)
+        session.progress(ProgressEvent("model_returned", step=session.start.node.index + 1, request=1))
         category = "tool_format"
         try:
             actions = parse_decision_actions(prepared.native_model, response)
@@ -139,6 +142,8 @@ def request_branch_response(session, step, context, *, llm_config=None):
     accounting = {}
 
     def execute(request):
+        session.progress(ProgressEvent("model", step=step.step.index,
+                                       request=session._record_attempt["model_requests"] + 2))
         session._record_attempt["model_requests"] += 1
         accounting.update(model_requests=1, usage=None, cost=None, cost_known=False,
                           execution_id=call.execution_id, step_id=step.step.step_id)
@@ -163,6 +168,8 @@ def request_branch_response(session, step, context, *, llm_config=None):
     call = step.model(adapter, prepared.request)
     response = call.invoke()
     context.account_decision(accounting)
+    session.progress(ProgressEvent("model_returned", step=step.step.index,
+                                   request=session._record_attempt["model_requests"] + 1))
     return prepared, call, response, accounting
 
 
