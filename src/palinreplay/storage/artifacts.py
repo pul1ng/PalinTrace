@@ -1,7 +1,6 @@
 """Local immutable byte storage used by the Record catalog."""
 
 import hashlib
-import io
 import os
 import stat
 import tempfile
@@ -403,7 +402,60 @@ class ArtifactStore:
             stage.unlink(missing_ok=True)
             forget_temporary(stage)
 
+    @timed("artifact.write")
     def put(self, data: bytes, media_type: str) -> ArtifactRef:
         if not isinstance(data, bytes):
             raise TypeError("raw artifacts must be bytes")
-        return self.put_stream(io.BytesIO(data), media_type)
+        plain_directory(self.root)
+        temporary = self.root / ".tmp"
+        plain_directory(temporary)
+        digest = hashlib.sha256(data).hexdigest()
+        count(hashed_bytes=len(data))
+        ref = ArtifactRef(sha256=digest, size=len(data), media_type=media_type)
+        shard = self.root / ref.sha256[:2]
+        try:
+            shard.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            destination = self._path(ref)
+            try:
+                destination.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                # Knowing the requested identity avoids a content rewrite, but
+                # never proves the bytes already on disk. Reuse only the
+                # existing verifier's private, bounded boundary-local proofs.
+                self.verify_internal(ref)
+                # An overlapping writer may not yet have synced its link.
+                sync_directory(shard)
+                return ref
+
+        fd, name = tempfile.mkstemp(prefix="put-", dir=temporary)
+        stage = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                count(written_bytes=len(data))
+                temporary_size(stage, len(data))
+                with phase("artifact.sync_file"):
+                    handle.flush()
+                    os.fchmod(handle.fileno(), 0o400)
+                    os.fsync(handle.fileno())
+            try:
+                shard.mkdir(mode=0o700)
+                sync_directory(self.root)
+            except FileExistsError:
+                plain_directory(shard)
+            destination = self._path(ref)
+            try:
+                os.link(stage, destination, follow_symlinks=False)
+            except FileExistsError:
+                # Another writer may have published since the initial lookup.
+                self.verify_internal(ref)
+            sync_directory(shard)
+            return ref
+        finally:
+            stage.unlink(missing_ok=True)
+            forget_temporary(stage)
