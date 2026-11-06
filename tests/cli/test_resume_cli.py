@@ -818,3 +818,98 @@ def test_cli_known_failure_takes_priority_over_cancellation(cli_case, monkeypatc
     assert "cancelled" in output.err and "also has" in output.err
     cli_case.restored.close.assert_called_once()
     cli_case.client.close.assert_called_once()
+
+
+def test_cli_summary_matches_the_report_and_runs_after_cleanup(cli_case, monkeypatch, capsys):
+    import builtins
+
+    original_print = builtins.print
+
+    def observe_summary(*args, **kwargs):
+        if args and str(args[0]).startswith("Resume FINISHED"):
+            cli_case.events.append("summary")
+        original_print(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "print", observe_summary)
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 0
+    report = json.loads((cli_case.output / "report.json").read_text())
+    output = capsys.readouterr()
+    assert cli_case.events[-4:] == ["executor-close", "restore-close", "client-close", "summary"]
+    for text in ("Source: C20", f"Branch Run: {report['recording']['run_id']}",
+                 "New complete nodes: 2", "Last complete node: C22", "Model requests: 2",
+                 "Tool executions (attempts): 2", "Stop reason: budget_exhausted", "Cleanup: completed",
+                 f"Report: {cli_case.output / 'report.json'}", f"Branch Store: {cli_case.output / 'record'}"):
+        assert text in output.out
+    assert "test-resume-secret" not in output.out + output.err
+    assert "test-resume-secret" not in (cli_case.output / "report.json").read_text()
+    assert "\x1b" not in output.out + output.err
+
+
+def test_cli_first_request_failure_reports_zero_nodes_and_the_source(cli_case, capsys):
+    cli_case.responses[0] = RuntimeError("model unavailable")
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 1
+    output = capsys.readouterr()
+    for text in ("Resume FAILED", "Branch Run: not created", "New complete nodes: 0",
+                 "Last complete node: source C20", "Model requests: 1", "Tool executions (attempts): 0",
+                 "Stop reason: failed", "Cleanup: completed"):
+        assert text in output.out
+    assert "recording/" not in output.out
+
+
+def test_cli_later_failure_displays_saved_node_and_failure(cli_case, capsys):
+    cli_case.responses[1] = RuntimeError("second request failed")
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 1
+    output = capsys.readouterr()
+    for text in ("New complete nodes: 1", "Last complete node: C21", "Model requests: 2",
+                 "Failure phase: model", "Resume FAILED", "Stop reason: failed"):
+        assert text in output.out
+
+
+def test_cli_unreadable_final_progress_is_unknown_not_zero(cli_case, monkeypatch, capsys):
+    monkeypatch.setattr("palinreplay.resume.recording._persisted_progress",
+                        Mock(side_effect=OSError("progress unreadable")))
+    assert main([*cli_case.argv, "--max-steps", "1"]) == 1
+    output = capsys.readouterr()
+    assert "New complete nodes: unknown" in output.out
+    assert "Last complete node: unknown (could not confirm saved progress)" in output.out
+    assert "New complete nodes: 0" not in output.out
+    assert "Last complete node: C21" not in output.out
+    assert "Model requests: 1" in output.out
+
+
+def test_cli_final_report_failure_uses_latest_memory_after_cleanup(cli_case, monkeypatch, capsys):
+    import palinreplay.resume.report as reports
+
+    write = reports.write_json
+    error = OSError("final report unavailable")
+
+    def fail_final(path, data, **kwargs):
+        if data.get("phase") == "complete":
+            raise error
+        return write(path, data, **kwargs)
+
+    monkeypatch.setattr(reports, "write_json", fail_final)
+    assert main([*cli_case.argv, "--max-steps", "2"]) == 1
+    assert error.resume_report["cleanup_confirmed"]
+    assert not json.loads((cli_case.output / "report.json").read_text())["cleanup_confirmed"]
+    output = capsys.readouterr()
+    for text in ("Resume FAILED", "New complete nodes: 2", "Last complete node: C22",
+                 "Cleanup: completed", "Report write: failed; summary uses retained in-memory evidence"):
+        assert text in output.out
+
+
+def test_cli_does_not_present_preexisting_reports_as_its_own(restoration, private_config, capsys):
+    restoration.output.mkdir()
+    (restoration.output / "report.json").write_text('{"run_id": "old-run"}')
+    assert main(_restoration_args(restoration, private_config)) == 1
+    output = capsys.readouterr()
+    assert "Report:" not in output.out and "old-run" not in output.out
+    assert "output already exists" in output.err
+
+
+def test_cli_early_error_does_not_claim_a_report_was_generated(private_config, capsys):
+    assert main(["resume", "missing-source", "--from", "C20",
+                 "--llm-config", str(private_config)]) == 1
+    output = capsys.readouterr()
+    assert "Report:" not in output.out
+    assert "error:" in output.err

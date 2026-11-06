@@ -132,9 +132,77 @@ def _exit_code(report, error):
     return 1 if report.get("status") == "failed" else 0
 
 
+def _node_label(node):
+    return f"C{node['index']} ({node['node_id']})"
+
+
+def _print_summary(report, start, output, report_path, code, failure, phase):
+    if not report:
+        return
+    recording = report.get("recording")
+    decision = report.get("decision", {})
+    if recording is not None:
+        stop = recording.get("stop_reason", "unknown")
+    else:
+        stop = "interrupted" if _cancelled(report, failure) else "failed" if code == 1 else "not recorded"
+    status = {0: "FINISHED", 1: "FAILED", 3: "INCOMPLETE", 130: "CANCELLED"}[code]
+    print(f"Resume {status}")
+    source = report.get("node") or {
+        "index": start.node.index, "node_id": start.node.node_id, "run_id": start.node.run_id,
+    }
+    print(f"  Source: {_node_label(source)}, Run {source['run_id']}")
+    if recording is None:
+        complete = decision.get("complete_nodes", 0)
+        requests, tools = decision.get("model_requests", 0), 0
+        branch, last = "not created", None
+    else:
+        complete = None if recording.get("progress_error") else recording.get("complete_nodes")
+        requests, tools = recording.get("total_model_requests"), recording.get("tool_executions")
+        branch = recording.get("run_id", "unknown" if recording.get("progress_error") else "not created")
+        last = recording.get("last_complete_node")
+    print(f"  Branch Run: {branch}")
+    print(f"  New complete nodes: {complete if complete is not None else 'unknown'}")
+    if complete == 0:
+        position = f"source {_node_label(source)} (reference)"
+    elif complete is not None and last is not None:
+        position = _node_label(last)
+    else:
+        position = "unknown (could not confirm saved progress)"
+    print(f"  Last complete node: {position}")
+    print(f"  Model requests: {requests if requests is not None else 'unknown'}")
+    print(f"  Tool executions (attempts): {tools if tools is not None else 'unknown'}")
+    print(f"  Stop reason: {stop}")
+    if code == 1:
+        stage = (report.get("recording", {}).get("failure_stage")
+                 or report.get("restore_error", {}).get("phase")
+                 or decision.get("error", {}).get("category") or phase)
+        print(f"  Failure phase: {stage}")
+    if _cancelled(report, failure):
+        print("  Cancellation: requested")
+    cleanup = ("completed" if report.get("cleanup_confirmed") else
+               "failed" if report.get("cleanup_errors") else "unconfirmed")
+    print(f"  Cleanup: {cleanup}")
+    for detail in report.get("cleanup_errors", []):
+        print(f"  Cleanup error: {detail['resource']} ({detail.get('error_type', 'unconfirmed')})")
+    if report.get("report_error") or (recording or {}).get("report_error"):
+        print("  Report write: failed; summary uses retained in-memory evidence")
+    print(f"  Output: {output}")
+    if recording is not None and recording.get("store"):
+        print(f"  Branch Store: {recording['store']}")
+    if report_path is not None:
+        try:
+            saved = report_path.is_file()
+        except OSError:
+            saved = False
+        if saved:
+            print(f"  Report: {report_path}")
+        else:
+            print("  Report: unavailable (file not confirmed)")
+
+
 def execute(args):
     phase = "configuration"
-    session = failure = None
+    start = output = session = failure = None
     try:
         with cancellation_signals():
             model = _load_model(args.llm_config)
@@ -142,8 +210,8 @@ def execute(args):
             start = _select_start(args, model)
             phase = "output selection"
             output = _output_path(args, start)
-            print(f"Source: C{start.node.index} ({start.node.node_id}), Run {start.node.run_id}")
-            print(f"Output: {output}")
+            print(f"Source: C{start.node.index} ({start.node.node_id}), Run {start.node.run_id}", flush=True)
+            print(f"Output: {output}", flush=True)
             phase = "restoration"
             from palinreplay.resume import (
                 decide_resume_start,
@@ -153,11 +221,11 @@ def execute(args):
 
             with restore_resume_start(start, output=output,
                                       services_config=args.services_config) as session:
-                print(f"Restored: C{session.start.node.index}; R1 passed")
+                preparation = session.report["preparation"]["status"]
+                print(f"Restored: C{session.start.node.index}; R1 passed; services {preparation}", flush=True)
                 phase = "first decision"
                 first = decide_resume_start(session, instruction=args.instruction,
                                             llm_config=args.llm_config)
-                print(f"First decision: {len(first.messages)} input messages")
                 phase = "recording"
                 run_resume_steps(session, first, llm_config=args.llm_config)
                 phase = "cleanup"
@@ -189,4 +257,8 @@ def execute(args):
     code = _exit_code(report, failure)
     if code == 1 and _cancelled(report, failure):
         print("error: Resume also has a recording, report or resource failure", file=sys.stderr)
+    report_path = getattr(failure, "resume_report_path", None)
+    if report_path is None and session is not None:
+        report_path = session.report_path
+    _print_summary(report, start, output, report_path, code, failure, phase)
     return code
