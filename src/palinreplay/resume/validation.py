@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-from palinreplay.replay.initial import validate_r1
+from palinreplay.restoration.validation import validate_r1
 from palinreplay.storage.rootfs import SCOPE
 
 

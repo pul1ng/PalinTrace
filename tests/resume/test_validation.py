@@ -44,3 +44,22 @@ def test_r1_compares_once_in_place_and_keeps_scope_and_failure(record, differenc
     container.unpause.assert_called_once()
     assert restored.report["r1"]["scope"] == SCOPE
     assert restored.report["r1"]["capture"] == materials.state.capture.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("field", ["context", "config", "input_position"])
+def test_r1_rejects_each_prefix_mismatch_before_touching_container(record, field):
+    path, (_, node, *_), _ = record
+    materials = load_resume_materials(select_resume_start(path, node.node_id, model="M", max_steps=2))
+    restored = SimpleNamespace(
+        context=materials.context, config=materials.config, input_position=materials.input_position,
+        report={}, _write_report=Mock(),
+    )
+    setattr(restored, field, {"mismatch": True})
+    executor = SimpleNamespace(restored=restored, _container=Mock(), pool=Mock())
+    with pytest.raises(IntegrityError) as caught:
+        validate_workspace(materials, executor)
+    assert caught.value.r1_report["context_checks"][field] is False
+    assert restored.report["phase"] == "validate_r1"
+    executor._container.pause.assert_not_called()
+    executor._container.unpause.assert_not_called()
+    executor.pool.command.assert_not_called()

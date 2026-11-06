@@ -8,7 +8,7 @@ from palinreplay.core.progress import ProgressCallback, ProgressEvent, ProgressR
 from palinreplay.core.replay_outcome import failure_evidence
 from palinreplay.record.restore import load_restore_materials, restore_r1_node
 from palinreplay.replay.context import ReplayContext
-from palinreplay.replay.initial import initial_recorder, validate_r1
+from palinreplay.replay.initial import initial_recorder
 from palinreplay.replay.materials import load_replay_materials
 from palinreplay.replay.plan import pin_replay
 from palinreplay.replay.report import exception_evidence, execution_facts, final_execution_status
@@ -17,6 +17,7 @@ from palinreplay.replay.service_config import load_service_input, resolve_servic
 from palinreplay.replay.services import PreparationJournal, prepare_services
 from palinreplay.replay.stats import ReplayStats
 from palinreplay.restoration.environment import RestoredExecutor
+from palinreplay.restoration.validation import validate_r1
 from palinreplay.sandbox.client import connect_docker, docker_endpoint
 from palinreplay.storage.btrfs.models import BACKEND, BtrfsRuntime, Snapshot
 from palinreplay.storage.btrfs.verification import capture_info
