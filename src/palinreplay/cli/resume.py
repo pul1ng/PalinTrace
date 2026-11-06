@@ -80,10 +80,13 @@ def execute(args):
         print(f"Source: C{start.node.index} ({start.node.node_id}), Run {start.node.run_id}")
         print(f"Output: {output}")
         phase = "restoration"
-        from palinreplay.resume import restore_resume_start
+        from palinreplay.resume import decide_resume_start, restore_resume_start
 
         with restore_resume_start(start, output=output, services_config=args.services_config) as session:
             print(f"Restored: C{session.start.node.index}; R1 passed")
+            phase = "first decision"
+            first = decide_resume_start(session, instruction=args.instruction, llm_config=args.llm_config)
+            print(f"First decision: {len(first.messages)} input messages")
         return 0
     except ValidationError as error:
         fields = ", ".join(

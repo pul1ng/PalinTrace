@@ -1,11 +1,16 @@
 import json
+from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from palinreplay.cli import main
 from palinreplay.cli.app import build_parser
 from palinreplay.storage.store import RecordStore
+from tests.resume import test_decision as decision_tests
 from tests.resume import test_services as service_tests
 from tests.resume import test_session as session_tests
 from tests.resume.test_start import history
@@ -13,6 +18,8 @@ from tests.resume.test_start import history
 restoration = session_tests.setup
 setup = session_tests.setup
 prepared = service_tests.prepared
+decision_session = decision_tests.session
+model_response = decision_tests.response
 
 
 def test_resume_help(capsys):
@@ -260,14 +267,19 @@ def _restoration_args(restoration, private_config, *options):
             "--llm-config", str(private_config), "--output", str(restoration.output), *options]
 
 
-def test_cli_enters_the_existing_restored_session(restoration, private_config, monkeypatch):
+@pytest.fixture
+def restored_cli(monkeypatch):
     import palinreplay.resume as resume
 
-    def forbidden(*args, **kwargs):
-        pytest.fail("restoration alone must not request a model")
+    decision = Mock(return_value=SimpleNamespace(messages=[]))
+    monkeypatch.setattr(resume, "decide_resume_start", decision)
+    return decision
 
-    monkeypatch.setattr(resume, "decide_resume_start", forbidden)
+
+def test_cli_enters_the_existing_restored_session(restoration, private_config, restored_cli):
     assert main(_restoration_args(restoration, private_config)) == 0
+    assert restored_cli.call_count == 1
+    assert restored_cli.call_args.args[0].executor is restoration.executor
     restoration.validate.assert_called_once_with(restoration.materials, restoration.executor)
     restoration.restore.assert_called_once()
     restoration.executor.close.assert_called_once()
@@ -334,7 +346,7 @@ def test_cli_reuses_output_rejection_without_changing_source(
         assert not restoration.output.exists()
 
 
-def test_cli_prepares_services_once_after_r1(prepared, private_config):
+def test_cli_prepares_services_once_after_r1(prepared, private_config, restored_cli):
     restoration = prepared.session
     assert main(_restoration_args(restoration, private_config,
                                   "--services-config", str(prepared.path))) == 0
@@ -349,7 +361,7 @@ def test_cli_prepares_services_once_after_r1(prepared, private_config):
 
 @pytest.mark.parametrize("configured", [False, True])
 def test_cli_distinguishes_skipped_and_empty_preparation(
-    restoration, private_config, tmp_path, configured,
+    restoration, private_config, tmp_path, restored_cli, configured,
 ):
     config = tmp_path / "empty-services.json"
     config.write_text('{"services": []}')
@@ -410,3 +422,57 @@ def test_cli_mismatched_manifest_fails_before_container(restoration, private_con
     report = json.loads((restoration.output / "report.json").read_text())
     assert report["restore_status"] == "not_started"
     assert "services_error" in report and report["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("instruction", [None, "  下一步先检查 B 的日志\n"])
+def test_cli_first_decision_uses_the_full_prefix_once_without_executing_tools(
+    decision_session, model_response, private_config, monkeypatch, instruction,
+):
+    import palinreplay.cli.resume as cli
+    import palinreplay.resume as resume
+    from tests.resume.test_multiturn_requests import api_messages
+
+    session = decision_session
+    inherited = deepcopy(session.context)
+    events = []
+
+    def select(args, model):
+        session.start.model = model
+        session.start.max_steps = args.max_steps
+        return session.start
+
+    @contextmanager
+    def restore(start, output, *, services_config):
+        assert start is session.start and output == session.output
+        assert services_config == Path("services.json")
+        events.append("ready")
+        yield session
+        events.append("cleanup")
+
+    def complete(request, credentials):
+        assert events == ["ready"]
+        events.append("request")
+        assert request["model"] == "openai/branch-model"
+        assert request["messages"][:42] == api_messages(inherited["messages"])
+        assert len(request["messages"]) == 42 + (instruction is not None)
+        if instruction is not None:
+            assert request["messages"][42] == {"role": "user", "content": instruction}
+        return model_response
+
+    monkeypatch.setattr(cli, "_select_start", select)
+    monkeypatch.setattr(cli, "_output_path", lambda *args: session.output)
+    monkeypatch.setattr(resume, "restore_resume_start", restore)
+    transport = Mock(side_effect=complete)
+    monkeypatch.setattr("palinreplay.resume.decision.complete_decision_request", transport)
+    options = [] if instruction is None else ["--instruction", instruction]
+    assert main(["resume", "source", "--from", "C20", "--max-steps", "2",
+                 "--llm-config", str(private_config), "--services-config", "services.json",
+                 *options]) == 0
+    assert events == ["ready", "request", "cleanup"]
+    assert transport.call_count == 1
+    assert session.report["decision"]["model_requests"] == 1
+    assert session.report["decision"]["remaining_steps"] == 1
+    assert session.report["decision"]["complete_nodes"] == 0
+    assert session.context == inherited
+    assert not session.executor.mock_calls
+    assert "test-resume-secret" not in session.report_path.read_text()
