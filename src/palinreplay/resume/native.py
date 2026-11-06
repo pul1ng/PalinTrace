@@ -3,6 +3,7 @@
 import time
 from copy import deepcopy
 
+from palinreplay.agents._mini_tools import pair_tool_messages
 from palinreplay.agents.mini import load_native, parse_decision_actions
 from palinreplay.core.errors import IncompleteRecordError
 from palinreplay.core.progress import ProgressEvent
@@ -168,15 +169,11 @@ class ResumeAgent(native.DefaultAgent):
             return self.context.adopt([(self.submission_call, list(messages))], list(messages))
         if self.tool_calls and self.step_error is None:
             self.session._record_attempt["stage"] = "admission"
-            if len(messages) != len(self.tool_calls) or any(
-                message.get("tool_call_id") != call.operation.tool_call_id
-                for message, call in zip(messages, self.tool_calls, strict=False)
-            ):
-                raise ValueError("mini observations do not align with Resume tool calls")
-            return self.context.adopt(
-                [(call, [message]) for call, message in zip(self.tool_calls, messages, strict=True)],
-                list(messages),
+            deliveries = pair_tool_messages(
+                self.tool_calls, messages,
+                error_message="mini observations do not align with Resume tool calls",
             )
+            return self.context.adopt(deliveries, list(messages))
         return super().add_messages(*messages)
 
     def _sync_context(self):

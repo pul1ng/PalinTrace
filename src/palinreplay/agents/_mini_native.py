@@ -23,7 +23,11 @@ from minisweagent.models.utils.retry import retry
 from minisweagent.utils.serialize import recursive_merge
 from tenacity import stop_after_attempt
 
-from palinreplay.agents._mini_tools import encode_tool_result, make_tool_adapter
+from palinreplay.agents._mini_tools import (
+    encode_tool_result,
+    make_tool_adapter,
+    pair_tool_messages,
+)
 from palinreplay.core.interfaces import (
     AgentSnapshot,
     BoundaryAdapter,
@@ -620,20 +624,13 @@ class RecordingAgent(DefaultAgent):
             self.submission_call = None
             return result
         if self.tool_calls and self._step_error is None:
-            if len(messages) != len(self.tool_calls) or any(
-                message.get("tool_call_id") != call.operation.tool_call_id
-                for message, call in zip(messages, self.tool_calls, strict=False)
-            ):
-                self.recorder._abort(
-                    "adoption-map", ValueError("native tool message group differs")
+            try:
+                deliveries = pair_tool_messages(
+                    self.tool_calls, messages, error_message="native tool message group differs",
                 )
-            return self._adopt(
-                [
-                    (call, [message])
-                    for call, message in zip(self.tool_calls, messages, strict=True)
-                ],
-                messages,
-            )
+            except ValueError as error:
+                self.recorder._abort("adoption-map", error)
+            return self._adopt(deliveries, messages)
         return super().add_messages(*messages)
 
     def save(self, path, *extra_dicts):

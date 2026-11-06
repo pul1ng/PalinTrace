@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -25,3 +26,21 @@ def test_uses_real_mini_observation_rendering_and_prefix(tmp_path):
         context.observations(history, outputs[:1])
     assert context.accept_results(SimpleNamespace(tools=()), [], []) == []
     assert context.export(None).input_position.data == b'{"adoptions":[],"next_message":1}\n'
+
+
+@pytest.mark.parametrize("ids", [("a",), ("a", "b", "c"), ("b", "a"), ("a", None)])
+def test_malformed_observations_fail_before_any_replay_admission(monkeypatch, ids):
+    materials = SimpleNamespace(
+        context={"messages": [{"role": "user", "content": "prefix"}]},
+        input_position={}, config={},
+    )
+    context = ReplayContext(materials)
+    messages = [{"role": "tool", "tool_call_id": identity} for identity in ids]
+    calls = [SimpleNamespace(operation=SimpleNamespace(tool_call_id=i)) for i in ("a", "b")]
+    monkeypatch.setattr(context, "observations", lambda *args: messages)
+    context.adopt = Mock()
+    with pytest.raises(ValueError, match="mini tool observations do not align with recorded calls"):
+        context.accept_results(SimpleNamespace(tools=(1, 2)), calls, [1, 2])
+    context.adopt.assert_not_called()
+    assert context.messages == materials.context["messages"]
+    assert context.adoptions == []

@@ -4,6 +4,7 @@ import logging
 import time
 from copy import deepcopy
 
+from palinreplay.agents._mini_tools import pair_tool_messages
 from palinreplay.agents.mini import load_native
 from palinreplay.core.interfaces import AgentSnapshot, Payload
 
@@ -60,12 +61,10 @@ class ReplayContext:
         if not calls and not results and not history.tools:
             return []
         messages = self.observations(history, results)
-        if len(messages) != len(calls) or any(
-            msg.get("tool_call_id") != call.operation.tool_call_id
-            for msg, call in zip(messages, calls, strict=True)
-        ):
-            raise ValueError("mini tool observations do not align with recorded calls")
-        return self.adopt([(call, [msg]) for call, msg in zip(calls, messages, strict=True)], messages)
+        deliveries = pair_tool_messages(
+            calls, messages, error_message="mini tool observations do not align with recorded calls",
+        )
+        return self.adopt(deliveries, messages)
 
     def export(self, boundary):
         context = deepcopy(self.context)
