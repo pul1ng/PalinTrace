@@ -25,6 +25,7 @@ from palinreplay.core.errors import (
     RecordUsageError,
     StoreError,
 )
+from palinreplay.core.interfaces import Payload
 from palinreplay.core.models import (
     ArtifactRef,
     Attempt,
@@ -52,12 +53,14 @@ from palinreplay.core.serialization import json_bytes
 from palinreplay.diagnostics.metrics import CountingReader, timed
 from palinreplay.diagnostics.timing import span
 from palinreplay.storage.artifacts import ArtifactStore, plain_directory, sync_directory
+from palinreplay.storage.payloads import PayloadStore, is_shared
 
 __all__ = [
     "ConflictError", "IncompleteRecordError", "IntegrityError", "RecordStore", "StoreError", "store_path",
 ]
 
-STORE_VERSION = "palinreplay.store.v1"
+STORE_VERSION = "palinreplay.store.v2"
+LEGACY_STORE_VERSION = "palinreplay.store.v1"
 MODELS = {
     cls.__name__.lower(): cls
     for cls in (
@@ -102,18 +105,25 @@ class RecordStore:
         else:
             yield
 
-    def __init__(self, root: Path, connection: sqlite3.Connection, read_only: bool):
+    def __init__(
+        self, root: Path, connection: sqlite3.Connection, read_only: bool,
+        *, payload_layout: str = "shared",
+    ):
         self.root = root
         self._db = connection
         self._db.row_factory = sqlite3.Row
         self._artifacts = ArtifactStore(root / "artifacts")
+        self._payloads = PayloadStore(self._artifacts)
+        self.payload_layout = payload_layout
         self.read_only = read_only
         self._closed = False
         self._source_cache = None
         self._receipt_cache = None
 
     @classmethod
-    def create(cls, path: str | Path) -> RecordStore:
+    def create(cls, path: str | Path, *, payload_layout: str = "shared") -> RecordStore:
+        if payload_layout not in {"shared", "flat"}:
+            raise ValueError("payload_layout must be 'shared' or 'flat'")
         root = Path(path).absolute()
         root.mkdir(mode=0o700, parents=True, exist_ok=False)
         (root / "artifacts").mkdir(mode=0o700)
@@ -137,13 +147,14 @@ class RecordStore:
                     WHERE kind = 'node';
                 COMMIT;
             """)
-            db.execute("INSERT INTO metadata VALUES ('schema_version', ?)", (STORE_VERSION,))
+            version = STORE_VERSION if payload_layout == "shared" else LEGACY_STORE_VERSION
+            db.execute("INSERT INTO metadata VALUES ('schema_version', ?)", (version,))
             sync_directory(root)
             sync_directory(root.parent)
         except BaseException:
             db.close()
             raise
-        return cls(root, db, False)
+        return cls(root, db, False, payload_layout=payload_layout)
 
     @classmethod
     def open(cls, path: str | Path, *, read_only: bool = True) -> RecordStore:
@@ -158,11 +169,12 @@ class RecordStore:
         db = sqlite3.connect(catalog.as_uri() + f"?mode={mode}", uri=True, isolation_level=None)
         try:
             version = db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
-            if version is None or version[0] != STORE_VERSION:
+            if version is None or version[0] not in {STORE_VERSION, LEGACY_STORE_VERSION}:
                 raise IntegrityError("unsupported Record store schema version")
             db.execute("PRAGMA synchronous = FULL")
             db.execute("SELECT kind, id, run_id, ordinal, body, sha256 FROM records LIMIT 0")
-            store = cls(root, db, read_only)
+            layout = "shared" if version[0] == STORE_VERSION else "flat"
+            store = cls(root, db, read_only, payload_layout=layout)
         except (sqlite3.DatabaseError, IntegrityError) as exc:
             db.close()
             raise IntegrityError(f"cannot open Record catalog: {exc}") from exc
@@ -265,6 +277,18 @@ class RecordStore:
     def put_json(self, value, *, compress=False) -> ArtifactRef:
         return self._put_json_with_size(value, compress=compress)[0]
 
+    def put_payload(self, payload: Payload) -> ArtifactRef:
+        """Persist exact captured bytes, sharing canonical JSON in new stores."""
+        self._ensure_open(writing=True)
+        if not isinstance(payload, Payload):
+            raise TypeError("captured payload must be a Payload")
+        if self.payload_layout == "flat":
+            return self.put_bytes(payload.data, media_type=payload.media_type)
+        return self._payloads.put(payload)
+
+    def put_payload_json(self, value) -> ArtifactRef:
+        return self.put_payload(Payload.json(value))
+
     def _put_json_with_size(self, value, *, compress=False) -> tuple[ArtifactRef, int]:
         """Publish JSON once and return its exact pre-compression byte length."""
         import palinreplay.storage.codec as _json_codec
@@ -313,11 +337,24 @@ class RecordStore:
 
     def _verify_artifact(self, ref):
         self._ensure_open()
-        self._artifacts.verify_internal(ref)
+        if is_shared(ref.media_type):
+            self._payloads.read(ref)
+        else:
+            self._artifacts.verify_internal(ref)
 
     def read_bytes(self, ref: ArtifactRef) -> bytes:
         self._ensure_open()
         return self._artifacts.read(ref)
+
+    def read_payload(self, ref: ArtifactRef) -> Payload:
+        """Expand shared payloads; raw artifacts retain their exact bytes/media."""
+        self._ensure_open()
+        return self._payloads.read(ref)
+
+    def iter_payload_artifacts(self, ref: ArtifactRef) -> Iterator[ArtifactRef]:
+        """Yield distinct physical objects in a verified shared payload closure."""
+        self._ensure_open()
+        yield from self._payloads.iter_artifacts(ref)
 
     def export_artifact(self, ref: ArtifactRef, destination: str | Path) -> None:
         """Copy verified bytes to a new file, including when this store is read-only."""
@@ -328,13 +365,17 @@ class RecordStore:
         from palinreplay.storage.codec import decode
 
         try:
-            return json.loads(decode(self.read_bytes(ref), ref.media_type))
+            payload = self.read_payload(ref)
+            return json.loads(decode(payload.data, payload.media_type))
         except (ValueError, UnicodeError) as exc:
             raise IntegrityError(f"artifact is not valid JSON: {ref.sha256}") from exc
 
     def verify_artifact(self, ref: ArtifactRef) -> None:
         self._ensure_open()
-        self._artifacts.verify(ref)
+        if is_shared(ref.media_type):
+            self._payloads.read(ref)
+        else:
+            self._artifacts.verify(ref)
 
     def _decode(self, row: sqlite3.Row) -> Fact:
         if not isinstance(row["body"], str) or not isinstance(row["sha256"], str):
@@ -436,7 +477,7 @@ class RecordStore:
         seen = seen if seen is not None else set()
         for record in records:
             for ref in artifact_refs(record):
-                key = (ref.sha256, ref.size)
+                key = (ref.sha256, ref.size, ref.media_type)
                 if key not in seen:
                     self._verify_artifact(ref)
                     seen.add(key)
@@ -477,8 +518,9 @@ class RecordStore:
             key = (run_id, run.config.sha256, run.config.size, run.config.media_type)
             if key not in self._source_cache:
                 source = None
-                if run.config.media_type in JSON_TYPES:
-                    data = decode(self.read_bytes(run.config), run.config.media_type)
+                payload = self.read_payload(run.config)
+                if payload.media_type in JSON_TYPES:
+                    data = decode(payload.data, payload.media_type)
                     try:
                         config = json.loads(data)
                     except (ValueError, UnicodeError):
