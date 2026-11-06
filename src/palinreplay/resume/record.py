@@ -4,10 +4,9 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import fields
 
-from palinreplay.agents._mini_tools import encode_tool_result
+from palinreplay.agents._mini_tools import encode_tool_result, make_tool_adapter
 from palinreplay.agents.mini import load_native
 from palinreplay.core.errors import RecordUsageError
-from palinreplay.core.interfaces import CallAdapter, Payload
 from palinreplay.core.models import Node
 from palinreplay.resume.decision import ResumeDecision
 from palinreplay.resume.environment import saved_execution_config
@@ -162,13 +161,12 @@ def _execute_tool(session, step, action):
         session._record_attempt["tool_executions"] += 1
         return session.executor.execute(request)
 
-    adapter = CallAdapter(
-        name="resume.bash", execute=execute, capture_request=Payload.json,
+    adapter = make_tool_adapter(
+        name="resume.bash", execute=execute,
         capture_result=lambda result: encode_tool_result(
             result, native.BorrowedEnvironment.output(result),
             "error" if result.exit_code else "returned",
         ),
-        visibility="observed-attempt",
     )
     request = {"action": deepcopy(action), "cwd": config["cwd"], "env": config["env"],
                "interpreter": config["interpreter"], "timeout_sec": config["timeout"]}

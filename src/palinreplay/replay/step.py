@@ -2,8 +2,7 @@
 
 from contextlib import nullcontext
 
-from palinreplay.agents._mini_tools import encode_tool_result
-from palinreplay.core.interfaces import CallAdapter, Payload
+from palinreplay.agents._mini_tools import encode_tool_result, make_tool_adapter
 from palinreplay.replay.history import supply_history
 
 
@@ -28,13 +27,13 @@ def execute_step(recorder, context, executor, history, *, on_result=None, stats=
             with stats.timed("execution") if stats else nullcontext():
                 return executor.execute(request)
 
-        adapter = CallAdapter(
-            name="mini.bash", execute=execute, capture_request=Payload.json,
+        adapter = make_tool_adapter(
+            name="mini.bash", execute=execute,
             capture_result=lambda result: encode_tool_result(
                 result, context.native.BorrowedEnvironment.output(result),
                 "unknown" if type(result.exit_code) is not int else
                 "error" if result.exit_code else "returned",
-            ), visibility="observed-attempt",
+            ),
         )
         call = step.tool(adapter, tool.request, tool_call_id=tool.source["tool_call_id"])
         calls.append(call)
