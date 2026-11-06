@@ -149,18 +149,18 @@ class PayloadStore:
             raise TypeError("captured payload must be a Payload")
         # Restrict optimization to exact canonical round trips. Whitespace,
         # duplicate keys, alternate numeric spellings and opaque media survive.
-        if payload.media_type != "application/json":
+        if payload.media_type != "application/json" or len(payload.data) <= INLINE_BYTES:
             return self.artifacts.put(payload.data, payload.media_type)
         try:
             value = json.loads(payload.data)
             canonical = json_bytes(value)
         except (ValueError, UnicodeError, TypeError, RecursionError):
             return self.artifacts.put(payload.data, payload.media_type)
-        if canonical != payload.data or len(canonical) <= INLINE_BYTES:
+        if canonical != payload.data:
             return self.artifacts.put(payload.data, payload.media_type)
         try:
             with self.scope():
-                token = self._encode(value)
+                token = self._encode(value, encoded=canonical)
         except (ValueError, RecursionError):
             # Deep but otherwise valid canonical JSON remains a raw payload.
             return self.artifacts.put(payload.data, payload.media_type)
@@ -175,8 +175,8 @@ class PayloadStore:
         }
         return self.artifacts.put(json_bytes(root), ROOT_MEDIA)
 
-    def _save(self, value):
-        data = json_bytes(value)
+    def _save(self, value, *, encoded=None):
+        data = json_bytes(value) if encoded is None else encoded
         cache = self._scope.get()
         ref = cache.published.get(data) if cache is not None else None
         if ref is not None:
@@ -188,8 +188,9 @@ class PayloadStore:
                 cache.remember(cache.published, data, ref, len(data))
         return ref.model_dump(mode="json")
 
-    def _encode(self, value, depth=0):
-        if len(json_bytes(value)) <= INLINE_BYTES:
+    def _encode(self, value, depth=0, *, encoded=None):
+        data = json_bytes(value) if encoded is None else encoded
+        if len(data) <= INLINE_BYTES:
             return ["value", value]
         if depth > 64:
             raise ValueError("payload exceeds the shared encoding depth")
@@ -212,7 +213,9 @@ class PayloadStore:
         token = (["object", [[key, self._encode(item, depth + 1)]
                              for key, item in sorted(value.items())]]
                  if isinstance(value, dict) else ["value", value])
-        return ["ref", self._save(token)] if len(json_bytes(token)) > INLINE_BYTES else token
+        encoded = json_bytes(token)
+        return (["ref", self._save(token, encoded=encoded)]
+                if len(encoded) > INLINE_BYTES else token)
 
     def read(self, ref: ArtifactRef, *, data: bytes | None = None) -> Payload:
         if not is_shared(ref.media_type):

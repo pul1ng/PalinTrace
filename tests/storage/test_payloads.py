@@ -9,7 +9,13 @@ import palinreplay.storage.payloads as payload_storage
 from palinreplay.core.interfaces import Payload
 from palinreplay.core.models import Run
 from palinreplay.core.serialization import json_bytes
-from palinreplay.storage.payloads import FANOUT, NODE_MEDIA, ROOT_MEDIA, logical_identity
+from palinreplay.storage.payloads import (
+    FANOUT,
+    INLINE_BYTES,
+    NODE_MEDIA,
+    ROOT_MEDIA,
+    logical_identity,
+)
 from palinreplay.storage.store import IntegrityError, RecordStore
 
 
@@ -24,6 +30,42 @@ def path(store, ref):
 
 def closure(store, ref):
     return {item.sha256: item for item in store.iter_payload_artifacts(ref)}
+
+
+@pytest.mark.parametrize("data", [b'{}\n', b'{ "x":1,"x":2 }\r\n', b'not-json', b'x' * INLINE_BYTES])
+def test_small_payload_preserves_bytes_without_json_processing(tmp_path, monkeypatch, data):
+    def unused(*args, **kwargs):
+        raise AssertionError("small raw payloads need no JSON parsing or encoding")
+
+    with RecordStore.create(tmp_path / "store") as store:
+        monkeypatch.setattr(payload_storage.json, "loads", unused)
+        monkeypatch.setattr(payload_storage, "json_bytes", unused)
+        payload = Payload(data, "application/json")
+        ref = store.put_payload(payload)
+        assert ref.media_type == payload.media_type
+        assert store.read_payload(ref) == payload
+
+
+def test_shared_encoder_reuses_canonical_root_and_serialized_tokens(tmp_path, monkeypatch):
+    content = "repeated text " * 2000
+    value = {"content": content}
+    payload = Payload.json(value)
+    encoded_value, encoded_leaf = payload.data, json_bytes(["value", content])
+    encoded = []
+    original = payload_storage.json_bytes
+
+    def encode(value):
+        data = original(value)
+        encoded.append(data)
+        return data
+
+    with RecordStore.create(tmp_path / "store") as store:
+        monkeypatch.setattr(payload_storage, "json_bytes", encode)
+        ref = store.put_payload(payload)
+        assert encoded.count(encoded_value) == 1
+        assert encoded.count(encoded_leaf) == 1
+        assert ref.media_type == ROOT_MEDIA
+        assert store.read_payload(ref) == payload
 
 
 @pytest.mark.parametrize("payload", [
