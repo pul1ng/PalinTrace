@@ -6,6 +6,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from palinreplay.core.errors import RecordUsageError
+
 
 def _positive_int(value):
     try:
@@ -49,10 +51,20 @@ def _load_model(config_path):
     return LLMConfig.load(config_path).model
 
 
+def _select_start(args, model):
+    from palinreplay.resume import select_resume_start
+
+    return select_resume_start(args.source, args.start, run_id=args.run_id,
+                               model=model, max_steps=args.max_steps)
+
+
 def execute(args):
+    phase = "configuration"
     try:
         model = _load_model(args.llm_config)
-        print(f"Model: {model}")
+        phase = "source selection"
+        start = _select_start(args, model)
+        print(f"Source: C{start.node.index} ({start.node.node_id}), Run {start.node.run_id}")
         return 0
     except ValidationError as error:
         fields = ", ".join(
@@ -60,8 +72,10 @@ def execute(args):
             for item in error.errors(include_input=False, include_context=False, include_url=False)
         )
         print(f"error: invalid model configuration fields: {fields}", file=sys.stderr)
+    except RecordUsageError as error:
+        print(f"error: {error}", file=sys.stderr)
     except FileNotFoundError:
-        print("error: model configuration file not found", file=sys.stderr)
+        print(f"error: Resume {phase} file or directory not found", file=sys.stderr)
     except Exception as error:
-        print(f"error: Resume configuration failed ({type(error).__name__})", file=sys.stderr)
+        print(f"error: Resume {phase} failed ({type(error).__name__})", file=sys.stderr)
     return 1

@@ -4,6 +4,8 @@ import pytest
 
 from palinreplay.cli import main
 from palinreplay.cli.app import build_parser
+from palinreplay.storage.store import RecordStore
+from tests.resume.test_start import history
 
 
 def test_resume_help(capsys):
@@ -139,3 +141,67 @@ def test_configuration_error_is_early_and_does_not_print_secrets(
     assert "error:" in output.err
     assert "test-resume-secret" not in output.out + output.err
     assert not (tmp_path / "outputs").exists()
+
+
+@pytest.fixture
+def source_record(tmp_path):
+    path = tmp_path / "source" / "record"
+    with RecordStore.create(path) as store:
+        recorder, _ = history(store)
+        node = recorder.current_node
+        recorder.finish()
+    return path, node
+
+
+@pytest.mark.parametrize("use_store", [False, True])
+@pytest.mark.parametrize("full_id", [False, True])
+def test_cli_selection_reuses_source_resolution(
+    monkeypatch, private_config, source_record, use_store, full_id,
+):
+    import palinreplay.cli.resume as cli
+    import palinreplay.sandbox.client as sandbox
+    from palinreplay.llm import OpenAIChatClient
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("selection must not restore or request a model")
+
+    monkeypatch.setattr(sandbox, "connect_docker", forbidden)
+    monkeypatch.setattr(OpenAIChatClient, "complete", forbidden)
+    path, node = source_record
+    args = build_parser().parse_args([
+        "resume", str(path if use_store else path.parent),
+        "--from", node.node_id if full_id else "C20", "--max-steps", "2",
+    ])
+    selected = cli._select_start(args, cli._load_model(private_config))
+    assert selected.source_store == path
+    assert selected.node == node
+    assert selected.model == "branch-model"
+    assert selected.max_steps == 2
+
+
+def test_source_ambiguity_requires_run_and_preserves_selected_node(private_config, source_record):
+    import palinreplay.cli.resume as cli
+    from palinreplay.core.errors import RecordUsageError
+
+    path, first = source_record
+    with RecordStore.open(path, read_only=False) as store:
+        recorder, _ = history(store)
+        second = recorder.current_node
+        recorder.finish()
+    args = build_parser().parse_args(["resume", str(path), "--from", "C20"])
+    with pytest.raises(RecordUsageError, match="use --run"):
+        cli._select_start(args, "branch-model")
+    for node in (first, second):
+        args.run_id = node.run_id
+        assert cli._select_start(args, "branch-model").node == node
+
+
+@pytest.mark.parametrize("selector,run_id", [("C21", None), ("missing", None), ("C20", "missing")])
+def test_cli_source_errors_are_actionable(private_config, source_record, capsys, selector, run_id):
+    path, _ = source_record
+    options = [] if run_id is None else ["--run", run_id]
+    assert main(["resume", str(path), "--from", selector,
+                 "--llm-config", str(private_config), *options]) == 1
+    output = capsys.readouterr()
+    assert "no committed node" in output.err
+    assert "test-resume-secret" not in output.out + output.err
