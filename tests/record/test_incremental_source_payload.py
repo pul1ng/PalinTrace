@@ -25,7 +25,7 @@ from tests.helpers.recorder_smoke import FakeStateBackend
 def materials(tmp_path):
     with RecordStore.create(tmp_path / "source") as store:
         values = {
-            role: {"role": role, "entries": [{"content": "repeated source message"}] * 40}
+            role: {"role": role, "entries": [{"content": "repeated source message " * 20}] * 40}
             for role in ("config", "context", "input_position")
         }
         refs = {role: store.put_payload_json(value) for role, value in values.items()}
