@@ -71,3 +71,71 @@ def test_resume_defaults():
     assert args.max_steps == 20
     assert args.run_id is args.llm_config is args.instruction is args.services_config is None
     assert args.output is None
+
+
+@pytest.fixture
+def private_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for name in ("PALINREPLAY_LLM_CONFIG", "OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    path = tmp_path / "private.toml"
+    path.write_text('[llm]\nmodel = "branch-model"\napi_key = "test-resume-secret"\n')
+    return path
+
+
+@pytest.mark.parametrize("mode", ["explicit", "default-file", "environment-path", "environment-only"])
+def test_model_loading_reuses_configuration_rules_without_requests(
+    tmp_path, monkeypatch, capsys, private_config, mode,
+):
+    import palinreplay.cli.resume as cli
+    import palinreplay.llm as llm
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("configuration loading must not create a model client")
+
+    monkeypatch.setattr(llm, "OpenAI", forbidden)
+    path = None
+    if mode == "explicit":
+        path = private_config
+    elif mode == "default-file":
+        default = tmp_path / "config/llm/llm.toml"
+        default.parent.mkdir(parents=True)
+        default.write_bytes(private_config.read_bytes())
+    elif mode == "environment-path":
+        monkeypatch.setenv("PALINREPLAY_LLM_CONFIG", str(private_config))
+    else:
+        monkeypatch.setenv("OPENAI_MODEL", "branch-model")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-resume-secret")
+    assert cli._load_model(path) == "branch-model"
+    output = capsys.readouterr()
+    assert "test-resume-secret" not in output.out + output.err
+    assert not (tmp_path / "outputs").exists()
+
+
+@pytest.mark.parametrize("document", [
+    None,
+    '[llm]\napi_key = "test-resume-secret"\n',
+    '[llm]\nmodel = "branch-model"\n',
+    '[llm]\nmodel = "branch-model"\napi_key = "test-resume-secret"\n'
+    'base_url = "https://test-resume-secret@example.invalid"\n',
+    'api_key = "test-resume-secret"\n',
+    '[llm]\nmodel = "branch-model"\napi_key = "test-resume-secret"\nbad = [\n',
+])
+def test_configuration_error_is_early_and_does_not_print_secrets(
+    tmp_path, monkeypatch, capsys, private_config, document,
+):
+    import palinreplay.sandbox.client as sandbox
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("configuration errors must precede Docker")
+
+    monkeypatch.setattr(sandbox, "connect_docker", forbidden)
+    if document is None:
+        private_config.unlink()
+    else:
+        private_config.write_text(document)
+    assert main(["resume", "source", "--from", "C20", "--llm-config", str(private_config)]) == 1
+    output = capsys.readouterr()
+    assert "error:" in output.err
+    assert "test-resume-secret" not in output.out + output.err
+    assert not (tmp_path / "outputs").exists()

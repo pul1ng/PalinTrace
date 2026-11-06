@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from pydantic import ValidationError
+
 
 def _positive_int(value):
     try:
@@ -41,6 +43,25 @@ def add_commands(commands):
                         help="new independent directory (default: outputs/resume/YYMMDD_HHMMSS_TASK/)")
 
 
+def _load_model(config_path):
+    from palinreplay.llm import LLMConfig
+
+    return LLMConfig.load(config_path).model
+
+
 def execute(args):
-    print("error: Resume execution is not connected yet", file=sys.stderr)
+    try:
+        model = _load_model(args.llm_config)
+        print(f"Model: {model}")
+        return 0
+    except ValidationError as error:
+        fields = ", ".join(
+            ".".join(map(str, item["loc"]))
+            for item in error.errors(include_input=False, include_context=False, include_url=False)
+        )
+        print(f"error: invalid model configuration fields: {fields}", file=sys.stderr)
+    except FileNotFoundError:
+        print("error: model configuration file not found", file=sys.stderr)
+    except Exception as error:
+        print(f"error: Resume configuration failed ({type(error).__name__})", file=sys.stderr)
     return 1
