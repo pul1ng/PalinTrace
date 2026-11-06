@@ -205,3 +205,44 @@ def test_cli_source_errors_are_actionable(private_config, source_record, capsys,
     output = capsys.readouterr()
     assert "no committed node" in output.err
     assert "test-resume-secret" not in output.out + output.err
+
+
+def test_default_output_uses_the_selected_run_task_without_creating_directory(tmp_path, monkeypatch):
+    import palinreplay.cli.resume as cli
+    from palinreplay.core.interfaces import BoundaryAdapter, Payload
+    from palinreplay.record.recorder import Recorder
+    from tests.helpers.recorder_smoke import FakeAgent, FakeStateBackend
+
+    path = tmp_path / "many-runs" / "record"
+    with RecordStore.create(path) as store:
+        for task in ("first-task", "selected task"):
+            agent, backend = FakeAgent(), FakeStateBackend()
+            with Recorder(store, task_id=task, agent_name="fixture", agent_version="1",
+                          config=Payload.json({}),
+                          boundary=BoundaryAdapter(agent.export, backend.capture)) as recorder:
+                node = recorder.current_node
+                recorder.finish()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("palinreplay.cli.outputs.timestamp", lambda: "261106_123456")
+    args = build_parser().parse_args(["resume", str(path), "--from", "C0", "--run", node.run_id])
+    start = cli._select_start(args, "branch-model")
+    output = cli._output_path(args, start)
+    assert output == tmp_path / "outputs/resume/261106_123456_selected_task"
+    assert not output.parent.exists()
+
+
+def test_explicit_output_is_not_created_or_renamed(source_record, monkeypatch):
+    import palinreplay.cli.resume as cli
+
+    path, _ = source_record
+    args = build_parser().parse_args([
+        "resume", str(path), "--from", "C20", "--output", "custom/branch",
+    ])
+    start = cli._select_start(args, "branch-model")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("explicit output selection must not reread source metadata")
+
+    monkeypatch.setattr(RecordStore, "open", forbidden)
+    assert cli._output_path(args, start) == Path("custom/branch")
+    assert not Path("custom").exists()

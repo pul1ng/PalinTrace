@@ -6,7 +6,10 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from palinreplay.cli.outputs import default_output
 from palinreplay.core.errors import RecordUsageError
+from palinreplay.core.models import Run
+from palinreplay.storage.store import RecordStore
 
 
 def _positive_int(value):
@@ -58,13 +61,24 @@ def _select_start(args, model):
                                model=model, max_steps=args.max_steps)
 
 
+def _output_path(args, start):
+    if args.output is not None:
+        return args.output
+    with RecordStore.open(start.source_store, read_only=True) as store:
+        task = store.get(Run, start.node.run_id).task_id
+    return default_output("resume", task)
+
+
 def execute(args):
     phase = "configuration"
     try:
         model = _load_model(args.llm_config)
         phase = "source selection"
         start = _select_start(args, model)
+        phase = "output selection"
+        output = _output_path(args, start)
         print(f"Source: C{start.node.index} ({start.node.node_id}), Run {start.node.run_id}")
+        print(f"Output: {output}")
         return 0
     except ValidationError as error:
         fields = ", ".join(
