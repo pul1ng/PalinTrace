@@ -31,6 +31,11 @@ SPEC.loader.exec_module(benchmark)
     Payload(b'\xff\xfe\x00"invalid utf8"', "application/json"),
     Payload(b'{"same":"bytes"}', "application/vnd.fixture+json; charset=utf-8"),
     Payload(b'{"same":"bytes"}', "text/plain; charset=utf-8"),
+    Payload(b'{ "body": "' + b"space" * 3000 + b'" }\r\n', "application/json"),
+    Payload(b'{"body":"' + b"x" * 16000 + b'","key":1,"key":2}', "application/json"),
+    Payload(b'{"body":"' + b"x" * 16000 + b'","number":1e+02}', "application/json"),
+    Payload(b'{"body":"' + b"x" * 16000, "application/json"),
+    Payload(b'{"body":"' + b"x" * 16000 + b'\xff"}', "application/json"),
 ])
 @pytest.mark.parametrize("layout", ["flat", "shared"])
 def test_exact_raw_bytes_and_media_type_survive_close_and_reopen(tmp_path, payload, layout):
