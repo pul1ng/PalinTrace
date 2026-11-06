@@ -33,7 +33,7 @@ def test_terminal_keeps_actual_progress_separate_from_node_number(mode, status, 
     output = StringIO()
     console = rich.Console(file=output, force_terminal=True, width=110)
     with ReplayProgressDisplay(mode, stream=output, console=console) as progress:
-        display = progress._progress
+        display = progress._live
         total = 0 if completed == 0 else 20
         progress(ProgressEvent("preparing", total_steps=total))
         progress(ProgressEvent("source-reference", source_step=20, completed_steps=0))
@@ -66,7 +66,7 @@ def test_terminal_is_restored_after_error_or_cancellation(error):
     output = StringIO()
     console = rich.Console(file=output, force_terminal=True, width=110)
     with pytest.raises(error), ReplayProgressDisplay(console=console) as progress:
-        display = progress._progress
+        display = progress._live
         progress(ProgressEvent("preparing", total_steps=43))
         raise error("private error details")
     assert not display.live.is_started and "\x1b[?25h" in output.getvalue()

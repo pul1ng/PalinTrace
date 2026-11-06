@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from palinreplay.cli._progress import ProgressDisplay
-from palinreplay.core.progress import ProgressEvent, ProgressReporter
+from palinreplay.core.progress import ProgressEvent
 
 
 def describe(event: ProgressEvent) -> str:
@@ -75,8 +75,6 @@ class RecordProgressDisplay(ProgressDisplay):
         self.committed_steps = 0
         self.last_node = "none"
         self.task_id = ""
-        self._live = None
-        self._notify = ProgressReporter(self._update)
 
     def _start_live(self):
         from rich.console import Group
@@ -123,11 +121,6 @@ class RecordProgressDisplay(ProgressDisplay):
         )
         self._live.start(refresh=True)
 
-    def __call__(self, event: ProgressEvent):
-        self._notify(event)
-        if self._notify.callback is None:
-            self._stop_live()
-
     def _update(self, event: ProgressEvent):
         if self.mode == "off":
             return
@@ -158,23 +151,3 @@ class RecordProgressDisplay(ProgressDisplay):
         else:
             elapsed = time.monotonic() - self._started
             print(f"[record {elapsed:.1f}s] {message}", file=self.stream, flush=True)
-
-    def _stop_live(self):
-        live, self._live = self._live, None
-        if live is not None:
-            try:
-                live.stop()
-            except Exception:
-                pass
-
-    def __exit__(self, exc_type, exc, traceback):
-        try:
-            if exc_type is not None and not self.finished:
-                self(
-                    ProgressEvent(
-                        "finished",
-                        status="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed",
-                    )
-                )
-        finally:
-            self._stop_live()

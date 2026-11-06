@@ -3,7 +3,7 @@
 import time
 
 from palinreplay.cli._progress import ProgressDisplay
-from palinreplay.core.progress import ProgressEvent, ProgressReporter
+from palinreplay.core.progress import ProgressEvent
 
 
 def describe(event: ProgressEvent) -> str:
@@ -35,8 +35,6 @@ class ReplayProgressDisplay(ProgressDisplay):
         super().__init__(mode, stream=stream, console=console)
         self.completed = 0
         self.total = None
-        self._progress = None
-        self._notify = ProgressReporter(self._update)
 
     def _start_live(self):
         from rich.progress import (
@@ -51,7 +49,7 @@ class ReplayProgressDisplay(ProgressDisplay):
         console = self._terminal_console()
         if console is None:
             return
-        self._progress = Progress(
+        self._live = Progress(
             SpinnerColumn("dots2"),
             TextColumn("Replay · {task.description}", markup=False),
             BarColumn(bar_width=20),
@@ -60,13 +58,8 @@ class ReplayProgressDisplay(ProgressDisplay):
             console=console, refresh_per_second=4,
             redirect_stdout=False, redirect_stderr=False,
         )
-        self._task = self._progress.add_task("读取历史轨迹", total=None)
-        self._progress.start()
-
-    def __call__(self, event: ProgressEvent):
-        self._notify(event)
-        if self._notify.callback is None:
-            self._stop_live()
+        self._task = self._live.add_task("读取历史轨迹", total=None)
+        self._live.start()
 
     def _update(self, event: ProgressEvent):
         if event.total_steps is not None:
@@ -77,29 +70,13 @@ class ReplayProgressDisplay(ProgressDisplay):
         if self.mode == "off":
             return
         message = describe(event)
-        if self._progress is not None:
-            self._progress.update(self._task, description=message,
+        if self._live is not None:
+            self._live.update(self._task, description=message,
                                   total=self.total, completed=self.completed)
             if self.finished:
-                self._progress.stop_task(self._task)
-                self._progress.refresh()
+                self._live.stop_task(self._task)
+                self._live.refresh()
         else:
             elapsed = time.monotonic() - self._started
             count = f" {self.completed}/{self.total}" if self.total is not None else ""
             print(f"[replay {elapsed:.1f}s{count}] {message}", file=self.stream, flush=True)
-
-    def _stop_live(self):
-        progress, self._progress = self._progress, None
-        if progress is not None:
-            try:
-                progress.stop()
-            except Exception:
-                pass
-
-    def __exit__(self, exc_type, exc, traceback):
-        try:
-            if exc_type is not None and not self.finished:
-                self(ProgressEvent("finished",
-                                   status="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed"))
-        finally:
-            self._stop_live()
