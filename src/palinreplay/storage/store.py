@@ -13,6 +13,7 @@ import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
@@ -69,6 +70,14 @@ MODELS = {
     )
 }
 T = TypeVar("T", bound=Fact)
+
+
+@dataclass(frozen=True)
+class _StepFacts:
+    operations: tuple[Operation, ...]
+    executions: tuple[Execution, ...]
+    events: tuple[Event, ...]
+    groups: tuple[ToolGroup, ...]
 
 
 def store_path(path: Path) -> Path:
@@ -588,7 +597,7 @@ class RecordStore:
                 }
             return self._receipt_cache[run_id]
 
-    def _relations(self, record: Fact) -> None:
+    def _relations(self, record: Fact, *, events: tuple[Event, ...] | None = None) -> None:
         """Validate durable relations, also usable when inspecting old history."""
         if not isinstance(record, State):
             if not isinstance(record, Run):
@@ -653,7 +662,7 @@ class RecordStore:
             self._same_run(record.run_id, step, execution, operation)
             if operation.step_id != step.step_id or operation.kind != "model":
                 raise IntegrityError("tool group must refer to this step's model response")
-            history = self._execution_events(execution)
+            history = self._execution_events(execution, events=events)
             if len(history) != 4 or history[1].outcome != "returned":
                 raise IncompleteRecordError("tool group requires an accepted model response")
         elif isinstance(record, RunEnd):
@@ -900,23 +909,27 @@ class RecordStore:
         seen.add(state.state_id)
         return records
 
-    def _step_records(self, step: Step, calls: Node | StepCalls) -> list[Fact]:
+    def _step_records(
+        self, step: Step, calls: Node | StepCalls, *, facts: _StepFacts | None = None
+    ) -> list[Fact]:
         records: list[Fact] = []
-        operations = [
+        operations = facts.operations if facts is not None else [
             o for o in self.list(Operation, run_id=step.run_id) if o.step_id == step.step_id
         ]
         tool_ids = {o.operation_id for o in operations if o.kind == "tool"}
         if tool_ids != set(calls.tool_operation_ids):
             raise IncompleteRecordError("declared tool group differs from recorded operations")
         op_ids = {o.operation_id for o in operations}
-        executions = [
+        executions = facts.executions if facts is not None else [
             e for e in self.list(Execution, run_id=step.run_id) if e.operation_id in op_ids
         ]
         if {e.operation_id for e in executions} != op_ids:
             raise IncompleteRecordError("operation has no recorded execution")
         events_by_execution = {}
         for execution in executions:
-            history = self._execution_events(execution)
+            history = self._execution_events(
+                execution, events=facts.events if facts is not None else None
+            )
             if len(history) < 2 or history[1].outcome == "unknown":
                 raise IncompleteRecordError(
                     f"execution result pending or unknown: {execution.execution_id}"
@@ -958,12 +971,14 @@ class RecordStore:
         for item in evidence:
             self._relations(item)
         records.extend(evidence)
-        groups = [g for g in self.list(ToolGroup, run_id=step.run_id) if g.step_id == step.step_id]
+        groups = facts.groups if facts is not None else [
+            g for g in self.list(ToolGroup, run_id=step.run_id) if g.step_id == step.step_id
+        ]
         if groups:
             if len(groups) != 1:
                 raise IntegrityError("multiple tool-group declarations for step")
             group = groups[0]
-            self._relations(group)
+            self._relations(group, events=facts.events if facts is not None else None)
             model_ops = [o for o in operations if o.kind == "model"]
             declared = tuple(self.get(Operation, oid) for oid in calls.tool_operation_ids)
             if (
@@ -987,19 +1002,29 @@ class RecordStore:
             if len(groups) != 1:
                 raise IncompleteRecordError("step needs an explicit whole tool group, including empty")
             group = groups[0]
-            operations = {
-                o.tool_call_id: o for o in self.list(Operation, run_id=step.run_id)
-                if o.step_id == step_id and o.kind == "tool"
-            }
+            step_operations = tuple(
+                o for o in self.list(Operation, run_id=step.run_id) if o.step_id == step_id
+            )
+            operations = {o.tool_call_id: o for o in step_operations if o.kind == "tool"}
             if set(operations) != set(group.tool_call_ids):
                 raise IncompleteRecordError("declared tool group has missing or extra calls")
             tools = tuple(operations[tool_id] for tool_id in group.tool_call_ids)
+            operation_ids = {o.operation_id for o in step_operations}
+            facts = _StepFacts(
+                operations=step_operations,
+                executions=tuple(
+                    e for e in self.list(Execution, run_id=step.run_id)
+                    if e.operation_id in operation_ids
+                ),
+                events=self.list(Event, run_id=step.run_id),
+                groups=tuple(groups),
+            )
             selected = []
             for operation in tools:
                 accepted = [
-                    e for e in self.list(Execution, run_id=step.run_id)
+                    e for e in facts.executions
                     if e.operation_id == operation.operation_id
-                    and len(self._execution_events(e)) == 4
+                    and len(self._execution_events(e, events=facts.events)) == 4
                 ]
                 if len(accepted) != 1:
                     raise IncompleteRecordError("each declared tool requires one accepted result")
@@ -1009,10 +1034,10 @@ class RecordStore:
                 tool_operation_ids=tuple(o.operation_id for o in tools),
                 tool_execution_ids=tuple(selected),
                 accepted_event_sequence=max(
-                    (e.sequence for e in self.list(Event, run_id=step.run_id)), default=0
+                    (e.sequence for e in facts.events), default=0
                 ),
             )
-            self._verify_refs(self._step_records(step, calls))
+            self._verify_refs(self._step_records(step, calls, facts=facts))
             return calls
 
     def _node_records(self, node: Node, seen: set | None = None) -> list[Fact]:
