@@ -123,6 +123,7 @@ def test_local_image_is_pinned_and_container_is_created_but_not_started():
         assert options["image"] == IMAGE_ID and options["platform"] == "linux/amd64"
         assert options["working_dir"] == spec.workdir and options["environment"] == spec.env
         assert options["entrypoint"] == ["sleep"] and options["command"] == ["infinity"]
+        assert options["init"] is True
         assert not options["privileged"] and options["volumes"] == options["ports"] == {}
         assert not options["use_config_proxy"] and not options["auto_remove"]
         assert "devices" not in options and "cap_add" not in options
