@@ -1040,7 +1040,9 @@ class RecordStore:
             self._verify_refs(self._step_records(step, calls, facts=facts))
             return calls
 
-    def _node_records(self, node: Node, seen: set | None = None) -> list[Fact]:
+    def _node_records(
+        self, node: Node, seen: set | None = None, *, events: tuple[Event, ...] | None = None
+    ) -> list[Fact]:
         run, attempt = self.get(Run, node.run_id), self.get(Attempt, node.attempt_id)
         self._same_run(node.run_id, attempt)
         records: list[Fact] = [run, attempt, node]
@@ -1066,7 +1068,26 @@ class RecordStore:
             ):
                 raise IntegrityError("node and step boundaries differ")
             records.append(step)
-            records.extend(self._step_records(step, node))
+            facts = None
+            if events is not None:
+                operations = tuple(
+                    o for o in self.list(Operation, run_id=step.run_id)
+                    if o.step_id == step.step_id
+                )
+                operation_ids = {o.operation_id for o in operations}
+                facts = _StepFacts(
+                    operations=operations,
+                    executions=tuple(
+                        e for e in self.list(Execution, run_id=step.run_id)
+                        if e.operation_id in operation_ids
+                    ),
+                    events=events,
+                    groups=tuple(
+                        g for g in self.list(ToolGroup, run_id=step.run_id)
+                        if g.step_id == step.step_id
+                    ),
+                )
+            records.extend(self._step_records(step, node, facts=facts))
         records.extend(self._state_records(self.get(State, node.state_id), require_complete=True))
         self._verify_refs(records, seen)
         return records
@@ -1077,19 +1098,20 @@ class RecordStore:
         node = Node.model_validate(node)
         with self._external_checks(), self._transaction():
             existing = self._existing(node)
-            self._node_records(node)
+            events = self.list(Event, run_id=node.run_id)
+            self._node_records(node, events=events)
             if existing:
                 return existing
             self._attempt_open(node.attempt_id)
             tip = self._tip(node.run_id)
             if node.index == 0:
-                if tip is not None or self.list(Event, run_id=node.run_id):
+                if tip is not None or events:
                     raise ConflictError("C0 must precede execution history")
             elif (tip.node_id if tip else None) != node.parent_node_id or (
                 tip is not None and node.index != tip.index + 1
             ):
                 raise ConflictError("node does not extend the current history")
-            cursor = max((e.sequence for e in self.list(Event, run_id=node.run_id)), default=0)
+            cursor = max((e.sequence for e in events), default=0)
             if node.accepted_event_sequence != cursor:
                 raise IncompleteRecordError(
                     "node input boundary does not match persisted event position"
