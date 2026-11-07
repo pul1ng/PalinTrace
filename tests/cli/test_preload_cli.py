@@ -135,6 +135,28 @@ def test_batch_cli_selects_tasks_and_passes_configuration(
         assert calls.count("prepare") == 1 and calls.count("ready") == 2
 
 
+def test_batch_progress_reports_order_paths_durations_and_summary(
+    tmp_path, batch_package, cli_runtime, capsys,
+):
+    output = tmp_path / "batch"
+    assert run(
+        batch_package, output, "--task-id", "example__repo-3", "--task-id", "example__repo-1",
+    ) == 0
+    message = capsys.readouterr()
+    assert message.err == ""
+    index = json.loads((output / "preloads.json").read_text())
+    positions = []
+    for number, entry in enumerate(index["tasks"], start=1):
+        task_id = entry["task_id"]
+        progress = f"[{number}/2] {task_id}"
+        result = f"{task_id}: {output / entry['path']} ({entry['duration_sec']:.3f}s)"
+        positions.extend([message.out.index(progress), message.out.index(result)])
+    assert positions == sorted(positions)
+    assert f"Batch: {output.absolute()}" in message.out
+    assert "Completed: 2/2" in message.out and "Status: completed" in message.out
+    assert "Time: " in message.out
+
+
 def test_single_task_package_without_selector_keeps_root_layout(tmp_path, row, cli_runtime):
     source = prepared_package(tmp_path, row)
     output = tmp_path / "base"
@@ -173,7 +195,9 @@ def test_batch_failure_preserves_success_and_stops(tmp_path, batch_package, cli_
     output = tmp_path / "batch"
     assert run(batch_package, output) == 1
     message = capsys.readouterr()
-    assert "private error details" not in message.err and "Batch:" not in message.out
+    assert "private error details" not in message.err
+    assert "Completed: 1/3" in message.out and "Status: failed" in message.out
+    assert "[3/3]" not in message.out
     index = json.loads((output / "preloads.json").read_text())
     assert index["status"] == "failed"
     assert [entry["status"] for entry in index["tasks"]] == ["completed", "failed", "pending"]
@@ -198,7 +222,8 @@ def test_batch_index_failure_keeps_published_base_and_returns_failure(
     output = tmp_path / "batch"
     assert run(batch_package, output) == 1
     message = capsys.readouterr()
-    assert "private filesystem details" not in message.err and "Batch:" not in message.out
+    assert "private filesystem details" not in message.err
+    assert "Completed: 1/3" in message.out and "Status: failed" in message.out
     assert "OSError" in message.err
     first = output / "example__repo-1"
     assert BtrfsPreloadRecord.select(
@@ -226,7 +251,8 @@ def test_batch_index_failure_at_boundaries_never_claims_success(
     output = tmp_path / "batch"
     assert run(batch_package, output) == 1
     message = capsys.readouterr()
-    assert "OSError" in message.err and "Batch:" not in message.out
+    assert "OSError" in message.err and "Status: failed" in message.out
+    assert f"Completed: {expected_builds}/3" in message.out
     assert len(cli_runtime[1].created) == expected_builds
     if expected_builds:
         assert all(open_preload(output / f"example__repo-{number}") for number in range(1, 4))
@@ -248,7 +274,8 @@ def test_batch_cancellation_keeps_first_base_and_stops(
     output = tmp_path / "batch"
     assert run(batch_package, output) == 130
     message = capsys.readouterr()
-    assert "cancelled" in message.err and "Batch:" not in message.out
+    assert "cancelled" in message.err and "Status: cancelled" in message.out
+    assert "Completed: 1/3" in message.out and "[3/3]" not in message.out
     index = json.loads((output / "preloads.json").read_text())
     assert index["status"] == "cancelled"
     assert [entry["status"] for entry in index["tasks"]] == ["completed", "cancelled", "pending"]

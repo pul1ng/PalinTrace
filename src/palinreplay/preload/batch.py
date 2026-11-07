@@ -28,7 +28,9 @@ def select_preload_inputs(source: str | Path, task_ids: Sequence[str] = ()) -> l
     return [_load_source(source, task_id) for task_id in (task_ids or available)]
 
 
-def build_preloads(source, inputs, output, paths, *, initialization, public_env):
+def build_preloads(
+    source, inputs, output, paths, *, initialization, public_env, on_start=None, on_success=None,
+):
     """Build each preload in order and publish a progressively updated index."""
     output = Path(output).absolute()
     paths = [Path(path).absolute() for path in paths]
@@ -48,9 +50,13 @@ def build_preloads(source, inputs, output, paths, *, initialization, public_env)
     entry = None
     try:
         write_json(index_path, index)
-        for item, path, entry in zip(inputs, paths, index["tasks"], strict=True):
+        for number, (item, path, entry) in enumerate(
+            zip(inputs, paths, index["tasks"], strict=True), start=1,
+        ):
             entry["status"] = "building"
             write_json(index_path, index, replace=True)
+            if on_start is not None:
+                on_start(number, len(inputs), item)
             try:
                 keys = public_keys(item, public_env)
                 result = build_preload(
@@ -68,8 +74,10 @@ def build_preloads(source, inputs, output, paths, *, initialization, public_env)
                 status="completed", preload_id=result.preload_id,
                 path=str(result.path.relative_to(output)), duration_sec=result.duration_sec,
             )
-            write_json(index_path, index, replace=True)
             results.append(result)
+            if on_success is not None:
+                on_success(item, result)
+            write_json(index_path, index, replace=True)
         index["status"] = "completed"
         write_json(index_path, index, replace=True)
     except KeyboardInterrupt as error:

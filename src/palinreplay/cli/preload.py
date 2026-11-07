@@ -76,6 +76,23 @@ def preload_output_paths(source, inputs, output=None):
 def execute(args) -> int:
     started = time.monotonic()
     phase = "input"
+    batch_total = 0
+    batch_completed = 0
+
+    def show_start(number, total, item):
+        print(f"[{number}/{total}] {item.task_id}", flush=True)
+
+    def show_success(item, result):
+        nonlocal batch_completed
+        batch_completed += 1
+        print(f"{item.task_id}: {result.path} ({result.duration_sec:.3f}s)", flush=True)
+
+    def show_batch_summary(status):
+        print(f"Batch: {args.output.absolute()}")
+        print(f"Completed: {batch_completed}/{batch_total}")
+        print(f"Time: {time.monotonic() - started:.3f}s")
+        print(f"Status: {status}")
+
     try:
         with cancellation_signals():
             if any(not key or "=" in key or "\x00" in key for key in args.public_env):
@@ -97,19 +114,23 @@ def execute(args) -> int:
                     selected[0], paths[0], initialization=initialization, public_env_keys=keys,
                 )
             else:
+                batch_total = len(selected)
                 build_preloads(
                     args.source, selected, args.output, paths,
                     initialization=initialization, public_env=args.public_env,
+                    on_start=show_start, on_success=show_success,
                 )
         if len(selected) == 1:
             print(f"Preload: {result.preload_id}")
             print(f"Path: {result.path}")
             print(f"Time: {time.monotonic() - started:.3f}s")
         else:
-            print(f"Batch: {args.output.absolute()}")
+            show_batch_summary("completed")
         return 0
     except KeyboardInterrupt:
         print("error: preload cancelled", file=sys.stderr)
+        if batch_total:
+            show_batch_summary("cancelled")
         return 130
     except RecordUsageError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -132,4 +153,6 @@ def execute(args) -> int:
         else:
             message = "check Docker, the image, initialization checks and the Btrfs tools and bootstrap images"
         print(f"error: preload {phase} failed ({type(error).__name__}); {message}", file=sys.stderr)
+    if batch_total:
+        show_batch_summary("failed")
     return 1
