@@ -150,7 +150,7 @@ def _build_preload(
                 pool = BtrfsPool.create(client)
                 with tempfile.TemporaryDirectory(prefix="palin-btrfs-import-") as temporary:
                     archive = Path(temporary) / "rootfs.tar"
-                    inventory = _rootfs.export_inventory(container, archive)
+                    inventory = _rootfs.export_inventory(container, archive, hash_archive=False)
                     if _snapshot(environment, inputs, public_env_keys, owner, stopped=True) != (
                         launch,
                         stamp,

@@ -42,7 +42,10 @@ class Export:
 
 
 @pytest.mark.parametrize("chunk", [1, 511, 512, 10240, 1024 * 1024])
-def test_stream_matches_offline_manifest_offsets_and_unchanged_tar(tmp_path, chunk, monkeypatch):
+@pytest.mark.parametrize("hash_archive", [True, False])
+def test_stream_matches_offline_manifest_offsets_and_unchanged_tar(
+    tmp_path, chunk, monkeypatch, hash_archive,
+):
     members = [
         *files(),
         ("long/" + "x" * 180 + "/中文", tarfile.REGTYPE, b"pax-data", 0o600),
@@ -66,10 +69,12 @@ def test_stream_matches_offline_manifest_offsets_and_unchanged_tar(tmp_path, chu
     source = Export(raw, chunk=chunk)
     with monkeypatch.context() as patch, measure() as metrics:
         patch.setattr(Path, "open", no_reread)
-        result = _rootfs.export_inventory(source, staged)
+        result = _rootfs.export_inventory(source, staged, hash_archive=hash_archive)
     assert (result.logical, result.positions) == expected
     assert staged.read_bytes() == raw
-    assert result.sha256 == hashlib.sha256(raw).hexdigest()
+    assert result.sha256 == (hashlib.sha256(raw).hexdigest() if hash_archive else None)
+    if not hash_archive:
+        assert result.timings["archive_hash_sec"] == 0
     assert result.size == len(raw) and source.closed and source.eof
     assert metrics.counters["read_bytes"] == 0
     assert metrics.counters["exported_bytes"] == metrics.counters["written_bytes"] == len(raw)
@@ -77,8 +82,11 @@ def test_stream_matches_offline_manifest_offsets_and_unchanged_tar(tmp_path, chu
 
 
 @pytest.mark.parametrize("padding", [0, 512, 1024 * 1024])
-def test_empty_archive_and_zero_padding_are_valid(tmp_path, padding):
-    result = _rootfs.export_inventory(Export(bytes(1024 + padding)), tmp_path / "tar")
+@pytest.mark.parametrize("hash_archive", [True, False])
+def test_empty_archive_and_zero_padding_are_valid(tmp_path, padding, hash_archive):
+    result = _rootfs.export_inventory(
+        Export(bytes(1024 + padding)), tmp_path / "tar", hash_archive=hash_archive,
+    )
     assert result.logical["entries"] == {} and result.positions == {}
 
 
@@ -89,10 +97,11 @@ def test_empty_archive_and_zero_padding_are_valid(tmp_path, padding):
     tar_bytes(files()) + bytes(2 * 1024 * 1024) + b"x" + bytes(511),
     tar_bytes([("file", tarfile.REGTYPE, b"body", 0o644)])[:1536] + b"x" + bytes(511),
 ])
-def test_stream_checks_two_end_blocks_alignment_and_entire_tail(tmp_path, bad):
+@pytest.mark.parametrize("hash_archive", [True, False])
+def test_stream_checks_two_end_blocks_alignment_and_entire_tail(tmp_path, bad, hash_archive):
     source = Export(bad, chunk=511)
     with pytest.raises((ValueError, tarfile.TarError)):
-        _rootfs.export_inventory(source, tmp_path / "tar")
+        _rootfs.export_inventory(source, tmp_path / "tar", hash_archive=hash_archive)
     assert source.closed
 
 
@@ -106,17 +115,23 @@ def test_stream_checks_two_end_blocks_alignment_and_entire_tail(tmp_path, bad):
     [("a", tarfile.LNKTYPE, "proc/x", 0o644), ("proc/x", tarfile.REGTYPE, b"x", 0o644)],
     [("pipe", tarfile.FIFOTYPE, "", 0o600)],
 ])
-def test_stream_preserves_path_type_and_link_validation(tmp_path, members):
+@pytest.mark.parametrize("hash_archive", [True, False])
+def test_stream_preserves_path_type_and_link_validation(tmp_path, members, hash_archive):
     with pytest.raises(ValueError):
-        _rootfs.export_inventory(Export(tar_bytes(members)), tmp_path / "tar")
+        _rootfs.export_inventory(
+            Export(tar_bytes(members)), tmp_path / "tar", hash_archive=hash_archive,
+        )
     assert not (tmp_path / "escape").exists()
 
 
 @pytest.mark.parametrize("fail,close_fail", [(True, False), (False, True), (True, True)])
-def test_complete_tar_does_not_hide_transport_or_close_failure(tmp_path, fail, close_fail):
+@pytest.mark.parametrize("hash_archive", [True, False])
+def test_complete_tar_does_not_hide_transport_or_close_failure(
+    tmp_path, fail, close_fail, hash_archive,
+):
     source = Export(tar_bytes(files()), fail=fail, close_fail=close_fail)
     with pytest.raises(OSError) as caught:
-        _rootfs.export_inventory(source, tmp_path / "tar")
+        _rootfs.export_inventory(source, tmp_path / "tar", hash_archive=hash_archive)
     assert source.closed
     if fail:
         assert "transport" in str(caught.value)
@@ -124,15 +139,18 @@ def test_complete_tar_does_not_hide_transport_or_close_failure(tmp_path, fail, c
         assert "close failed" in caught.value.__notes__[0]
 
 
-def test_large_file_stream_has_bounded_reads_and_checks_truncated_body(tmp_path):
+@pytest.mark.parametrize("hash_archive", [True, False])
+def test_large_file_stream_has_bounded_reads_and_checks_truncated_body(tmp_path, hash_archive):
     raw = tar_bytes([("big", tarfile.REGTYPE, b"x" * (3 * 1024 * 1024 + 13), 0o644)])
     source = Export(raw, chunk=4093)
-    result = _rootfs.export_inventory(source, tmp_path / "complete")
+    result = _rootfs.export_inventory(source, tmp_path / "complete", hash_archive=hash_archive)
     assert result.logical["entries"]["big"]["sha256"] == hashlib.sha256(
         b"x" * (3 * 1024 * 1024 + 13)
     ).hexdigest()
     with pytest.raises((ValueError, tarfile.TarError)):
-        _rootfs.export_inventory(Export(raw[:1024 * 1024]), tmp_path / "truncated")
+        _rootfs.export_inventory(
+            Export(raw[:1024 * 1024]), tmp_path / "truncated", hash_archive=hash_archive,
+        )
     with pytest.raises(ValueError, match="bounded"):
         _rootfs._ExportReader([], io.BytesIO(), tmp_path / "unused").read(-1)
 
