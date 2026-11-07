@@ -791,11 +791,14 @@ class RecordStore:
             self._insert(record)
         return record
 
-    def _execution_events(self, execution: Execution) -> tuple[Event, ...]:
+    def _execution_events(
+        self, execution: Execution, *, events: tuple[Event, ...] | None = None
+    ) -> tuple[Event, ...]:
+        events = self.list(Event, run_id=execution.run_id) if events is None else events
         events = sorted(
             (
                 e
-                for e in self.list(Event, run_id=execution.run_id)
+                for e in events
                 if e.execution_id == execution.execution_id
             ),
             key=lambda e: e.sequence,
@@ -827,7 +830,8 @@ class RecordStore:
             execution = self.get(Execution, execution_id)
             operation = self.get(Operation, execution.operation_id)
             self._step_open(operation.step_id)
-            history = self._execution_events(execution)
+            events = self.list(Event, run_id=execution.run_id)
+            history = self._execution_events(execution, events=events)
             expected = ("dispatched", "result", "delivered", "accepted")
             if len(history) == len(expected) or kind != expected[len(history)]:
                 raise IncompleteRecordError(
@@ -841,11 +845,11 @@ class RecordStore:
                 }
                 if any(
                     e.kind == "accepted" and e.execution_id in other_ids
-                    for e in self.list(Event, run_id=execution.run_id)
+                    for e in events
                 ):
                     raise ConflictError("logical operation already has an accepted execution")
             sequence = (
-                max((e.sequence for e in self.list(Event, run_id=execution.run_id)), default=0) + 1
+                max((e.sequence for e in events), default=0) + 1
             )
             event = Event(
                 run_id=execution.run_id,
