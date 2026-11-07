@@ -233,6 +233,77 @@ def test_batch_index_failure_at_boundaries_never_claims_success(
         assert json.loads((output / "preloads.json").read_text())["status"] == "running"
 
 
+def test_batch_cancellation_keeps_first_base_and_stops(
+    tmp_path, batch_package, cli_runtime, capsys,
+):
+    builder = cli_runtime[1]
+    configure = builder.on_create
+
+    def cancel_second(container):
+        configure(container)
+        if len(builder.created) == 2:
+            container.start_failure = KeyboardInterrupt()
+
+    builder.on_create = cancel_second
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 130
+    message = capsys.readouterr()
+    assert "cancelled" in message.err and "Batch:" not in message.out
+    index = json.loads((output / "preloads.json").read_text())
+    assert index["status"] == "cancelled"
+    assert [entry["status"] for entry in index["tasks"]] == ["completed", "cancelled", "pending"]
+    assert BtrfsPreloadRecord.select(
+        output / "example__repo-1", load_sandbox_task(batch_package, "example__repo-1"),
+    ).base.metadata.task_id == "example__repo-1"
+    assert len(builder.created) == 2 and all(container.removed for container in builder.created)
+    assert not (output / "example__repo-3").exists()
+
+
+def test_batch_cancellation_during_index_update_records_completed_base(
+    tmp_path, batch_package, cli_runtime, capsys, monkeypatch,
+):
+    write_json = preload_batch.write_json
+    interrupted = False
+
+    def interrupt_after_first(path, value, **kwargs):
+        nonlocal interrupted
+        if value["tasks"][0]["status"] == "completed" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt()
+        write_json(path, value, **kwargs)
+
+    monkeypatch.setattr(preload_batch, "write_json", interrupt_after_first)
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 130
+    assert "cancelled" in capsys.readouterr().err
+    index = json.loads((output / "preloads.json").read_text())
+    assert index["status"] == "cancelled"
+    assert [entry["status"] for entry in index["tasks"]] == ["completed", "pending", "pending"]
+    assert open_preload(output / "example__repo-1").metadata.task_id == "example__repo-1"
+    assert len(cli_runtime[1].created) == 1
+
+
+def test_batch_cleanup_failure_supersedes_cancellation(tmp_path, batch_package, cli_runtime, capsys):
+    builder = cli_runtime[1]
+    configure = builder.on_create
+
+    def cancel_and_fail_cleanup(container):
+        configure(container)
+        if len(builder.created) == 2:
+            builder.remove_error = True
+            container.start_failure = KeyboardInterrupt()
+
+    builder.on_create = cancel_and_fail_cleanup
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 1
+    assert "removal unconfirmed" in capsys.readouterr().err
+    index = json.loads((output / "preloads.json").read_text())
+    assert index["status"] == "failed"
+    assert [entry["status"] for entry in index["tasks"]] == ["completed", "failed", "pending"]
+    assert open_preload(output / "example__repo-1").metadata.task_id == "example__repo-1"
+    assert len(builder.created) == 2 and not cli_runtime[2].pools[0].discarded
+
+
 def test_json_input_cannot_be_relabelled_with_task_id(tmp_path, cli_runtime, capsys):
     assert run(source_json(tmp_path), tmp_path / "base", "--task-id", "wrong-task") == 1
     assert "--task-id" in capsys.readouterr().err

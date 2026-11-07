@@ -44,30 +44,41 @@ def build_preloads(source, inputs, output, paths, *, initialization, public_env)
             for item, path in zip(inputs, paths, strict=True)
         ],
     }
-    write_json(index_path, index)
     results = []
-    for item, path, entry in zip(inputs, paths, index["tasks"], strict=True):
-        entry["status"] = "building"
-        write_json(index_path, index, replace=True)
-        try:
-            keys = public_keys(item, public_env)
-            result = build_preload(
-                item, path, initialization=initialization, public_env_keys=keys,
-            )
-        except Exception as error:
-            entry["status"] = "failed"
-            index["status"] = "failed"
+    entry = None
+    try:
+        write_json(index_path, index)
+        for item, path, entry in zip(inputs, paths, index["tasks"], strict=True):
+            entry["status"] = "building"
+            write_json(index_path, index, replace=True)
             try:
-                write_json(index_path, index, replace=True)
-            except Exception as index_error:
-                error.add_note(f"batch index update also failed ({type(index_error).__name__})")
-            raise
-        entry.update(
-            status="completed", preload_id=result.preload_id,
-            path=str(result.path.relative_to(output)), duration_sec=result.duration_sec,
-        )
+                keys = public_keys(item, public_env)
+                result = build_preload(
+                    item, path, initialization=initialization, public_env_keys=keys,
+                )
+            except Exception as error:
+                entry["status"] = "failed"
+                index["status"] = "failed"
+                try:
+                    write_json(index_path, index, replace=True)
+                except Exception as index_error:
+                    error.add_note(f"batch index update also failed ({type(index_error).__name__})")
+                raise
+            entry.update(
+                status="completed", preload_id=result.preload_id,
+                path=str(result.path.relative_to(output)), duration_sec=result.duration_sec,
+            )
+            write_json(index_path, index, replace=True)
+            results.append(result)
+        index["status"] = "completed"
         write_json(index_path, index, replace=True)
-        results.append(result)
-    index["status"] = "completed"
-    write_json(index_path, index, replace=True)
+    except KeyboardInterrupt as error:
+        if entry is not None and entry["status"] == "building":
+            entry["status"] = "cancelled"
+        index["status"] = "cancelled"
+        try:
+            write_json(index_path, index, replace=index_path.exists())
+        except Exception as index_error:
+            error.add_note(f"batch index update also failed ({type(index_error).__name__})")
+        raise
     return results
