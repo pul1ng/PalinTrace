@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import wraps
 from hashlib import sha256
 from typing import Any, Generic, TypeVar
 
@@ -32,6 +33,15 @@ from palinreplay.storage.store import ConflictError, IncompleteRecordError, Reco
 
 ValueT = TypeVar("ValueT")
 ReceiptT = TypeVar("ReceiptT")
+
+
+def _call_payload_scope(function):
+    """Reuse immutable expansions within one call operation; keep physical checks."""
+    @wraps(function)
+    def wrapped(call, *args, **kwargs):
+        with call._ports.store._expansion_scope():
+            return function(call, *args, **kwargs)
+    return wrapped
 
 
 class RecordingError(StoreError):
@@ -240,53 +250,55 @@ class RecordingPorts:
         caused_by_execution_id: str | None = None,
         operation: Operation | None = None,
     ) -> RecordedCall:
-        self._ready()
-        for label in (
-            "execute",
-            "capture_request",
-            "capture_result",
-            "capture_context",
-            "capture_exception",
-        ):
-            function = getattr(adapter, label)
-            if function is not None:
-                _synchronous(function, label)
-        self._busy = True
-        try:
-            operation = operation or self.store.save(
-                Operation(
-                    run_id=self.step.run_id,
-                    step_id=self.step.step_id,
-                    kind=kind,
-                    name=adapter.name,
-                    tool_call_id=tool_call_id,
-                    caused_by_execution_id=caused_by_execution_id,
+        with self.store._expansion_scope():
+            self._ready()
+            for label in (
+                "execute",
+                "capture_request",
+                "capture_result",
+                "capture_context",
+                "capture_exception",
+            ):
+                function = getattr(adapter, label)
+                if function is not None:
+                    _synchronous(function, label)
+            self._busy = True
+            try:
+                operation = operation or self.store.save(
+                    Operation(
+                        run_id=self.step.run_id,
+                        step_id=self.step.step_id,
+                        kind=kind,
+                        name=adapter.name,
+                        tool_call_id=tool_call_id,
+                        caused_by_execution_id=caused_by_execution_id,
+                    )
                 )
-            )
-            request_ref = self._put(adapter.capture_request(request))
-            context_ref = (
-                self._put(adapter.capture_context(request)) if adapter.capture_context else None
-            )
-            previous = [
-                execution
-                for execution in self.store.list(Execution, run_id=self.step.run_id)
-                if execution.operation_id == operation.operation_id
-            ]
-            execution = self.store.save(
-                Execution(
-                    run_id=self.step.run_id,
-                    operation_id=operation.operation_id,
-                    index=len(previous) + 1,
-                    request=request_ref,
-                    context=context_ref,
-                    visibility=adapter.visibility,
+                request_ref = self._put(adapter.capture_request(request))
+                context_ref = (
+                    self._put(adapter.capture_context(request)) if adapter.capture_context else None
                 )
-            )
-            return RecordedCall(self, adapter, request, operation, execution)
-        except BaseException as error:
-            self._abort("prepare", error)
-        finally:
-            self._busy = False
+                previous = [
+                    execution
+                    for execution in self.store.list(Execution, run_id=self.step.run_id)
+                    if execution.operation_id == operation.operation_id
+                ]
+                execution = self.store.save(
+                    Execution(
+                        run_id=self.step.run_id,
+                        operation_id=operation.operation_id,
+                        index=len(previous) + 1,
+                        request=request_ref,
+                        context=context_ref,
+                        visibility=adapter.visibility,
+                    )
+                )
+                return RecordedCall(self, adapter, request, operation, execution)
+            except BaseException as error:
+                self._abort("prepare", error)
+            finally:
+                self._busy = False
+
 
     def retry(self, previous: RecordedCall[RequestT, ResultT]) -> RecordedCall[RequestT, ResultT]:
         """Explicit caller-owned retry of a known error; never retry an unknown outcome."""
@@ -338,42 +350,43 @@ def deliver_batch(
     if not deliveries:
         raise ValueError("batch must contain at least one call")
     ports = deliveries[0][0]._ports
-    ports._ready()
-    _synchronous(encode, "observation encoder")
-    _synchronous(receive, "receiver")
-    if len({id(call) for call, _ in deliveries}) != len(deliveries):
-        raise ValueError("duplicate call in delivery batch")
-    for call, _ in deliveries:
-        if call._ports is not ports:
-            raise ValueError("batch calls must belong to the same ports")
-        if call._delivery_attempted:
-            raise ConflictError("delivery has already been attempted")
+    with ports.store._expansion_scope():
+        ports._ready()
+        _synchronous(encode, "observation encoder")
+        _synchronous(receive, "receiver")
+        if len({id(call) for call, _ in deliveries}) != len(deliveries):
+            raise ValueError("duplicate call in delivery batch")
+        for call, _ in deliveries:
+            if call._ports is not ports:
+                raise ValueError("batch calls must belong to the same ports")
+            if call._delivery_attempted:
+                raise ConflictError("delivery has already been attempted")
+            try:
+                events = ports.store.execution_events(call.execution_id)
+            except BaseException as error:
+                ports._abort("delivery-check", error, call.execution_id)
+            if not call._invoked or not events or events[-1].kind != "result":
+                raise IncompleteRecordError("delivery requires a persisted result for every call")
+        for call, _ in deliveries:
+            call._delivery_attempted = True
+        ports._busy = True
         try:
-            events = ports.store.execution_events(call.execution_id)
-        except BaseException as error:
-            ports._abort("delivery-check", error, call.execution_id)
-        if not call._invoked or not events or events[-1].kind != "result":
-            raise IncompleteRecordError("delivery requires a persisted result for every call")
-    for call, _ in deliveries:
-        call._delivery_attempted = True
-    ports._busy = True
-    try:
-        try:
-            offered = [ports._put(encode(value)) for _, value in deliveries]
-        except BaseException as error:
-            ports._abort("observation", error)
-        try:
-            receipt = _resolved(receive([value for _, value in deliveries]))
-        except BaseException as error:
-            ports._abort("handoff", error)
-        try:
-            for (call, _), payload in zip(deliveries, offered, strict=True):
-                ports.store.append_event(call.execution_id, "delivered", payload=payload)
-        except BaseException as error:
-            ports._abort("delivery", error, call.execution_id)
-        return receipt
-    finally:
-        ports._busy = False
+            try:
+                offered = [ports._put(encode(value)) for _, value in deliveries]
+            except BaseException as error:
+                ports._abort("observation", error)
+            try:
+                receipt = _resolved(receive([value for _, value in deliveries]))
+            except BaseException as error:
+                ports._abort("handoff", error)
+            try:
+                for (call, _), payload in zip(deliveries, offered, strict=True):
+                    ports.store.append_event(call.execution_id, "delivered", payload=payload)
+            except BaseException as error:
+                ports._abort("delivery", error, call.execution_id)
+            return receipt
+        finally:
+            ports._busy = False
 
 
 class RecordedCall(Generic[RequestT, ResultT]):
@@ -460,6 +473,7 @@ class RecordedCall(Generic[RequestT, ResultT]):
             outcome=capture.outcome,
         )
 
+    @_call_payload_scope
     def invoke(self) -> ResultT:
         """Enter the backend at most once; return its original value only after persistence."""
         ports = self._ports
@@ -555,6 +569,7 @@ class RecordedCall(Generic[RequestT, ResultT]):
         finally:
             ports._busy = False
 
+    @_call_payload_scope
     def deliver(
         self,
         observation: ValueT,
@@ -599,6 +614,7 @@ class RecordedCall(Generic[RequestT, ResultT]):
             ports._busy = False
 
     @timed("call.accept")
+    @_call_payload_scope
     def accept(self, adopted: ValueT, *, encode: Callable[[ValueT], Payload]) -> Event:
         """Record an adapter-observed Agent adoption snapshot, never infer it from a return."""
         ports = self._ports
