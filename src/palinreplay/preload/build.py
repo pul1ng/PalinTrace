@@ -113,6 +113,7 @@ def _build_preload(
     started = time.monotonic()
     owned_client = client is None
     pool = None
+    primary = None
     try:
         if client is None:
             client = connect_docker(api_timeout_sec)
@@ -160,12 +161,21 @@ def _build_preload(
                     oracle.write_bytes(json_bytes(inventory.logical))
                     pool.initial_uploads = ((archive, "import.tar"), (oracle, "expected-C0.json"))
                     pool.__enter__()
+                    import_error = None
                     try:
                         metadata, build = _import_c0(
                             pool, environment, inputs, initialized, launch, bootstrap, inventory
                         )
+                    except Exception as error:
+                        import_error = error
+                        raise
                     finally:
-                        pool.close()
+                        try:
+                            pool.close()
+                        except Exception as cleanup:
+                            if import_error is None:
+                                raise
+                            import_error.add_note(f"Btrfs pool close also failed: {cleanup!r}")
                     write_json(stage / "build.json", build)
             # Source and helper cleanup must finish before publication.
             write_json(stage / "c0.json", metadata.model_dump(mode="json"))
@@ -182,13 +192,26 @@ def _build_preload(
         return PreloadResult(
             "preload:sha256:" + digest, Path(output).absolute(), time.monotonic() - started
         )
-    except BaseException:
+    except BaseException as error:
+        primary = error
         if pool is not None:
-            pool.discard()
+            try:
+                pool.discard()
+            except Exception as cleanup:
+                if not isinstance(error, Exception):
+                    # A cleanup fault still takes precedence over cancellation.
+                    primary = cleanup
+                    raise
+                error.add_note(f"Btrfs pool discard also failed: {cleanup!r}")
         raise
     finally:
         if owned_client and client is not None:
-            client.close()
+            try:
+                client.close()
+            except Exception as cleanup:
+                if primary is None or not isinstance(primary, Exception):
+                    raise
+                primary.add_note(f"Docker client close also failed: {cleanup!r}")
 
 
 def _import_c0(pool, environment, inputs, initialized, launch, bootstrap, inventory):

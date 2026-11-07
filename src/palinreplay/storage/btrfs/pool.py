@@ -50,6 +50,7 @@ class BtrfsPool:
         self.device = None
         self.closed = False
         self.started = False
+        self._helper_removed = False
         self.initial_uploads = ()
         self.key = (location.daemon_id, location.volume)
 
@@ -212,14 +213,19 @@ class BtrfsPool:
         if self.closed:
             return
         if self.container is not None:
-            self.container.reload()
-            if (self.container.attrs.get("Config", {}).get("Labels") or {}).get(
-                OWNER_LABEL
-            ) != self.owner:
-                raise SandboxCleanupError("refusing to close an unowned Btrfs helper")
-            if self.started:
-                self.command("close")
-            self.container.remove(force=True, v=True)
+            if not self._helper_removed:
+                self.container.reload()
+                if (self.container.attrs.get("Config", {}).get("Labels") or {}).get(
+                    OWNER_LABEL
+                ) != self.owner:
+                    raise SandboxCleanupError("refusing to close an unowned Btrfs helper")
+                if self.started:
+                    self.command("close")
+                self.container.remove(force=True, v=True)
+                # Later confirmation may fail. Never reload this removed helper
+                # on a subsequent close/discard, but still verify its absence
+                # and the loop device release before declaring cleanup complete.
+                self._helper_removed = True
             try:
                 self.client.containers.get(self.container.id)
             except Exception as error:
