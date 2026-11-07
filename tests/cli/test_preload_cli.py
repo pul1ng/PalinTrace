@@ -469,6 +469,12 @@ def test_preload_help_lists_mvp_flags_without_optional_agent_or_docker_calls(cap
     message = capsys.readouterr().out
     for flag in ("--output", "--task-id", "--init", "--public-env"):
         assert flag in message
+    normalized = " ".join(message.split())
+    for text in (
+        "serially", "selects all tasks in manifest order", "repeat to preserve the specified order",
+        "subdirectories named after task IDs", "preloads.json index", "rerun remaining tasks",
+    ):
+        assert text in normalized
     assert "reload" not in message.replace("preload", "")
 
 

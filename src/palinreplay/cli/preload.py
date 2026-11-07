@@ -1,8 +1,11 @@
 """Build a frozen C0 with ``palin preload SOURCE [--output NEW_DIRECTORY]``.
 
-SOURCE is a prepared task package (use --task-id for multiple tasks), or standalone
-preload-input JSON. The default preserves the image: initialization checks the
-configured shell, workdir and BASH_ENV without executing instruction as a script.
+SOURCE is a prepared task package or standalone preload-input JSON. Packages
+select all tasks by default; repeat --task-id to select tasks in the given order.
+Selected tasks build serially. One task uses the output directory directly;
+multiple tasks use task-ID subdirectories and a preloads.json index.
+The default preserves the image: initialization checks the configured shell,
+workdir and BASH_ENV without executing instruction as a script.
 For additional setup, --init reads InitializationSpec JSON, for example::
 
     {"commands": ["python prepare.py"], "checks": ["test -f ready"]}
@@ -33,8 +36,15 @@ from palinreplay.preload.input import _unique_object
 def add_commands(commands):
     preload = commands.add_parser(
         "preload", help="initialize an image and freeze a read-only Btrfs C0 base",
-        description="Build a C0 base from a prepared task package or preload-input JSON.",
+        description=(
+            "Build independent C0 bases serially from a prepared task package or preload-input JSON. "
+            "A task package without --task-id selects all tasks in manifest order."
+        ),
         epilog=(
+            "One selected task uses the output directory directly; multiple tasks use "
+            "subdirectories named after task IDs and a preloads.json index. "
+            "Failure or cancellation stops the batch "
+            "and preserves completed bases; rerun remaining tasks with a new output directory. "
             "Without --init, preserve the image and check shell/workdir/BASH_ENV. "
             "instruction remains task text. Btrfs requires Linux mount permissions and local "
             "palinreplay/btrfs-tools:0.1 and palinreplay/btrfs-bootstrap:0.1 images. "
@@ -42,10 +52,11 @@ def add_commands(commands):
     )
     preload.add_argument("source", type=Path, help="task package directory or preload-input JSON")
     preload.add_argument(
-        "--output", type=Path, help="new C0 directory (default: outputs/preload/DATE_TASK)"
+        "--output", type=Path, help="new C0 or batch directory (default: outputs/preload/DATE_NAME)"
     )
     preload.add_argument(
-        "--task-id", action="append", default=[], help="select a task; may be repeated",
+        "--task-id", action="append", default=[], metavar="ID",
+        help="select a task; repeat to preserve the specified order",
     )
     preload.add_argument(
         "--init", type=Path, dest="initialization",
