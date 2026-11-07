@@ -31,6 +31,7 @@ from palinreplay.storage.btrfs.verification import capture_info
 from palinreplay.storage.io import write_json
 from palinreplay.storage.store import IntegrityError, RecordStore
 from tests.preload.test_preload_environment import inputs
+from tests.storage.test_rootfs_stream import Export
 from tests.storage.test_store import start
 
 
@@ -186,6 +187,45 @@ def test_full_native_inventory_matches_existing_rootfs_contract(tmp_path):
         out.add(root, arcname=".")
     expected = _rootfs.manifest(archive)
     assert _btrfs_worker.inventory(root, _rootfs.SCOPE, include_root=True) == expected
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_import_compares_file_content_without_an_archive_digest(tmp_path, monkeypatch, corrupt):
+    source, storage, imported = [tmp_path / name for name in ("source", "storage", "imported")]
+    source.mkdir()
+    storage.mkdir()
+    (source / "file").write_bytes(b"original-content")
+    archive = tmp_path / "source.tar"
+    with tarfile.open(archive, "w") as out:
+        out.add(source, arcname=".")
+    staged = storage / "import.tar"
+    inventory = _rootfs.export_inventory(Export(archive.read_bytes()), staged, hash_archive=False)
+    assert inventory.sha256 is None
+    write_json(storage / "expected-C0.json", inventory.logical)
+    if corrupt:
+        staged.write_bytes(staged.read_bytes().replace(b"original-content", b"modified-content"))
+
+    def command(*args):
+        if args[:3] == ("btrfs", "subvolume", "create"):
+            imported.mkdir()
+        else:
+            assert args[0] == "tar"
+            with tarfile.open(staged) as data:
+                data.extractall(imported, filter="data")
+        return ""
+
+    monkeypatch.setattr(_btrfs_worker, "STORAGE", storage)
+    monkeypatch.setattr(_btrfs_worker, "target", lambda name: imported)
+    monkeypatch.setattr(_btrfs_worker, "healthy", lambda: None)
+    monkeypatch.setattr(_btrfs_worker, "command", command)
+    if corrupt:
+        with pytest.raises(ValueError, match="import differs from original Docker export"):
+            _btrfs_worker.operation({"op": "import", "workspace": "workspaces/test"})
+    else:
+        assert _btrfs_worker.operation({"op": "import", "workspace": "workspaces/test"})[
+            "roundtrip_verified"
+        ]
+    assert not staged.exists()
 
 
 def test_missing_external_snapshot_invalidates_node_and_bundle_is_refused(

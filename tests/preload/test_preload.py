@@ -1,6 +1,7 @@
 import hashlib
 import json
 import stat
+import tarfile
 from contextlib import contextmanager
 from types import SimpleNamespace
 from uuid import uuid4
@@ -149,6 +150,41 @@ def test_task_package_selection_is_forwarded_to_input_loading(tmp_path, row, run
     assert open_preload(result.path).metadata.task_id == "example__repo-2"
 
 
+def test_disposable_preload_tar_uses_file_hashes_without_archive_hash(tmp_path, runtime, monkeypatch):
+    export = preload_build._rootfs.export_inventory
+    inventories = []
+
+    def checked_export(container, archive, **options):
+        assert options == {"hash_archive": False}
+        inventory = export(container, archive, **options)
+        inventories.append(inventory)
+        return inventory
+
+    monkeypatch.setattr(preload_build._rootfs, "export_inventory", checked_export)
+    result = build(inputs(), tmp_path / "base", runtime)
+    assert len(inventories) == 1 and inventories[0].sha256 is None
+    assert inventories[0].logical["entries"]["testbed/a"]["sha256"] == hashlib.sha256(
+        runtime[0].payload
+    ).hexdigest()
+    assert json.loads((result.path / "build.json").read_bytes())["roundtrip_verified"]
+
+
+def test_truncated_export_discards_pool_and_does_not_publish(tmp_path, runtime):
+    client, tools = runtime
+    configure = client.on_create
+
+    def truncated(container):
+        configure(container)
+        container.export = lambda chunk_size: iter([tar_bytes(files(client.payload))[:-1]])
+
+    client.on_create = truncated
+    with pytest.raises((ValueError, tarfile.TarError)):
+        build(inputs(), tmp_path / "base", runtime)
+    assert not (tmp_path / "base").exists()
+    assert tools.entered == 0 and tools.pools[0].discarded
+    assert all(container.removed for container in client.created)
+
+
 def test_preload_id_binds_the_pool_and_readonly_snapshot(tmp_path, runtime):
     first = build(inputs(), tmp_path / "one", runtime)
     second = build(inputs(), tmp_path / "two", runtime)
@@ -198,6 +234,7 @@ def test_freeze_failure_removes_the_private_output_and_container(tmp_path, runti
     assert not (tmp_path / "base").exists()
     assert not list(tmp_path.glob(".record-export-*"))
     assert runtime[0].created[0].removed
+    assert runtime[1].pools[0].discarded and runtime[1].entered == runtime[1].closed
 
 
 def test_cleanup_failure_cannot_publish_the_already_frozen_private_base(tmp_path, runtime):

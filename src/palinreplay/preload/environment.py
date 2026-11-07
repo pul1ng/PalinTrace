@@ -183,6 +183,7 @@ def create_preload_environment(
         container = client.containers.create(
             image=image.id, name=name, labels=labels,
             entrypoint=["sleep"], command=["infinity"],
+            init=True,
             working_dir=inputs.workdir, environment=dict(inputs.env), platform=inputs.platform,
             network_mode=network_mode, mem_limit=2 * 1024**3, nano_cpus=2_000_000_000,
             detach=True, tty=False, stdin_open=False, privileged=False,
