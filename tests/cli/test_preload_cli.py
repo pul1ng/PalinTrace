@@ -10,6 +10,7 @@ import palinreplay.preload.build as preload_build
 import palinreplay.preload.environment as preload_environment
 from palinreplay.preload.base import open_preload
 from tests.preload.test_preload import runtime as runtime
+from tests.preload.test_preload_batch import batch_package as batch_package
 from tests.preload.test_preload_environment import Client, inputs
 from tests.preload.test_preload_input import prepared_package
 
@@ -98,14 +99,63 @@ def test_default_preload_output_uses_task_identity(tmp_path, cli_runtime, monkey
 
 def test_native_package_task_selection(tmp_path, row, cli_runtime, capsys):
     source = prepared_package(tmp_path, row, two=True)
-    assert run(source, tmp_path / "missing-selector") == 1
-    assert not cli_runtime[0].image_gets and not cli_runtime[1].created
-    assert "--task-id" in capsys.readouterr().err
     output = tmp_path / "base"
     assert run(source, output, "--task-id", "example__repo-2") == 0
     frozen = open_preload(output)
     assert frozen.metadata.task_id == "example__repo-2"
     assert "BASH_ENV" in frozen.metadata.launch.environment
+
+
+@pytest.mark.parametrize("selected", [[], ["example__repo-3", "example__repo-1"]])
+def test_batch_cli_selects_tasks_and_passes_configuration(
+    tmp_path, batch_package, cli_runtime, selected,
+):
+    output = tmp_path / "batch"
+    init = tmp_path / "init.json"
+    init.write_text(json.dumps({"commands": ["prepare"], "checks": ["ready"]}))
+    flags = [flag for task_id in selected for flag in ("--task-id", task_id)]
+    assert run(batch_package, output, *flags, "--init", str(init), "--public-env", "BASH_ENV") == 0
+    expected = selected or ["example__repo-1", "example__repo-2", "example__repo-3"]
+    index = json.loads((output / "preloads.json").read_text())
+    assert [entry["task_id"] for entry in index["tasks"]] == expected
+    assert [entry["status"] for entry in index["tasks"]] == ["completed"] * len(expected)
+    for entry, task_id in zip(index["tasks"], expected, strict=True):
+        frozen = open_preload(output / task_id)
+        assert frozen.metadata.task_id == task_id
+        assert "BASH_ENV" in frozen.metadata.launch.environment
+        assert entry["preload_id"] == "preload:sha256:" + frozen.metadata_sha256
+    inspector, builder, tools = cli_runtime
+    assert len(inspector.image_gets) == len(builder.created) == len(tools.pools) == len(expected)
+    assert all(container.removed for container in builder.created)
+    assert tools.entered == tools.closed == len(expected)
+    for container in builder.created:
+        calls = [argv[-1] for argv, _ in container.calls]
+        assert calls.count("prepare") == 1 and calls.count("ready") == 2
+
+
+def test_single_task_package_without_selector_keeps_root_layout(tmp_path, row, cli_runtime):
+    source = prepared_package(tmp_path, row)
+    output = tmp_path / "base"
+    assert run(source, output) == 0
+    assert open_preload(output).metadata.task_id == row["instance_id"]
+    assert not (output / "preloads.json").exists()
+
+
+@pytest.mark.parametrize("flags", [
+    ["--task-id", "example__repo-1", "--task-id", "example__repo-1"],
+    ["--task-id", "example__repo-1", "--task-id", "missing"],
+])
+def test_batch_invalid_ids_fail_before_docker(tmp_path, batch_package, cli_runtime, flags):
+    output = tmp_path / "batch"
+    assert run(batch_package, output, *flags) == 1
+    assert not output.exists() and not cli_runtime[0].image_gets and not cli_runtime[1].created
+
+
+def test_json_multiple_ids_fail_before_docker(tmp_path, cli_runtime):
+    output = tmp_path / "base"
+    source = source_json(tmp_path, task_id="example__repo-1")
+    assert run(source, output, "--task-id", "example__repo-1", "--task-id", "other") == 1
+    assert not output.exists() and not cli_runtime[0].image_gets and not cli_runtime[1].created
 
 
 def test_json_input_cannot_be_relabelled_with_task_id(tmp_path, cli_runtime, capsys):

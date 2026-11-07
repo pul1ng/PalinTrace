@@ -23,7 +23,8 @@ from pydantic import ValidationError
 from palinreplay.cli.common import cancellation_signals
 from palinreplay.cli.outputs import default_output
 from palinreplay.core.errors import RecordUsageError
-from palinreplay.preload.build import _load_source, build_preload
+from palinreplay.preload.batch import build_preloads, select_preload_inputs
+from palinreplay.preload.build import build_preload
 from palinreplay.preload.environment import PreloadCleanupError, public_keys
 from palinreplay.preload.initialization import InitializationSpec, PreloadInitializationError
 from palinreplay.preload.input import _unique_object
@@ -43,7 +44,9 @@ def add_commands(commands):
     preload.add_argument(
         "--output", type=Path, help="new C0 directory (default: outputs/preload/DATE_TASK)"
     )
-    preload.add_argument("--task-id", help="select a task in a multi-task package")
+    preload.add_argument(
+        "--task-id", action="append", default=[], help="select a task; may be repeated",
+    )
     preload.add_argument(
         "--init", type=Path, dest="initialization",
         help="JSON with commands and nonempty checks (optional timeout_sec)",
@@ -77,11 +80,8 @@ def execute(args) -> int:
         with cancellation_signals():
             if any(not key or "=" in key or "\x00" in key for key in args.public_env):
                 raise RecordUsageError("--public-env requires environment key names, without values")
-            inputs = _load_source(args.source, args.task_id)
-            if args.output is None:
-                args.output = default_output("preload", inputs.task_id or args.source.stem)
-            if args.output.exists() or args.output.is_symlink():
-                raise FileExistsError()
+            selected = select_preload_inputs(args.source, args.task_id)
+            args.output, paths = preload_output_paths(args.source, selected, args.output)
             if args.initialization is None:
                 initialization = InitializationSpec(checks=("pwd -P",))
             else:
@@ -90,15 +90,23 @@ def execute(args) -> int:
                 )
                 initialization = InitializationSpec.model_validate(data)
             phase = "build"
-            # Inspect cached/pulled image metadata, not its files. Close this
-            # client before build_preload's owned lifecycle and publication.
-            keys = public_keys(inputs, args.public_env)
-            result = build_preload(
-                inputs, args.output, initialization=initialization, public_env_keys=keys,
-            )
-        print(f"Preload: {result.preload_id}")
-        print(f"Path: {result.path}")
-        print(f"Time: {time.monotonic() - started:.3f}s")
+            if len(selected) == 1:
+                # Close image inspection before the single build's owned lifecycle.
+                keys = public_keys(selected[0], args.public_env)
+                result = build_preload(
+                    selected[0], paths[0], initialization=initialization, public_env_keys=keys,
+                )
+            else:
+                build_preloads(
+                    args.source, selected, args.output, paths,
+                    initialization=initialization, public_env=args.public_env,
+                )
+        if len(selected) == 1:
+            print(f"Preload: {result.preload_id}")
+            print(f"Path: {result.path}")
+            print(f"Time: {time.monotonic() - started:.3f}s")
+        else:
+            print(f"Batch: {args.output.absolute()}")
         return 0
     except KeyboardInterrupt:
         print("error: preload cancelled", file=sys.stderr)
