@@ -6,10 +6,13 @@ from pathlib import Path
 import pytest
 
 import palinreplay.cli.app as cli
+import palinreplay.preload.batch as preload_batch
 import palinreplay.preload.build as preload_build
 import palinreplay.preload.environment as preload_environment
-from palinreplay.preload.base import open_preload
+from palinreplay.preload.base import BtrfsPreloadRecord, open_preload
+from palinreplay.sandbox.binding import load_sandbox_task
 from tests.preload.test_preload import runtime as runtime
+from tests.preload.test_preload_batch import batch_package as batch_package
 from tests.preload.test_preload_environment import Client, inputs
 from tests.preload.test_preload_input import prepared_package
 
@@ -98,14 +101,234 @@ def test_default_preload_output_uses_task_identity(tmp_path, cli_runtime, monkey
 
 def test_native_package_task_selection(tmp_path, row, cli_runtime, capsys):
     source = prepared_package(tmp_path, row, two=True)
-    assert run(source, tmp_path / "missing-selector") == 1
-    assert not cli_runtime[0].image_gets and not cli_runtime[1].created
-    assert "--task-id" in capsys.readouterr().err
     output = tmp_path / "base"
     assert run(source, output, "--task-id", "example__repo-2") == 0
     frozen = open_preload(output)
     assert frozen.metadata.task_id == "example__repo-2"
     assert "BASH_ENV" in frozen.metadata.launch.environment
+
+
+@pytest.mark.parametrize("selected", [[], ["example__repo-3", "example__repo-1"]])
+def test_batch_cli_selects_tasks_and_passes_configuration(
+    tmp_path, batch_package, cli_runtime, selected,
+):
+    output = tmp_path / "batch"
+    init = tmp_path / "init.json"
+    init.write_text(json.dumps({"commands": ["prepare"], "checks": ["ready"]}))
+    flags = [flag for task_id in selected for flag in ("--task-id", task_id)]
+    assert run(batch_package, output, *flags, "--init", str(init), "--public-env", "BASH_ENV") == 0
+    expected = selected or ["example__repo-1", "example__repo-2", "example__repo-3"]
+    index = json.loads((output / "preloads.json").read_text())
+    assert [entry["task_id"] for entry in index["tasks"]] == expected
+    assert [entry["status"] for entry in index["tasks"]] == ["completed"] * len(expected)
+    for entry, task_id in zip(index["tasks"], expected, strict=True):
+        frozen = open_preload(output / task_id)
+        assert frozen.metadata.task_id == task_id
+        assert "BASH_ENV" in frozen.metadata.launch.environment
+        assert entry["preload_id"] == "preload:sha256:" + frozen.metadata_sha256
+    inspector, builder, tools = cli_runtime
+    assert len(inspector.image_gets) == len(builder.created) == len(tools.pools) == len(expected)
+    assert all(container.removed for container in builder.created)
+    assert tools.entered == tools.closed == len(expected)
+    for container in builder.created:
+        calls = [argv[-1] for argv, _ in container.calls]
+        assert calls.count("prepare") == 1 and calls.count("ready") == 2
+
+
+def test_batch_progress_reports_order_paths_durations_and_summary(
+    tmp_path, batch_package, cli_runtime, capsys,
+):
+    output = tmp_path / "batch"
+    assert run(
+        batch_package, output, "--task-id", "example__repo-3", "--task-id", "example__repo-1",
+    ) == 0
+    message = capsys.readouterr()
+    assert message.err == ""
+    index = json.loads((output / "preloads.json").read_text())
+    positions = []
+    for number, entry in enumerate(index["tasks"], start=1):
+        task_id = entry["task_id"]
+        progress = f"[{number}/2] {task_id}"
+        result = f"{task_id}: {output / entry['path']} ({entry['duration_sec']:.3f}s)"
+        positions.extend([message.out.index(progress), message.out.index(result)])
+    assert positions == sorted(positions)
+    assert f"Batch: {output.absolute()}" in message.out
+    assert "Completed: 2/2" in message.out and "Status: completed" in message.out
+    assert "Time: " in message.out
+
+
+def test_single_task_package_without_selector_keeps_root_layout(tmp_path, row, cli_runtime):
+    source = prepared_package(tmp_path, row)
+    output = tmp_path / "base"
+    assert run(source, output) == 0
+    assert open_preload(output).metadata.task_id == row["instance_id"]
+    assert not (output / "preloads.json").exists()
+
+
+@pytest.mark.parametrize("flags", [
+    ["--task-id", "example__repo-1", "--task-id", "example__repo-1"],
+    ["--task-id", "example__repo-1", "--task-id", "missing"],
+])
+def test_batch_invalid_ids_fail_before_docker(tmp_path, batch_package, cli_runtime, flags):
+    output = tmp_path / "batch"
+    assert run(batch_package, output, *flags) == 1
+    assert not output.exists() and not cli_runtime[0].image_gets and not cli_runtime[1].created
+
+
+def test_json_multiple_ids_fail_before_docker(tmp_path, cli_runtime):
+    output = tmp_path / "base"
+    source = source_json(tmp_path, task_id="example__repo-1")
+    assert run(source, output, "--task-id", "example__repo-1", "--task-id", "other") == 1
+    assert not output.exists() and not cli_runtime[0].image_gets and not cli_runtime[1].created
+
+
+def test_batch_failure_preserves_success_and_stops(tmp_path, batch_package, cli_runtime, capsys):
+    builder = cli_runtime[1]
+    configure = builder.on_create
+
+    def fail_second(container):
+        configure(container)
+        if len(builder.created) == 2:
+            container.start_failure = RuntimeError("private error details")
+
+    builder.on_create = fail_second
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 1
+    message = capsys.readouterr()
+    assert "private error details" not in message.err
+    assert "Completed: 1/3" in message.out and "Status: failed" in message.out
+    assert "[3/3]" not in message.out
+    index = json.loads((output / "preloads.json").read_text())
+    assert index["status"] == "failed"
+    assert [entry["status"] for entry in index["tasks"]] == ["completed", "failed", "pending"]
+    first = output / "example__repo-1"
+    binding = load_sandbox_task(batch_package, "example__repo-1")
+    assert BtrfsPreloadRecord.select(first, binding).base.metadata.task_id == "example__repo-1"
+    assert len(builder.created) == 2 and all(container.removed for container in builder.created)
+    assert not (output / "example__repo-3").exists()
+
+
+def test_batch_index_failure_keeps_published_base_and_returns_failure(
+    tmp_path, batch_package, cli_runtime, capsys, monkeypatch,
+):
+    write_json = preload_batch.write_json
+
+    def fail_after_first(path, value, **kwargs):
+        if value["tasks"][0]["status"] == "completed":
+            raise OSError("private filesystem details")
+        write_json(path, value, **kwargs)
+
+    monkeypatch.setattr(preload_batch, "write_json", fail_after_first)
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 1
+    message = capsys.readouterr()
+    assert "private filesystem details" not in message.err
+    assert "Completed: 1/3" in message.out and "Status: failed" in message.out
+    assert "OSError" in message.err
+    first = output / "example__repo-1"
+    assert BtrfsPreloadRecord.select(
+        first, load_sandbox_task(batch_package, "example__repo-1"),
+    ).base.metadata.task_id == "example__repo-1"
+    assert len(cli_runtime[1].created) == 1 and not cli_runtime[2].pools[0].discarded
+    index = json.loads((output / "preloads.json").read_text())
+    assert [entry["status"] for entry in index["tasks"]] == ["building", "pending", "pending"]
+
+
+@pytest.mark.parametrize("when, expected_builds", [("initial", 0), ("final", 3)])
+def test_batch_index_failure_at_boundaries_never_claims_success(
+    tmp_path, batch_package, cli_runtime, capsys, monkeypatch, when, expected_builds,
+):
+    write_json = preload_batch.write_json
+
+    def fail_index(path, value, **kwargs):
+        initial = all(entry["status"] == "pending" for entry in value["tasks"])
+        final = value["status"] == "completed"
+        if (when == "initial" and initial) or (when == "final" and final):
+            raise OSError("index unavailable")
+        write_json(path, value, **kwargs)
+
+    monkeypatch.setattr(preload_batch, "write_json", fail_index)
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 1
+    message = capsys.readouterr()
+    assert "OSError" in message.err and "Status: failed" in message.out
+    assert f"Completed: {expected_builds}/3" in message.out
+    assert len(cli_runtime[1].created) == expected_builds
+    if expected_builds:
+        assert all(open_preload(output / f"example__repo-{number}") for number in range(1, 4))
+        assert json.loads((output / "preloads.json").read_text())["status"] == "running"
+
+
+def test_batch_cancellation_keeps_first_base_and_stops(
+    tmp_path, batch_package, cli_runtime, capsys,
+):
+    builder = cli_runtime[1]
+    configure = builder.on_create
+
+    def cancel_second(container):
+        configure(container)
+        if len(builder.created) == 2:
+            container.start_failure = KeyboardInterrupt()
+
+    builder.on_create = cancel_second
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 130
+    message = capsys.readouterr()
+    assert "cancelled" in message.err and "Status: cancelled" in message.out
+    assert "Completed: 1/3" in message.out and "[3/3]" not in message.out
+    index = json.loads((output / "preloads.json").read_text())
+    assert index["status"] == "cancelled"
+    assert [entry["status"] for entry in index["tasks"]] == ["completed", "cancelled", "pending"]
+    assert BtrfsPreloadRecord.select(
+        output / "example__repo-1", load_sandbox_task(batch_package, "example__repo-1"),
+    ).base.metadata.task_id == "example__repo-1"
+    assert len(builder.created) == 2 and all(container.removed for container in builder.created)
+    assert not (output / "example__repo-3").exists()
+
+
+def test_batch_cancellation_during_index_update_records_completed_base(
+    tmp_path, batch_package, cli_runtime, capsys, monkeypatch,
+):
+    write_json = preload_batch.write_json
+    interrupted = False
+
+    def interrupt_after_first(path, value, **kwargs):
+        nonlocal interrupted
+        if value["tasks"][0]["status"] == "completed" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt()
+        write_json(path, value, **kwargs)
+
+    monkeypatch.setattr(preload_batch, "write_json", interrupt_after_first)
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 130
+    assert "cancelled" in capsys.readouterr().err
+    index = json.loads((output / "preloads.json").read_text())
+    assert index["status"] == "cancelled"
+    assert [entry["status"] for entry in index["tasks"]] == ["completed", "pending", "pending"]
+    assert open_preload(output / "example__repo-1").metadata.task_id == "example__repo-1"
+    assert len(cli_runtime[1].created) == 1
+
+
+def test_batch_cleanup_failure_supersedes_cancellation(tmp_path, batch_package, cli_runtime, capsys):
+    builder = cli_runtime[1]
+    configure = builder.on_create
+
+    def cancel_and_fail_cleanup(container):
+        configure(container)
+        if len(builder.created) == 2:
+            builder.remove_error = True
+            container.start_failure = KeyboardInterrupt()
+
+    builder.on_create = cancel_and_fail_cleanup
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 1
+    assert "removal unconfirmed" in capsys.readouterr().err
+    index = json.loads((output / "preloads.json").read_text())
+    assert index["status"] == "failed"
+    assert [entry["status"] for entry in index["tasks"]] == ["completed", "failed", "pending"]
+    assert open_preload(output / "example__repo-1").metadata.task_id == "example__repo-1"
+    assert len(builder.created) == 2 and not cli_runtime[2].pools[0].discarded
 
 
 def test_json_input_cannot_be_relabelled_with_task_id(tmp_path, cli_runtime, capsys):
@@ -246,6 +469,12 @@ def test_preload_help_lists_mvp_flags_without_optional_agent_or_docker_calls(cap
     message = capsys.readouterr().out
     for flag in ("--output", "--task-id", "--init", "--public-env"):
         assert flag in message
+    normalized = " ".join(message.split())
+    for text in (
+        "serially", "selects all tasks in manifest order", "repeat to preserve the specified order",
+        "subdirectories named after task IDs", "preloads.json index", "rerun remaining tasks",
+    ):
+        assert text in normalized
     assert "reload" not in message.replace("preload", "")
 
 
