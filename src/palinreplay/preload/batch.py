@@ -6,6 +6,7 @@ from pathlib import Path
 from palinreplay.preload.build import _load_source, build_preload
 from palinreplay.preload.environment import public_keys
 from palinreplay.preload.input import PreloadInput
+from palinreplay.storage.io import write_json
 from palinreplay.tasks.model import load_dataset
 
 
@@ -27,15 +28,37 @@ def select_preload_inputs(source: str | Path, task_ids: Sequence[str] = ()) -> l
     return [_load_source(source, task_id) for task_id in (task_ids or available)]
 
 
-def build_preloads(inputs, output, paths, *, initialization, public_env):
-    """Build each selected preload in order using separate single-task lifecycles."""
-    output = Path(output)
+def build_preloads(source, inputs, output, paths, *, initialization, public_env):
+    """Build each preload in order and publish a progressively updated index."""
+    output = Path(output).absolute()
+    paths = [Path(path).absolute() for path in paths]
     output.parent.mkdir(parents=True, exist_ok=True)
     output.mkdir(mode=0o700)
+    index_path = output / "preloads.json"
+    index = {
+        "source": str(Path(source).absolute()),
+        "status": "running",
+        "tasks": [
+            {"task_id": item.task_id, "status": "pending", "preload_id": None,
+             "path": str(path.relative_to(output)), "duration_sec": None}
+            for item, path in zip(inputs, paths, strict=True)
+        ],
+    }
+    write_json(index_path, index)
     results = []
-    for item, path in zip(inputs, paths, strict=True):
+    for item, path, entry in zip(inputs, paths, index["tasks"], strict=True):
+        entry["status"] = "building"
+        write_json(index_path, index, replace=True)
         keys = public_keys(item, public_env)
-        results.append(build_preload(
+        result = build_preload(
             item, path, initialization=initialization, public_env_keys=keys,
-        ))
+        )
+        entry.update(
+            status="completed", preload_id=result.preload_id,
+            path=str(result.path.relative_to(output)), duration_sec=result.duration_sec,
+        )
+        write_json(index_path, index, replace=True)
+        results.append(result)
+    index["status"] = "completed"
+    write_json(index_path, index, replace=True)
     return results

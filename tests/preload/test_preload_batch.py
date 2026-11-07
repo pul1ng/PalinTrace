@@ -109,10 +109,52 @@ def test_batch_builds_serially_with_per_input_environment(batch_package, tmp_pat
     monkeypatch.setattr(preload_batch, "public_keys", keys)
     monkeypatch.setattr(preload_batch, "build_preload", build)
     results = preload_batch.build_preloads(
-        selected, output, paths, initialization=initialization, public_env=["EXPLICIT"],
+        batch_package, selected, output, paths, initialization=initialization,
+        public_env=["EXPLICIT"],
     )
     assert output.is_dir()
     assert [event[:2] for event in events] == [
         (kind, item.task_id) for item in selected for kind in ("inspect", "start", "done")
     ]
     assert [result.path for result in results] == [path.absolute() for path in paths]
+
+
+def test_index_tracks_only_returned_results_and_relative_paths(
+    batch_package, tmp_path, monkeypatch,
+):
+    selected = select_preload_inputs(batch_package)[:2]
+    output = tmp_path / "batch"
+    paths = [output / item.task_id for item in selected]
+    snapshots = []
+    write_json = preload_batch.write_json
+
+    def record_index(path, data, **kwargs):
+        write_json(path, data, **kwargs)
+        snapshots.append(json.loads(path.read_text()))
+
+    def build(item, path, **kwargs):
+        index = json.loads((output / "preloads.json").read_text())
+        entry = next(entry for entry in index["tasks"] if entry["task_id"] == item.task_id)
+        assert entry["status"] == "building" and entry["preload_id"] is None
+        path.mkdir()
+        (path / "c0.json").write_text(item.task_id)
+        return PreloadResult("preload:" + item.task_id, path, 1.25)
+
+    monkeypatch.setattr(preload_batch, "write_json", record_index)
+    monkeypatch.setattr(preload_batch, "public_keys", lambda item, extra: ())
+    monkeypatch.setattr(preload_batch, "build_preload", build)
+    results = preload_batch.build_preloads(
+        batch_package, selected, output, paths,
+        initialization=InitializationSpec(checks=("ready",)), public_env=[],
+    )
+    assert [entry["status"] for entry in snapshots[0]["tasks"]] == ["pending", "pending"]
+    assert any([entry["status"] for entry in snapshot["tasks"]] == ["completed", "pending"]
+               for snapshot in snapshots)
+    final = json.loads((output / "preloads.json").read_text())
+    assert final["source"] == str(batch_package.absolute()) and final["status"] == "completed"
+    for entry, item, result in zip(final["tasks"], selected, results, strict=True):
+        assert entry == {
+            "task_id": item.task_id, "status": "completed", "preload_id": result.preload_id,
+            "path": item.task_id, "duration_sec": result.duration_sec,
+        }
+        assert (output / entry["path"] / "c0.json").read_text() == item.task_id
