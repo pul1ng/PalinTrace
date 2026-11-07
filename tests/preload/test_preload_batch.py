@@ -2,9 +2,12 @@ import json
 
 import pytest
 
+import palinreplay.preload.batch as preload_batch
 import palinreplay.preload.build as preload_build
 import palinreplay.preload.environment as preload_environment
 from palinreplay.preload.batch import select_preload_inputs
+from palinreplay.preload.build import PreloadResult
+from palinreplay.preload.initialization import InitializationSpec
 from palinreplay.tasks import convert_rows
 from palinreplay.tasks.images import PreparedImage, PreparedImages
 from palinreplay.tasks.model import DatasetSource, file_sha256
@@ -73,3 +76,43 @@ def test_standalone_selection_keeps_identity_rules(tmp_path, no_docker):
     source.write_text(json.dumps(inputs()))
     with pytest.raises(ValueError, match="does not match"):
         select_preload_inputs(source, ["example__repo-1"])
+
+
+def test_batch_builds_serially_with_per_input_environment(batch_package, tmp_path, monkeypatch):
+    selected = select_preload_inputs(
+        batch_package, ["example__repo-3", "example__repo-1", "example__repo-2"],
+    )
+    selected = [item.model_copy(update={"env": {f"TASK_{index}": str(index)}})
+                for index, item in enumerate(selected)]
+    output = tmp_path / "new" / "batch"
+    paths = [output / item.task_id for item in selected]
+    initialization = InitializationSpec(commands=("prepare",), checks=("ready",))
+    events = []
+
+    def keys(item, extra):
+        events.append(("inspect", item.task_id, dict(item.env), tuple(extra)))
+        return tuple(item.env) + tuple(extra)
+
+    def build(item, path, **kwargs):
+        index = len([event for event in events if event[0] == "done"])
+        assert events[-1][0] == "inspect"
+        assert item is selected[index] and path == paths[index]
+        assert kwargs == {
+            "initialization": initialization,
+            "public_env_keys": (f"TASK_{index}", "EXPLICIT"),
+        }
+        events.append(("start", item.task_id))
+        result = PreloadResult(f"preload:{item.task_id}", path.absolute(), index + 0.5)
+        events.append(("done", item.task_id))
+        return result
+
+    monkeypatch.setattr(preload_batch, "public_keys", keys)
+    monkeypatch.setattr(preload_batch, "build_preload", build)
+    results = preload_batch.build_preloads(
+        selected, output, paths, initialization=initialization, public_env=["EXPLICIT"],
+    )
+    assert output.is_dir()
+    assert [event[:2] for event in events] == [
+        (kind, item.task_id) for item in selected for kind in ("inspect", "start", "done")
+    ]
+    assert [result.path for result in results] == [path.absolute() for path in paths]
