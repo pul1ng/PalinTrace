@@ -153,7 +153,8 @@ class PayloadStore:
             return
         token = self._expanded.set({})
         try:
-            yield
+            with self.scope():
+                yield
         finally:
             self._expanded.reset(token)
 
@@ -199,6 +200,8 @@ class PayloadStore:
             ref = self.artifacts.put(data, NODE_MEDIA)
             if cache is not None:
                 cache.remember(cache.published, data, ref, len(data))
+        if cache is not None and cache.encoding_refs:
+            cache.encoding_refs[-1][(ref.sha256, ref.size, ref.media_type)] = ref
         return ref.model_dump(mode="json")
 
     def _encode(self, value, depth=0, *, encoded=None):
@@ -207,6 +210,33 @@ class PayloadStore:
             return ["value", value]
         if depth > 64:
             raise ValueError("payload exceeds the shared encoding depth")
+        cache = self._scope.get()
+        if cache is None:
+            return self._encode_value(value, depth)
+        key = (data, depth)
+        saved = cache.encodings.get(key)
+        if saved is not None:
+            token, refs = saved
+            for ref in refs:
+                self.artifacts.verify_internal(ref)
+                sync_directory(self.artifacts.root / ref.sha256[:2])
+        else:
+            dependencies = {}
+            cache.encoding_refs.append(dependencies)
+            try:
+                token = self._encode_value(value, depth)
+            finally:
+                cache.encoding_refs.pop()
+            refs = tuple(dependencies.values())
+            cache.remember(cache.encodings, key, (token, refs),
+                           2 * len(data) + 256 * len(refs))
+        if cache.encoding_refs:
+            cache.encoding_refs[-1].update(
+                ((ref.sha256, ref.size, ref.media_type), ref) for ref in refs
+            )
+        return token
+
+    def _encode_value(self, value, depth):
         if isinstance(value, list):
             if len(value) <= FANOUT:
                 items = [self._encode(item, depth + 1) for item in value]
@@ -264,6 +294,9 @@ class _Cache:
     def __init__(self):
         self.published = OrderedDict()
         self.nodes = OrderedDict()
+        self.encodings = OrderedDict()
+        self.decoded = OrderedDict()
+        self.encoding_refs = []
         self.sizes = {}
         self.size = 0
 
@@ -291,6 +324,10 @@ class _Reader:
         self.refs = {}
         self.nodes = {}
         self.values = {}
+        self.value_refs = {}
+        self.collectors = []
+        self.pending = {}
+        self.pending_size = 0
         self.key_sizes = {}
         self.maximum = None
 
@@ -305,7 +342,43 @@ class _Reader:
                 if self.cache is not None:
                     self.cache.remember(self.cache.nodes, key, self.nodes[key], ref.size)
             self.refs[key] = ref
+        self._track((ref,))
         return self.nodes[key]
+
+    def _track(self, refs):
+        if self.collectors:
+            self.collectors[-1].update(
+                ((ref.sha256, ref.size, ref.media_type), ref) for ref in refs
+            )
+
+    def _subtree(self, key, decode):
+        if self.cache is None:
+            return decode(), ()
+        saved = self.pending.get(key)
+        if saved is None and self.cache is not None:
+            saved = self.cache.decoded.get(key)
+        dependencies = {}
+        self.collectors.append(dependencies)
+        try:
+            if saved is None:
+                value, size = decode()
+            else:
+                value, size, refs = saved
+                # Loading still validates every physical dependency once in
+                # this reader, even when the reconstructed value is reused.
+                for ref in refs:
+                    self._load(ref)
+                self._bounded(size)
+        finally:
+            self.collectors.pop()
+        refs = tuple(dependencies.values())
+        self._track(refs)
+        if saved is None and self.cache is not None:
+            charge = 2 * size + 256 * len(refs)
+            if self.pending_size + charge <= _CACHE_BYTES:
+                self.pending[key] = value, size, refs
+                self.pending_size += charge
+        return (value, size), refs
 
     def _bounded(self, size):
         if size > self.maximum:
@@ -322,9 +395,16 @@ class _Reader:
             return value, self._bounded(len(json_bytes(value)) - 1)
         if kind == "ref":
             ref = _ref(token[1])
-            key = (ref.sha256, ref.size, ref.media_type)
+            # A shallow local hit must not bypass a deeper reference's limit
+            # when its enclosing subtree is later reused by another reader.
+            key = (ref.sha256, ref.size, ref.media_type, depth + 1)
             if key not in self.values:
-                self.values[key] = self._decode(self._load(ref), depth + 1)
+                self.values[key], self.value_refs[key] = self._subtree(
+                    ("ref", *key),
+                    lambda: self._decode(self._load(ref), depth + 1),
+                )
+            else:
+                self._track(self.value_refs[key])
             return self.values[key]
         if kind == "object":
             result, size = {}, 2
@@ -353,6 +433,13 @@ class _Reader:
     def _array(self, ref, height, depth):
         if depth > 256:
             raise IntegrityError("shared payload nesting exceeds the supported depth")
+        result, _ = self._subtree(
+            ("array", ref.sha256, ref.size, ref.media_type, height, depth),
+            lambda: self._array_value(ref, height, depth),
+        )
+        return result
+
+    def _array_value(self, ref, height, depth):
         node = self._load(ref)
         kind = "items" if height == 0 else "branch"
         if (not isinstance(node, list) or len(node) != 2 or node[0] != kind
@@ -385,4 +472,10 @@ class _Reader:
             raise IntegrityError("invalid shared payload expansion") from error
         if len(data) != logical.size or hashlib.sha256(data).hexdigest() != logical.sha256:
             raise IntegrityError("shared payload logical size/hash mismatch")
+        if self.cache is not None:
+            # Subtrees become reusable only after the complete root passed its
+            # original size/hash check; failed reads retain no decoded entries.
+            for key, (value, size, refs) in self.pending.items():
+                self.cache.remember(self.cache.decoded, key, (value, size, refs),
+                                    2 * size + 256 * len(refs))
         return Payload(data, logical.media_type)
