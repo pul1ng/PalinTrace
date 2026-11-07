@@ -54,6 +54,22 @@ def add_commands(commands):
     )
 
 
+def preload_output_paths(source, inputs, output=None):
+    """Plan a fresh single-preload directory or per-task batch directories."""
+    source = Path(source)
+    if output is None:
+        name = (inputs[0].task_id or source.stem) if len(inputs) == 1 else source.name
+        output = default_output("preload", name)
+    output = Path(output)
+    if output.exists() or output.is_symlink():
+        raise FileExistsError()
+    if len(inputs) == 1:
+        return output, [output]
+    if any(item.task_id == "preloads.json" for item in inputs):
+        raise RecordUsageError("task ID conflicts with the batch index name")
+    return output, [output / item.task_id for item in inputs]
+
+
 def execute(args) -> int:
     started = time.monotonic()
     phase = "input"
