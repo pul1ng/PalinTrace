@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 
 import palinreplay.cli.app as cli
+import palinreplay.preload.batch as preload_batch
 import palinreplay.preload.build as preload_build
 import palinreplay.preload.environment as preload_environment
-from palinreplay.preload.base import open_preload
+from palinreplay.preload.base import BtrfsPreloadRecord, open_preload
+from palinreplay.sandbox.binding import load_sandbox_task
 from tests.preload.test_preload import runtime as runtime
 from tests.preload.test_preload_batch import batch_package as batch_package
 from tests.preload.test_preload_environment import Client, inputs
@@ -156,6 +158,79 @@ def test_json_multiple_ids_fail_before_docker(tmp_path, cli_runtime):
     source = source_json(tmp_path, task_id="example__repo-1")
     assert run(source, output, "--task-id", "example__repo-1", "--task-id", "other") == 1
     assert not output.exists() and not cli_runtime[0].image_gets and not cli_runtime[1].created
+
+
+def test_batch_failure_preserves_success_and_stops(tmp_path, batch_package, cli_runtime, capsys):
+    builder = cli_runtime[1]
+    configure = builder.on_create
+
+    def fail_second(container):
+        configure(container)
+        if len(builder.created) == 2:
+            container.start_failure = RuntimeError("private error details")
+
+    builder.on_create = fail_second
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 1
+    message = capsys.readouterr()
+    assert "private error details" not in message.err and "Batch:" not in message.out
+    index = json.loads((output / "preloads.json").read_text())
+    assert index["status"] == "failed"
+    assert [entry["status"] for entry in index["tasks"]] == ["completed", "failed", "pending"]
+    first = output / "example__repo-1"
+    binding = load_sandbox_task(batch_package, "example__repo-1")
+    assert BtrfsPreloadRecord.select(first, binding).base.metadata.task_id == "example__repo-1"
+    assert len(builder.created) == 2 and all(container.removed for container in builder.created)
+    assert not (output / "example__repo-3").exists()
+
+
+def test_batch_index_failure_keeps_published_base_and_returns_failure(
+    tmp_path, batch_package, cli_runtime, capsys, monkeypatch,
+):
+    write_json = preload_batch.write_json
+
+    def fail_after_first(path, value, **kwargs):
+        if value["tasks"][0]["status"] == "completed":
+            raise OSError("private filesystem details")
+        write_json(path, value, **kwargs)
+
+    monkeypatch.setattr(preload_batch, "write_json", fail_after_first)
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 1
+    message = capsys.readouterr()
+    assert "private filesystem details" not in message.err and "Batch:" not in message.out
+    assert "OSError" in message.err
+    first = output / "example__repo-1"
+    assert BtrfsPreloadRecord.select(
+        first, load_sandbox_task(batch_package, "example__repo-1"),
+    ).base.metadata.task_id == "example__repo-1"
+    assert len(cli_runtime[1].created) == 1 and not cli_runtime[2].pools[0].discarded
+    index = json.loads((output / "preloads.json").read_text())
+    assert [entry["status"] for entry in index["tasks"]] == ["building", "pending", "pending"]
+
+
+@pytest.mark.parametrize("when, expected_builds", [("initial", 0), ("final", 3)])
+def test_batch_index_failure_at_boundaries_never_claims_success(
+    tmp_path, batch_package, cli_runtime, capsys, monkeypatch, when, expected_builds,
+):
+    write_json = preload_batch.write_json
+
+    def fail_index(path, value, **kwargs):
+        initial = all(entry["status"] == "pending" for entry in value["tasks"])
+        final = value["status"] == "completed"
+        if (when == "initial" and initial) or (when == "final" and final):
+            raise OSError("index unavailable")
+        write_json(path, value, **kwargs)
+
+    monkeypatch.setattr(preload_batch, "write_json", fail_index)
+    output = tmp_path / "batch"
+    assert run(batch_package, output) == 1
+    message = capsys.readouterr()
+    assert "OSError" in message.err and "Batch:" not in message.out
+    assert len(cli_runtime[1].created) == expected_builds
+    if expected_builds:
+        assert all(open_preload(output / f"example__repo-{number}") for number in range(1, 4))
+        assert json.loads((output / "preloads.json").read_text())["status"] == "running"
 
 
 def test_json_input_cannot_be_relabelled_with_task_id(tmp_path, cli_runtime, capsys):

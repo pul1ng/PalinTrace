@@ -49,10 +49,19 @@ def build_preloads(source, inputs, output, paths, *, initialization, public_env)
     for item, path, entry in zip(inputs, paths, index["tasks"], strict=True):
         entry["status"] = "building"
         write_json(index_path, index, replace=True)
-        keys = public_keys(item, public_env)
-        result = build_preload(
-            item, path, initialization=initialization, public_env_keys=keys,
-        )
+        try:
+            keys = public_keys(item, public_env)
+            result = build_preload(
+                item, path, initialization=initialization, public_env_keys=keys,
+            )
+        except Exception as error:
+            entry["status"] = "failed"
+            index["status"] = "failed"
+            try:
+                write_json(index_path, index, replace=True)
+            except Exception as index_error:
+                error.add_note(f"batch index update also failed ({type(index_error).__name__})")
+            raise
         entry.update(
             status="completed", preload_id=result.preload_id,
             path=str(result.path.relative_to(output)), duration_sec=result.duration_sec,
